@@ -6,6 +6,14 @@ import zipfile
 
 import httpx
 import openpyxl
+from agent_framework import (
+    Executor,
+    WorkflowBuilder,
+    WorkflowContext,
+    executor,
+    handler,
+)
+from typing_extensions import Never
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -34,7 +42,7 @@ def extract_excel_contents(file_bytes: bytes, max_rows: int = 200) -> str:
 
 async def convert_excel_to_pdf_collabora(
     file_bytes: bytes,
-    collabora_base_url: str = "http://localhost:9980",
+    collabora_base_url: str = "http://localhost:8080",
     timeout: int = 60,
 ) -> bytes:
     """Sends the excel file to a Collabora (CODE/LOOL) server convert endpoint and returns PDF bytes.
@@ -54,7 +62,7 @@ async def convert_excel_to_pdf_collabora(
 
 async def convert_pdf_to_png_collabora(
     pdf_bytes: bytes,
-    collabora_base_url: str = "http://localhost:9980",
+    collabora_base_url: str = "http://localhost:8080",
     timeout: int = 60,
 ) -> List[bytes]:
     """Send a PDF to Collabora convert endpoint asking for PNG(s).
@@ -99,57 +107,120 @@ async def run_excel_agent_workflow(
 
     Returns a dict containing the agent text, the extracted text, and base64 PNG previews.
     """
-    # 1) Extract textual contents
-    extracted = extract_excel_contents(excel_bytes)
+    # We'll build a small Workflow using agent_framework.WorkflowBuilder.
+    # Design:
+    #  - file_executor: receives raw excel bytes and forwards the bytes to both
+    #    extract_executor and convert_executor.
+    #  - extract_executor: extracts text and sends a dict {"extracted": text}
+    #  - convert_executor -> pdf_executor -> png_executor: produces a base64 png
+    #    and sends a dict {"png_b64": "..."}
+    #  - agent_collector: collects messages from extract and png executors; when it
+    #    has both, it calls the agent and yields a single workflow output (the agent result)
 
-    # 2) Convert using Collabora (default to localhost:8080)
-    collabora_base_url = collabora_base_url or os.getenv("COLLABORA_URL", "http://localhost:8080")
-    pdf_bytes = await convert_excel_to_pdf_collabora(excel_bytes, collabora_base_url=collabora_base_url)
+    # Simple start executor — forwards the incoming bytes to downstream nodes.
+    @executor(id="file_executor")
+    async def file_executor(data: bytes, ctx: WorkflowContext[bytes]) -> None:
+        await ctx.send_message(data)
 
-    # 3) Convert PDF to PNG(s) via Collabora
-    try:
-        png_bytes_list = await convert_pdf_to_png_collabora(pdf_bytes, collabora_base_url=collabora_base_url)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to rasterize PDF via Collabora: {exc}") from exc
+    # Extract executor — converts bytes -> extracted text and forwards a dict
+    @executor(id="extract_executor")
+    async def extract_executor(data: bytes, ctx: WorkflowContext[dict]) -> None:
+        text = extract_excel_contents(data)
+        await ctx.send_message({"extracted": text})
 
-    # 4) Prepare agent client (re-uses the pattern from existing ai/test.py)
-    api_key = os.getenv("OLLAMA_API_KEY")
-    if not api_key:
-        raise RuntimeError("OLLAMA_API_KEY required to run agent")
+    # Convert executor chain: excel bytes -> pdf -> png (base64)
+    @executor(id="convert_to_pdf_executor")
+    async def convert_to_pdf_executor(data: bytes, ctx: WorkflowContext[bytes]) -> None:
+        collabora = collabora_base_url or os.getenv("COLLABORA_URL", "http://localhost:8080")
+        pdf = await convert_excel_to_pdf_collabora(data, collabora_base_url=collabora)
+        await ctx.send_message(pdf)
 
-    base_url = os.getenv("OLLAMA_CLOUD_URL", "http://localhost:11434/v1/")
-    model_id = os.getenv("OLLAMA_MODEL_ID", "deepseek-r1:8b")
+    @executor(id="pdf_to_png_executor")
+    async def pdf_to_png_executor(pdf_bytes: bytes, ctx: WorkflowContext[dict]) -> None:
+        collabora = collabora_base_url or os.getenv("COLLABORA_URL", "http://localhost:8080")
+        pngs = await convert_pdf_to_png_collabora(pdf_bytes, collabora_base_url=collabora)
+        # Use the first page as preview and base64 encode it
+        first_b64 = base64.b64encode(pngs[0]).decode("ascii") if pngs else ""
+        await ctx.send_message({"png_b64": first_b64})
 
-    client = OpenAIChatClient(api_key=api_key, base_url=base_url, model_id=model_id)
+    # Agent-collector executor: accumulate partial inputs and call the agent
+    class AgentCollector(Executor):
+        def __init__(self, id: str):
+            super().__init__(id=id)
+            # naive in-memory buffer keyed by a single run; for demo only
+            self._buffer: Dict[str, Any] = {}
 
-    # 5) Create agent with instructions that mention both inputs
-    instructions = (
-        "You will be given two inputs:\n"
-        "1) A textual extraction of an Excel spreadsheet.\n"
-        "2) A PNG image rendering of the spreadsheet (base64).\n"
-        "Use both sources for extraction, validation, calculations, and produce a concise JSON report."
+        @handler
+        async def handle(self, message: dict, ctx: WorkflowContext[Never, dict]) -> None:
+            # Merge incoming dict into buffer
+            self._buffer.update(message)
+
+            # If we have both pieces, run the agent and yield the output
+            if "extracted" in self._buffer and "png_b64" in self._buffer:
+                extracted = self._buffer.pop("extracted")
+                png_b64 = self._buffer.pop("png_b64")
+
+                # Prepare agent client
+                api_key = os.getenv("OLLAMA_API_KEY")
+                if not api_key:
+                    raise RuntimeError("OLLAMA_API_KEY required to run agent")
+
+                base_url = os.getenv("OLLAMA_CLOUD_URL", "http://localhost:11434/v1/")
+                model_id = os.getenv("OLLAMA_MODEL_ID", "deepseek-r1:8b")
+
+                client = OpenAIChatClient(api_key=api_key, base_url=base_url, model_id=model_id)
+
+                instructions = (
+                    "You will be given two inputs:\n"
+                    "1) A textual extraction of an Excel spreadsheet.\n"
+                    "2) A PNG image rendering of the spreadsheet (base64).\n"
+                    "Use both sources for extraction, validation, calculations, and produce a concise JSON report."
+                )
+
+                agent = client.create_agent(name="excel_inspector", instructions=instructions)
+
+                full_prompt = (
+                    f"User prompt: {agent_prompt}\n\n"
+                    "---EXTRACTED_SPREADSHEET_TEXT---\n"
+                    f"{extracted}\n\n"
+                    "---PNG_BASE64_FIRST_PAGE---\n"
+                    f"{png_b64}\n"
+                    "---END---\n"
+                    "When giving results, output a JSON object with keys: summary, tables (if any), calculations (if requested)."
+                )
+
+                result = await agent.run(full_prompt)
+
+                # Yield the result as the workflow output; downstream consumers can read outputs
+                await ctx.yield_output({"agent_response": str(result), "extracted_text": extracted, "png_b64": png_b64})
+
+    agent_collector = AgentCollector(id="agent_collector")
+
+    # Build the workflow graph:
+    # file_executor -> extract_executor -> agent_collector
+    # file_executor -> convert_to_pdf_executor -> pdf_to_png_executor -> agent_collector
+    workflow = (
+        WorkflowBuilder()
+        .set_start_executor(file_executor)
+        .add_edge(file_executor, extract_executor)
+        .add_edge(file_executor, convert_to_pdf_executor)
+        .add_edge(extract_executor, agent_collector)
+        .add_edge(convert_to_pdf_executor, pdf_to_png_executor)
+        .add_edge(pdf_to_png_executor, agent_collector)
+        .build()
     )
 
-    agent = client.create_agent(name="excel_inspector", instructions=instructions)
+    # Run workflow and gather outputs
+    events = await workflow.run(excel_bytes)
 
-    # Prepare a single large prompt that includes the extracted text and the first PNG as base64
-    # (for demonstration; a production system should use a multimodal-capable client or attachments)
-    first_png_b64 = base64.b64encode(png_bytes_list[0]).decode("ascii") if png_bytes_list else ""
+    outputs = events.get_outputs() or []
+    # Return last output or empty structure
+    if outputs:
+        out = outputs[-1]
+        return {
+            "agent_response": out.get("agent_response"),
+            "extracted_text": out.get("extracted_text"),
+            "pngs_base64": [out.get("png_b64")],
+        }
 
-    full_prompt = (
-        f"User prompt: {agent_prompt}\n\n"
-        "---EXTRACTED_SPREADSHEET_TEXT---\n"
-        f"{extracted}\n\n"
-        "---PNG_BASE64_FIRST_PAGE---\n"
-        f"{first_png_b64}\n"
-        "---END---\n"
-        "When giving results, output a JSON object with keys: summary, tables (if any), calculations (if requested)."
-    )
-
-    result = await agent.run(full_prompt)
-
-    return {
-        "agent_response": str(result),
-        "extracted_text": extracted,
-        "pngs_base64": [base64.b64encode(p).decode("ascii") for p in png_bytes_list],
-    }
+    return {"agent_response": "", "extracted_text": "", "pngs_base64": []}

@@ -18,13 +18,22 @@ async def main(path: str) -> None:
 
     result = await run_excel_agent_workflow(data, collabora_base_url=collabora)
 
-    print("\n=== Agent response ===")
-    print(result.get("agent_response"))
-    print("\n=== Extracted text preview ===")
-    print((result.get("extracted_text") or "")[:200])
-    print("\n=== First PNG (base64 length) ===")
-    pngs = result.get("pngs_base64") or []
-    print(len(pngs[0]) if pngs else "(no png)")
+    if result is None:
+        print("Workflow produced no products.")
+        return
+
+    print("\n=== Products (count: {}) ===".format(len(result.products)))
+    for idx, product in enumerate(result.products, start=1):
+        print(f"[{idx}] {product.title}")
+        if product.body_html:
+            snippet = product.body_html[:120].replace("\n", " ")
+            print(
+                f"    body_html: {snippet}{'...' if len(product.body_html) > 120 else ''}"
+            )
+        if product.variants:
+            print(f"    variants: {len(product.variants)}")
+        if product.images:
+            print(f"    images: {len(product.images)}")
 
 
 if __name__ == "__main__":

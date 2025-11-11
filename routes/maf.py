@@ -43,8 +43,4 @@ async def microsoft_agent_excel(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
 
-    return {
-        "agent_response": result.get("agent_response"),
-        "extracted_text": result.get("extracted_text"),
-        "pngs_base64_preview": (result.get("pngs_base64") or [])[:1],
-    }
+    return {"result": result}

@@ -1,6 +1,6 @@
 from typing import Dict, Any, Optional
 
-from agent_framework import Executor, WorkflowContext, handler
+from agent_framework import AgentRunResponse, Executor, WorkflowContext, handler
 from typing_extensions import Never
 
 from .agent_client import run_agent_on_inputs
@@ -16,23 +16,39 @@ class AgentCollector(Executor):
     """
 
     def __init__(
-        self, id: str, agent_prompt: str, model_env: Optional[Dict[str, str]] = None
+        self,
+        id: str,
+        agent_prompt: str,
+        model_env: Optional[Dict[str, str]] = None,
+        *,
+        allow_without_image: bool = True,
     ):
         super().__init__(id=id)
         # naive in-memory buffer keyed by a single run; for demo only
         self._buffer: Dict[str, Any] = {}
         self._agent_prompt = agent_prompt
         self._model_env = model_env
+        # If True, run the agent when only extracted text is available
+        # (useful for CSV inputs which have no image/png).
+        self._allow_without_image = allow_without_image
 
     @handler
-    async def handle(self, message: dict, ctx: WorkflowContext[Never, dict]) -> None:
+    async def handle(
+        self, message: dict, ctx: WorkflowContext[AgentRunResponse, Never]
+    ) -> None:
         # Merge incoming dict into buffer
         self._buffer.update(message)
 
-        # If we have both pieces, run the agent and yield the output
-        if "extracted" in self._buffer and "png_b64" in self._buffer:
+        # Decide whether we have enough to run the agent. We run when:
+        #  - both 'extracted' and 'png_b64' are present, OR
+        #  - 'extracted' is present and allow_without_image is True
+        has_extracted = "extracted" in self._buffer
+        has_png = "png_b64" in self._buffer
+        print(f"Has png: {has_png}, has extracted: {has_extracted}")
+
+        if has_extracted and (has_png or self._allow_without_image):
             extracted = self._buffer.pop("extracted")
-            png_b64 = self._buffer.pop("png_b64")
+            png_b64 = self._buffer.pop("png_b64") if has_png else ""
 
             # Delegate to helper which encapsulates the client/agent creation
             result = await run_agent_on_inputs(
@@ -42,11 +58,9 @@ class AgentCollector(Executor):
                 model_env=self._model_env,
             )
 
-            # Yield the result as the workflow output; downstream consumers can read outputs
-            await ctx.yield_output(
-                {
-                    "agent_response": str(result),
-                    "extracted_text": extracted,
-                    "png_b64": png_b64,
-                }
-            )
+            # Forward the agent response to downstream executors so they can
+            # parse the structured output (e.g., into a ProductsList).
+            await ctx.send_message(result)
+
+            # Reset buffer so a new run starts cleanly.
+            self._buffer.clear()

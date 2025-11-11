@@ -9,10 +9,39 @@ async def test_shopify_client_crud():
     client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
     url = client.url
 
-    create_resp = {"data": {"productCreate": {"product": {"id": "gid://shopify/Product/1", "title": "T", "handle": "h"}, "userErrors": []}}}
+    create_resp = {
+        "data": {
+            "productCreate": {
+                "product": {
+                    "id": "gid://shopify/Product/1",
+                    "title": "T",
+                    "handle": "h",
+                },
+                "userErrors": [],
+            }
+        }
+    }
     get_resp = {"data": {"node": {"id": "gid://shopify/Product/1", "title": "T"}}}
-    update_resp = {"data": {"productUpdate": {"product": {"id": "gid://shopify/Product/1", "title": "T updated", "handle": "h"}, "userErrors": []}}}
-    delete_resp = {"data": {"productDelete": {"deletedProductId": "gid://shopify/Product/1", "userErrors": []}}}
+    update_resp = {
+        "data": {
+            "productUpdate": {
+                "product": {
+                    "id": "gid://shopify/Product/1",
+                    "title": "T updated",
+                    "handle": "h",
+                },
+                "userErrors": [],
+            }
+        }
+    }
+    delete_resp = {
+        "data": {
+            "productDelete": {
+                "deletedProductId": "gid://shopify/Product/1",
+                "userErrors": [],
+            }
+        }
+    }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
         mock.post("/admin/api/2024-10/graphql.json").respond(200, json=create_resp)

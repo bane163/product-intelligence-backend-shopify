@@ -7,7 +7,9 @@ router = APIRouter(prefix="/microsoft", tags=["microsoft"])
 
 
 @router.get("/agent/weather", summary="Run simple weather agent")
-async def microsoft_agent_weather(location: str = Query("Seattle", description="Location to query")):
+async def microsoft_agent_weather(
+    location: str = Query("Seattle", description="Location to query")
+):
     """Run the sample weather agent (non-streaming) and return the result.
 
     This endpoint is intended for quick local testing. It uses environment
@@ -33,7 +35,9 @@ async def microsoft_agent_excel(
     """
     try:
         file_bytes = await file.read()
-        result = await run_excel_agent_workflow(file_bytes, collabora_base_url=collabora_url, agent_prompt=prompt)
+        result = await run_excel_agent_workflow(
+            file_bytes, collabora_base_url=collabora_url, agent_prompt=prompt
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:

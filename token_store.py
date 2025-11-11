@@ -3,7 +3,9 @@ import os
 from typing import Optional
 
 
-_TOKEN_FILE = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "shopify_tokens.json"))
+_TOKEN_FILE = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "shopify_tokens.json")
+)
 
 
 def _read_tokens() -> dict:

@@ -12,7 +12,18 @@ from main import app
 
 @pytest.mark.asyncio
 async def test_create_product_endpoint():
-    create_resp = {"data": {"productCreate": {"product": {"id": "gid://shopify/Product/1", "title": "T", "handle": "h"}, "userErrors": []}}}
+    create_resp = {
+        "data": {
+            "productCreate": {
+                "product": {
+                    "id": "gid://shopify/Product/1",
+                    "title": "T",
+                    "handle": "h",
+                },
+                "userErrors": [],
+            }
+        }
+    }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
         mock.post("/admin/api/2024-10/graphql.json").respond(200, json=create_resp)

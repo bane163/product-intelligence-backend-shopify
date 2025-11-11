@@ -6,6 +6,7 @@ import httpx
 
 import token_store
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # Path to this module; graphql files are stored in the `graphql/` sibling folder
@@ -13,15 +14,15 @@ ROOT = pathlib.Path(__file__).parent
 
 
 def _load_graphql(name: str) -> str:
-  """Load a .graphql file from the graphql/ subfolder next to this module.
+    """Load a .graphql file from the graphql/ subfolder next to this module.
 
-  Raises RuntimeError if the file doesn't exist so callers get a clear error.
-  """
-  path = ROOT / "graphql" / name
-  try:
-    return path.read_text()
-  except FileNotFoundError:
-    raise RuntimeError(f"GraphQL file not found: {path}")
+    Raises RuntimeError if the file doesn't exist so callers get a clear error.
+    """
+    path = ROOT / "graphql" / name
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        raise RuntimeError(f"GraphQL file not found: {path}")
 
 
 class ShopifyClient:
@@ -45,9 +46,15 @@ class ShopifyClient:
         # available. Keep it None for now.
         self._client: Optional[httpx.AsyncClient] = None
         # Build URL lazily when shop known; store template now if shop present
-        self.url = f"http://{self.shop}/graphiql/graphql.json?key=&api_version=2025-10" if self.shop else None
+        self.url = (
+            f"http://{self.shop}/graphiql/graphql.json?key=&api_version=2025-10"
+            if self.shop
+            else None
+        )
 
-    async def graphql(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def graphql(
+        self, query: str, variables: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         # Ensure the underlying http client exists and we have a token/shop
         await self._ensure_client()
         payload = {"query": query, "variables": variables or {}}
@@ -72,10 +79,14 @@ class ShopifyClient:
         if not self.shop:
             self.shop = os.getenv("SHOPIFY_STORE")
             if self.shop:
-                self.url = f"http://{self.shop}/graphiql/graphql.json?key=&api_version=2025-10"
+                self.url = (
+                    f"http://{self.shop}/graphiql/graphql.json?key=&api_version=2025-10"
+                )
 
         if not self.shop:
-            raise RuntimeError("SHOPIFY_STORE must be set (either pass `shop=` or set SHOPIFY_STORE env)")
+            raise RuntimeError(
+                "SHOPIFY_STORE must be set (either pass `shop=` or set SHOPIFY_STORE env)"
+            )
 
         # Resolve token: explicit, env, or token_store
         if not self._token:
@@ -139,7 +150,9 @@ class ShopifyClient:
         query = _load_graphql("productQuery.graphql")
         return await self.graphql(query, {"id": gid})
 
-    async def update_product(self, gid: str, title: Optional[str] = None, body_html: Optional[str] = None) -> Dict[str, Any]:
+    async def update_product(
+        self, gid: str, title: Optional[str] = None, body_html: Optional[str] = None
+    ) -> Dict[str, Any]:
         mutation = _load_graphql("productUpdate.graphql")
         input_payload: Dict[str, Any] = {"id": gid}
         if title is not None:

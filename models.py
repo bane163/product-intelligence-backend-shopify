@@ -12,4 +12,5 @@ class ProductUpdate(BaseModel):
     title: Optional[str] = None
     body_html: Optional[str] = None
 
+
 __all__ = ["ProductCreate", "ProductUpdate"]

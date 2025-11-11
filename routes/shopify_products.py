@@ -12,7 +12,9 @@ client = ShopifyClient()
 
 @router.post("/", summary="Create product")
 async def create_product(payload: ProductCreate):
-    resp = await client.create_product(payload.title, payload.body_html or "", payload.vendor)
+    resp = await client.create_product(
+        payload.title, payload.body_html or "", payload.vendor
+    )
     errors = resp.get("data", {}).get("productCreate", {}).get("userErrors")
     if errors:
         raise HTTPException(status_code=400, detail=resp)

@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 import token_store
 from dotenv import load_dotenv
+
 load_dotenv()
 
 router = APIRouter(prefix="/shopify/auth", tags=["shopify_auth"])
@@ -20,14 +21,20 @@ def _get_client_credentials() -> tuple[str, str]:
     import os
 
     client_id = os.getenv("SHOPIFY_API_KEY") or os.getenv("SHOPIFY_CLIENT_ID")
-    client_secret = os.getenv("SHOPIFY_API_SECRET") or os.getenv("SHOPIFY_CLIENT_SECRET")
+    client_secret = os.getenv("SHOPIFY_API_SECRET") or os.getenv(
+        "SHOPIFY_CLIENT_SECRET"
+    )
     if not client_id or not client_secret:
-        raise RuntimeError("SHOPIFY_API_KEY and SHOPIFY_API_SECRET must be set in environment")
+        raise RuntimeError(
+            "SHOPIFY_API_KEY and SHOPIFY_API_SECRET must be set in environment"
+        )
     return client_id, client_secret
 
 
 @router.get("/install")
-async def install(shop: str, request: Request, scope: Optional[str] = "write_products,read_products"):
+async def install(
+    shop: str, request: Request, scope: Optional[str] = "write_products,read_products"
+):
     """Generate a Shopify install (authorize) URL for the given shop and return it as a redirect target.
 
     Example: GET /shopify/auth/install?shop=example.myshopify.com
@@ -52,9 +59,13 @@ async def install(shop: str, request: Request, scope: Optional[str] = "write_pro
 
 def _verify_hmac(params: Dict[str, str], client_secret: str) -> bool:
     # Remove hmac param then build message per Shopify docs
-    params_to_sign = {k: v for k, v in params.items() if k != "hmac" and k != "signature"}
+    params_to_sign = {
+        k: v for k, v in params.items() if k != "hmac" and k != "signature"
+    }
     message = "&".join(f"{k}={params_to_sign[k]}" for k in sorted(params_to_sign))
-    digest = _hmac.new(client_secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+    digest = _hmac.new(
+        client_secret.encode(), message.encode(), hashlib.sha256
+    ).hexdigest()
     return _hmac.compare_digest(digest, params.get("hmac", ""))
 
 
@@ -67,7 +78,9 @@ async def callback(request: Request):
     state = params.get("state")
 
     if not shop or not code or not state:
-        raise HTTPException(status_code=400, detail="Missing required parameters: shop, code, or state")
+        raise HTTPException(
+            status_code=400, detail="Missing required parameters: shop, code, or state"
+        )
 
     expected_shop = _state_store.get(state)
     if expected_shop != shop:
@@ -87,12 +100,22 @@ async def callback(request: Request):
     try:
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=400, detail={"message": "Token exchange failed", "detail": str(exc), "response_text": resp.text})
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Token exchange failed",
+                "detail": str(exc),
+                "response_text": resp.text,
+            },
+        )
 
     data = resp.json()
     access_token = data.get("access_token")
     if not access_token:
-        raise HTTPException(status_code=400, detail={"message": "No access_token in response", "response": data})
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "No access_token in response", "response": data},
+        )
 
     # Persist token in the simple JSON token store
     token_store.save_token(shop, access_token)
@@ -103,4 +126,8 @@ async def callback(request: Request):
     except KeyError:
         pass
 
-    return {"shop": shop, "access_token": access_token, "note": "Token saved to token store. Use ShopifyClient(shop=...) to load it."}
+    return {
+        "shop": shop,
+        "access_token": access_token,
+        "note": "Token saved to token store. Use ShopifyClient(shop=...) to load it.",
+    }

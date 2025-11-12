@@ -27,16 +27,26 @@ async def microsoft_agent_excel(
     file: UploadFile = File(...),
     prompt: str = Form("Please analyze the spreadsheet and image."),
     collabora_url: str | None = Form(None),
+    write_to_file: bool = Form(False),
+    output_path: str | None = Form(None),
+    writer_prompt: str | None = Form(None),
 ):
     """Accept an uploaded Excel (.xlsx) file, run the conversion + rasterization workflow,
     and invoke an agent with both the extracted text and a PNG rendering.
 
     Returns agent text plus a base64-encoded PNG preview and the extracted text.
+    Set `write_to_file=true` to generate an Excel workbook instead of returning
+    the parsed ProductsList.
     """
     try:
         file_bytes = await file.read()
         result = await run_excel_agent_workflow(
-            file_bytes, collabora_base_url=collabora_url, agent_prompt=prompt
+            file_bytes,
+            collabora_base_url=collabora_url,
+            agent_prompt=prompt,
+            write_to_file=write_to_file,
+            output_path=output_path,
+            writer_agent_prompt=writer_prompt,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))

@@ -1,5 +1,4 @@
 import os
-import base64
 from typing import Dict, Optional
 
 from agent_framework import (
@@ -19,7 +18,7 @@ from .collabora_utils import (
     convert_excel_to_pdf_collabora,
     convert_pdf_to_png_collabora,
 )
-from .agent_client import run_agent_on_inputs
+from .agent_client import run_agent_on_inputs, run_excel_writer_agent
 from .agent_collector import AgentCollector
 from .models import ProductsList
 
@@ -29,6 +28,10 @@ def get_agent_workflow(
     collabora_base_url: Optional[str] = None,
     agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
     model_env: Optional[Dict[str, str]] = None,
+    *,
+    write_to_file: bool = False,
+    output_path: Optional[str] = None,
+    writer_agent_prompt: Optional[str] = None,
 ) -> Workflow:
     """Build and return a Workflow for the provided excel/csv bytes.
 
@@ -81,10 +84,10 @@ def get_agent_workflow(
 
         await ctx.send_message({"png_bytes": pngs})
 
-    # Handler to validate agent response into ProductsList and yield as final output
+    # Handler to validate agent response into ProductsList and either yield or forward downstream
     @executor(id="handle_products_response")
     async def handle_products_response(
-        response: AgentRunResponse, ctx: WorkflowContext[Never, ProductsList]
+        response: AgentRunResponse, ctx: WorkflowContext[ProductsList, ProductsList]
     ) -> None:
         """Parse the agent response into a ProductsList and yield it."""
 
@@ -97,7 +100,37 @@ def get_agent_workflow(
 
         print(f"The products list contains: {products_list}")
 
-        await ctx.yield_output(products_list)
+        if write_to_file:
+            await ctx.send_message(products_list)
+        else:
+            await ctx.yield_output(products_list)
+
+    excel_output_path: Optional[str] = None
+    writer_prompt = (
+        writer_agent_prompt
+        or "Use the available tool to write the provided products to an Excel workbook and confirm the saved path."
+    )
+
+    if write_to_file:
+        excel_output_path = os.path.abspath(
+            output_path
+            if output_path is not None
+            else os.path.join(os.getcwd(), "agent_products.xlsx")
+        )
+
+        @executor(id="excel_writer_executor")
+        async def excel_writer_executor(
+            products_list: ProductsList, ctx: WorkflowContext[Never, str]
+        ) -> None:
+            response = await run_excel_writer_agent(
+                products_list,
+                output_path=excel_output_path,
+                agent_prompt=writer_prompt,
+                model_env=model_env,
+            )
+            response_text = response.text or f"Workbook saved to {excel_output_path}"
+            print(f"Excel writer agent response: {response_text}")
+            await ctx.yield_output(excel_output_path)
 
     # Agent-collector executor: accumulate partial inputs and call the agent
     # The implementation lives in `ai.agent_collector.AgentCollector` and is
@@ -126,6 +159,9 @@ def get_agent_workflow(
     # validate JSON into ProductsList and yield the final workflow output.
     builder.add_edge(agent_collector, handle_products_response)
 
+    if write_to_file and excel_output_path is not None:
+        builder.add_edge(handle_products_response, excel_writer_executor)
+
     workflow = builder.build()
 
     return workflow
@@ -136,17 +172,25 @@ async def run_excel_agent_workflow(
     collabora_base_url: Optional[str] = None,
     agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
     model_env: Optional[Dict[str, str]] = None,
-) -> ProductsList | None:
-    """Run the workflow built for the given bytes and return the ProductsList
+    *,
+    write_to_file: bool = False,
+    output_path: Optional[str] = None,
+    writer_agent_prompt: Optional[str] = None,
+) -> ProductsList | str | None:
+    """Run the workflow built for the given bytes and return the ProductsList or workbook path.
 
     This function builds the workflow via `get_agent_workflow`, runs it, and
-    returns the first ProductsList output or None if nothing was produced.
+    returns either the first ProductsList output, the path to a generated workbook
+    (when `write_to_file=True`), or None if nothing was produced.
     """
     workflow = get_agent_workflow(
         excel_bytes,
         collabora_base_url=collabora_base_url,
         agent_prompt=agent_prompt,
         model_env=model_env,
+        write_to_file=write_to_file,
+        output_path=output_path,
+        writer_agent_prompt=writer_agent_prompt,
     )
 
     events = await workflow.run(excel_bytes)

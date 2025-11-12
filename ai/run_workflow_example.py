@@ -1,3 +1,4 @@
+import argparse
 import asyncio
 import os
 import sys
@@ -5,8 +6,22 @@ import sys
 from .excel_workflow import get_agent_workflow, run_excel_agent_workflow
 
 
-def main(path: str) -> None:
+def main(
+    path: str, write_to_file: bool = False, output_path: str | None = None
+) -> None:
+    """Run the example workflow.
+
+    Args:
+        path: Path to an Excel or CSV file on disk.
+        write_to_file: If True, run the workflow end-to-end and write the
+            produced Excel workbook to disk via the writer agent (if the
+            agent produces one). Otherwise start the dev UI for interactive
+            inspection.
+        output_path: Optional path for the produced workbook when
+            write_to_file=True.
+    """
     if not os.path.exists(path):
+        print("this is a test")
         print(f"File not found: {path}")
         return
 
@@ -16,7 +31,12 @@ def main(path: str) -> None:
     collabora = os.getenv("COLLABORA_URL", "http://localhost:9980")
     print(f"Using Collabora: {collabora}")
 
-    workflow = get_agent_workflow(data, collabora_base_url=collabora)
+    workflow = get_agent_workflow(
+        data,
+        collabora_base_url=collabora,
+        write_to_file=write_to_file,
+        output_path=output_path,
+    )
     from agent_framework.devui import serve
 
     if workflow:
@@ -24,7 +44,22 @@ def main(path: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python run_workflow_example.py path/to/file.xlsx")
-        raise SystemExit(2)
-    main(sys.argv[1])
+    parser = argparse.ArgumentParser(
+        description="Run the excel -> collabora -> agent workflow (dev UI by default)."
+    )
+    parser.add_argument("path", help="Path to an Excel (.xlsx) or CSV file")
+    parser.add_argument(
+        "--write-to-file",
+        action="store_true",
+        help="Run the workflow end-to-end and write an output workbook to disk (if agent produces one)",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        dest="output",
+        help="Optional output path for the produced workbook when --write-to-file is used",
+    )
+
+    args = parser.parse_args()
+
+    main(args.path, write_to_file=args.write_to_file, output_path=args.output)

@@ -7,7 +7,7 @@ from agent_framework.openai import OpenAIChatClient
 
 # Use the ProductsList model as a structured response format so the agent
 # returns a JSON object with a 'products' array matching ProductInput.
-from models import ProductsList
+from .models import ProductsList
 
 
 async def run_agent_on_inputs(
@@ -25,7 +25,7 @@ async def run_agent_on_inputs(
     if not api_key:
         raise RuntimeError("OLLAMA_API_KEY required to run agent")
 
-    base_url = os.getenv("OLLAMA_CLOUD_URL", "http://localhost:11434/v1/")
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1/")
     model_id = os.getenv("OLLAMA_MODEL_ID", "deepseek-r1:8b")
 
     client = OpenAIChatClient(api_key=api_key, base_url=base_url, model_id=model_id)

@@ -2,7 +2,13 @@ import os
 import base64
 from typing import Dict, Optional
 
-from agent_framework import AgentRunResponse, WorkflowBuilder, WorkflowContext, executor
+from agent_framework import (
+    AgentRunResponse,
+    Workflow,
+    WorkflowBuilder,
+    WorkflowContext,
+    executor,
+)
 from typing_extensions import Never
 from dotenv import load_dotenv
 
@@ -15,29 +21,21 @@ from .collabora_utils import (
 )
 from .agent_client import run_agent_on_inputs
 from .agent_collector import AgentCollector
-from models import ProductsList
+from .models import ProductsList
 
 
-async def run_excel_agent_workflow(
+def get_agent_workflow(
     excel_bytes: bytes,
     collabora_base_url: Optional[str] = None,
     agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
     model_env: Optional[Dict[str, str]] = None,
-) -> ProductsList | None:
-    """End-to-end workflow: extract, convert, rasterize, and call agent with both inputs.
+) -> Workflow:
+    """Build and return a Workflow for the provided excel/csv bytes.
 
-    Returns the ProductsList emitted by the agent (or None if the workflow produced no output).
+    This function only constructs the workflow graph and returns it. It does
+    not run the workflow. Use `run_excel_agent_workflow` to run it and obtain
+    results.
     """
-    # We'll build a small Workflow using agent_framework.WorkflowBuilder.
-    # Design:
-    #  - file_executor: receives raw excel bytes and forwards the bytes to both
-    #    extract_executor and convert_executor.
-    #  - extract_executor: extracts text and sends a dict {"extracted": text}
-    #  - convert_executor -> pdf_executor -> png_executor: produces a base64 png
-    #    and sends a dict {"png_bytes": "..."}
-    #  - agent_collector: collects messages from extract and png executors; when it
-    #    has both, it calls the agent and forwards the AgentRunResponse downstream
-
     # Determine file type upfront: treat OOXML (xlsx) as Excel (zip PK header),
     # otherwise assume CSV. This lets us build a different workflow for CSV
     # files (no Collabora conversion / png generation).
@@ -130,11 +128,30 @@ async def run_excel_agent_workflow(
 
     workflow = builder.build()
 
-    # Run workflow and gather outputs
+    return workflow
+
+
+async def run_excel_agent_workflow(
+    excel_bytes: bytes,
+    collabora_base_url: Optional[str] = None,
+    agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
+    model_env: Optional[Dict[str, str]] = None,
+) -> ProductsList | None:
+    """Run the workflow built for the given bytes and return the ProductsList
+
+    This function builds the workflow via `get_agent_workflow`, runs it, and
+    returns the first ProductsList output or None if nothing was produced.
+    """
+    workflow = get_agent_workflow(
+        excel_bytes,
+        collabora_base_url=collabora_base_url,
+        agent_prompt=agent_prompt,
+        model_env=model_env,
+    )
+
     events = await workflow.run(excel_bytes)
 
     outputs = events.get_outputs() or []
-    # Return last output or empty structure
     if outputs:
         return outputs[0]
 

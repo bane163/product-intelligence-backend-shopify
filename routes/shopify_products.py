@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from models import ProductCreate, ProductUpdate
+from ai.models import ProductCreate, ProductUpdate
 from shopify import ShopifyClient
 
 

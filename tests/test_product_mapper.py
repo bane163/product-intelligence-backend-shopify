@@ -1,6 +1,6 @@
 import pytest
 
-from shopify_supabase_backend.models import ProductsList, ProductInput, ProductOption
+from shopify_supabase_backend.ai.models import ProductsList, ProductInput, ProductOption
 from shopify_supabase_backend.ai.product_mapper import (
     productinput_to_create_args,
     create_products_from_productslist,

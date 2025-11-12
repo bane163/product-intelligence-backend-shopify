@@ -7,7 +7,7 @@ from .agent_client import run_agent_on_inputs
 
 
 class AgentCollector(Executor):
-    """Executor that accumulates partial inputs (extracted text and png_b64)
+    """Executor that accumulates partial inputs (extracted text and png_bytes)
     and calls an agent once both are present.
 
     This class is extracted from `excel_workflow` so it can be unit-tested and
@@ -40,20 +40,22 @@ class AgentCollector(Executor):
         self._buffer.update(message)
 
         # Decide whether we have enough to run the agent. We run when:
-        #  - both 'extracted' and 'png_b64' are present, OR
+        #  - both 'extracted' and 'png_bytes' are present, OR
         #  - 'extracted' is present and allow_without_image is True
         has_extracted = "extracted" in self._buffer
-        has_png = "png_b64" in self._buffer
+        has_png = "png_bytes" in self._buffer
         print(f"Has png: {has_png}, has extracted: {has_extracted}")
 
         if has_extracted and (has_png or self._allow_without_image):
             extracted = self._buffer.pop("extracted")
-            png_b64 = self._buffer.pop("png_b64") if has_png else ""
+            png_bytes: list[bytes] | None = (
+                self._buffer.pop("png_bytes") if has_png else None
+            )
 
             # Delegate to helper which encapsulates the client/agent creation
             result = await run_agent_on_inputs(
                 extracted,
-                png_b64,
+                png_bytes,
                 agent_prompt=self._agent_prompt,
                 model_env=self._model_env,
             )

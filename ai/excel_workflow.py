@@ -34,7 +34,7 @@ async def run_excel_agent_workflow(
     #    extract_executor and convert_executor.
     #  - extract_executor: extracts text and sends a dict {"extracted": text}
     #  - convert_executor -> pdf_executor -> png_executor: produces a base64 png
-    #    and sends a dict {"png_b64": "..."}
+    #    and sends a dict {"png_bytes": "..."}
     #  - agent_collector: collects messages from extract and png executors; when it
     #    has both, it calls the agent and forwards the AgentRunResponse downstream
 
@@ -56,9 +56,9 @@ async def run_excel_agent_workflow(
         if is_csv:
             print("Extracting CSV contents")
             text = extract_csv_contents(data)
-            # For CSVs we won't produce a png; include an empty png_b64 so
+            # For CSVs we won't produce a png; include an empty png_bytes so
             # AgentCollector can run without waiting for image input.
-            await ctx.send_message({"extracted": text, "png_b64": ""})
+            await ctx.send_message({"extracted": text, "png_bytes": None})
         else:
             text = extract_excel_contents(data)
             await ctx.send_message({"extracted": text})
@@ -80,9 +80,8 @@ async def run_excel_agent_workflow(
         pngs = await convert_pdf_to_png_collabora(
             pdf_bytes, collabora_base_url=collabora
         )
-        # Use the first page as preview and base64 encode it
-        first_b64 = base64.b64encode(pngs[0]).decode("ascii") if pngs else ""
-        await ctx.send_message({"png_b64": first_b64})
+
+        await ctx.send_message({"png_bytes": pngs})
 
     # Handler to validate agent response into ProductsList and yield as final output
     @executor(id="handle_products_response")

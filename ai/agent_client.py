@@ -1,7 +1,8 @@
+import base64
 import os
 from typing import Dict
 
-from agent_framework import AgentRunResponse
+from agent_framework import AgentRunResponse, ChatMessage, TextContent, DataContent
 from agent_framework.openai import OpenAIChatClient
 
 # Use the ProductsList model as a structured response format so the agent
@@ -11,7 +12,7 @@ from models import ProductsList
 
 async def run_agent_on_inputs(
     extracted_text: str,
-    png_b64: str,
+    png_bytes: list[bytes] | None,
     agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
     model_env: Dict[str, str] | None = None,
 ) -> AgentRunResponse:
@@ -42,6 +43,15 @@ async def run_agent_on_inputs(
         "Only output the JSON object (no additional commentary)."
     )
 
+    full_prompt = (
+        f"User prompt: {agent_prompt}\n\n"
+        "---EXTRACTED_SPREADSHEET_TEXT---\n"
+        f"{extracted_text}\n\n"
+        "---END---\n"
+        'Return only JSON that matches the ProductsList schema: {"products": [ ... ]}.'
+        "Do not include any extra keys, commentary, or markdown. Output only valid JSON."
+    )
+
     # Request the model to return a structured ProductsList JSON payload.
     agent = client.create_agent(
         name="excel_inspector",
@@ -49,17 +59,48 @@ async def run_agent_on_inputs(
         response_format=ProductsList,
     )
 
-    full_prompt = (
-        f"User prompt: {agent_prompt}\n\n"
-        "---EXTRACTED_SPREADSHEET_TEXT---\n"
-        f"{extracted_text}\n\n"
-        "---PNG_BASE64_FIRST_PAGE---\n"
-        f"{png_b64}\n"
-        "---END---\n"
-        'Return only JSON that matches the ProductsList schema: {"products": [ ... ]}.'
-        "Do not include any extra keys, commentary, or markdown. Output only valid JSON."
+    data_content_list: list[DataContent] = []
+
+    png_b64s: list[TextContent] = (
+        [
+            TextContent(
+                text=f"---EXTRACTED_PNG_BASE64---\n{base64.b64encode(png).decode('ascii')}\n---END---\n"
+            )
+            for png in png_bytes
+        ]
+        if png_bytes
+        else []
+    )
+
+    # data_content_list: list[DataContent] = (
+    #     [DataContent(media_type="image/png", data=png) for png in png_bytes]
+    #     if png_bytes
+    #     else []
+    # )
+
+    # data_content_list: list[DataContent] = (
+    #     [
+    #         DataContent(
+    #             uri=f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
+    #         )
+    #         for png in png_bytes
+    #     ]
+    #     if png_bytes
+    #     else []
+    # )
+
+    contents: list[DataContent | TextContent] = [TextContent(text=full_prompt)]
+
+    if data_content_list:
+        contents.extend(data_content_list)
+    if png_b64s:
+        contents.extend(png_b64s)
+
+    user_message = ChatMessage(
+        role="user",
+        contents=contents,
     )
 
     # agent.run returns an AgentRunResponse; when structured parsing succeeds,
     # response.value contains the ProductsList instance we requested.
-    return await agent.run(full_prompt)
+    return await agent.run(user_message)

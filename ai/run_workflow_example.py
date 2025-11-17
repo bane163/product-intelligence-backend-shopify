@@ -1,9 +1,11 @@
 import argparse
-import asyncio
 import os
-import sys
+from agent_framework.observability import setup_observability
+from agent_framework import get_logger
 
-from .excel_workflow import get_agent_workflow, run_excel_agent_workflow
+from .excel_workflow import get_agent_workflow
+
+logger = get_logger()
 
 
 def main(
@@ -20,6 +22,8 @@ def main(
         output_path: Optional path for the produced workbook when
             write_to_file=True.
     """
+    setup_observability()
+
     if not os.path.exists(path):
         print("this is a test")
         print(f"File not found: {path}")

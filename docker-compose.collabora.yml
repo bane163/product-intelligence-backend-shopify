@@ -1,0 +1,7 @@
+version: '3.8'
+
+# Deprecated: this file is retained for compatibility.
+# Use docker-compose.stack.yml for the unified stack:
+#   docker compose -f docker-compose.stack.yml up --build
+
+services: {}

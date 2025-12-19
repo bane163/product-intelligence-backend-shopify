@@ -26,42 +26,6 @@ services:
       retries: 3
       start_period: 60s
 
-  wopi-server:
-    build:
-      context: ./collabora-setup
-      dockerfile: Dockerfile
-    container_name: collabora-wopi
-    restart: unless-stopped
-    environment:
-      - PYTHONUNBUFFERED=1
-      - FILE_STORAGE_PATH=/app/storage
-    command: [ "uv", "run", "uvicorn", "collabora_wopi_server.app:app", "--host", "0.0.0.0", "--port", "8000" ]
-    volumes:
-      - ./collabora-setup/storage:/app/storage
-    expose:
-      - "8000"
-    networks:
-      - wopi-net
-
-  nginx:
-    image: nginx:alpine
-    container_name: collabora-nginx
-    restart: unless-stopped
-    ports:
-      - "8080:80"
-      - "8443:443"
-    volumes:
-      - ./collabora-setup/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./collabora-setup/ssl:/etc/nginx/ssl:ro
-    depends_on:
-      collabora:
-        condition: service_healthy
-      wopi-server:
-        condition: service_started
-    networks:
-      - collabora-net
-      - wopi-net
-
   shopify-backend:
     build:
       context: .
@@ -80,19 +44,12 @@ services:
     depends_on:
       collabora:
         condition: service_healthy
-      wopi-server:
-        condition: service_started
-      nginx:
-        condition: service_started
     command: [ "uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     networks:
-      - wopi-net
       - collabora-net
 
 networks:
   collabora-net:
-    driver: bridge
-  wopi-net:
     driver: bridge
 
 volumes:

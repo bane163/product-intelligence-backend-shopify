@@ -4,12 +4,13 @@ services:
     container_name: collabora-online
     restart: unless-stopped
     environment:
-      - domain=${WOPI_DOMAIN:-localhost}
+      - domain=.*
       - username=${ADMIN_USERNAME:-admin}
       - password=${ADMIN_PASSWORD:-admin}
-      - server_name=${COLLABORA_SERVER_NAME:-collabora.localhost}
       - dictionaries=en_US
-      - extra_params=--o:ssl.enable=false --o:ssl.termination=true
+      # Allow framing from any origin (needed for cloudflared tunnels)
+      # Don't set server_name so Collabora uses the Host header from requests
+      - extra_params=--o:ssl.enable=false --o:ssl.termination=true --o:net.frame_ancestors=*
     cap_add:
       - MKNOD
     ports:
@@ -19,7 +20,7 @@ services:
     volumes:
       - collabora-data:/var/lib/lool
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9980"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9980" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -34,7 +35,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - FILE_STORAGE_PATH=/app/storage
-    command: ["uv", "run", "uvicorn", "collabora_wopi_server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: [ "uv", "run", "uvicorn", "collabora_wopi_server.app:app", "--host", "0.0.0.0", "--port", "8000" ]
     volumes:
       - ./collabora-setup/storage:/app/storage
     expose:
@@ -70,7 +71,8 @@ services:
     env_file:
       - .env
     environment:
-      - COLLABORA_URL=http://nginx
+      - COLLABORA_URL=http://collabora:9980
+      - DEBUG=true
     volumes:
       - ./:/app
     ports:
@@ -82,9 +84,10 @@ services:
         condition: service_started
       nginx:
         condition: service_started
-    command: ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: [ "uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload" ]
     networks:
       - wopi-net
+      - collabora-net
 
 networks:
   collabora-net:

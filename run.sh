@@ -9,6 +9,9 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 VENV="./.venv"
 
+# Enable debug mode for local development (starts cloudflared tunnel for Collabora)
+export DEBUG=true
+
 # Prefer running uvicorn via the venv python (avoids broken script shebangs if the venv was moved/renamed)
 if [ -x "$VENV/bin/python" ]; then
   exec "$VENV/bin/python" -m uvicorn main:app --reload --host "$HOST" --port "$PORT"

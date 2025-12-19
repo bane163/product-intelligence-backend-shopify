@@ -7,6 +7,11 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl && rm -rf /var/lib/apt/lists/*
 
+# Install cloudflared for tunnel support in debug mode
+RUN curl -L --output /usr/local/bin/cloudflared \
+    https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+    && chmod +x /usr/local/bin/cloudflared
+
 RUN pip install --no-cache-dir uv
 
 WORKDIR /app

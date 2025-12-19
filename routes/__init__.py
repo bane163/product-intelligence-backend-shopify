@@ -3,6 +3,6 @@
 This file intentionally left minimal to make `routes` a proper package.
 """
 
-from . import maf, shopify_products
+from . import agents, maf, shopify_products
 
-__all__ = ["shopify_products", "maf"]
+__all__ = ["agents", "maf", "shopify_products"]

@@ -109,8 +109,8 @@ file_size_limit = "50MiB"
 # [storage.image_transformation]
 # enabled = true
 
-# Storage bucket for uploaded files
-[storage.buckets.files]
+# Storage bucket for uploaded documents
+[storage.buckets.documents]
 public = false
 file_size_limit = "50MiB"
 allowed_mime_types = ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.ms-excel", "application/pdf", "image/png", "image/jpeg", "application/octet-stream"]

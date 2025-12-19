@@ -7,7 +7,7 @@ This module exposes the same API as the previous in-memory helper:
 
 The implementation now persists file bytes to a Supabase Storage bucket and
 reads metadata where possible. Environment variable `FILES_BUCKET_NAME` can be
-used to configure the bucket name (default: "files").
+used to configure the bucket name (default: "documents").
 """
 
 import os
@@ -16,7 +16,7 @@ from typing import Dict, Any, Optional
 
 LOG = logging.getLogger(__name__)
 
-BUCKET_NAME = os.environ.get("FILES_BUCKET_NAME", "files")
+BUCKET_NAME = os.environ.get("FILES_BUCKET_NAME", "documents")
 
 # In-memory fallback storage used when Supabase is not configured or unavailable.
 file_storage: Dict[str, Dict[str, Any]] = {}

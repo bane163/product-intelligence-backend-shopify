@@ -27,16 +27,29 @@ def _try_get_bucket():
 
     This avoids failing at import time when env vars or client libs are not present.
     """
+    # Attempt relative import (when code is a package) first, then fall back to
+    # absolute import which works when running the app as a top-level module.
     try:
         # import here to avoid import-time errors when running tests without envs
-        from ..supabase_client import get_storage
-
-        storage = get_storage()
-        return storage.from_(BUCKET_NAME)
+        from ..supabase_client import get_storage as _get_storage  # type: ignore
     except Exception:
-        LOG.debug(
-            "Supabase storage unavailable; using in-memory fallback", exc_info=True
-        )
+        try:
+            import supabase_client as _supabase_client  # type: ignore
+
+            _get_storage = _supabase_client.get_storage  # type: ignore[attr-defined]
+        except Exception:
+            LOG.exception(
+                "Failed to import Supabase storage helper (relative and absolute)"
+            )
+            return None
+
+    try:
+        storage = _get_storage()
+        bucket = storage.from_(BUCKET_NAME)
+        LOG.debug("Connected to Supabase bucket '%s' (%r)", BUCKET_NAME, bucket)
+        return bucket
+    except Exception:
+        LOG.exception("Supabase storage unavailable; falling back to in-memory storage")
         return None
 
 
@@ -60,10 +73,19 @@ def save_file(
 
     path = file_id
 
+    LOG.debug(
+        "Saving file to storage: bucket=%s path=%s size=%d content_type=%s",
+        BUCKET_NAME,
+        path,
+        len(content) if content is not None else 0,
+        content_type,
+    )
+
     # Try common upload signatures used by supabase client libraries.
     try:
         # Preferred: upload with content-type/metadata kwargs
-        bucket.upload(
+        LOG.debug("Attempting upload with metadata to %s/%s", BUCKET_NAME, path)
+        res = bucket.upload(
             path,
             content,
             {
@@ -71,17 +93,24 @@ def save_file(
                 "metadata": {"name": name},
             },
         )
+        LOG.info("Upload (with metadata) succeeded for %s; result=%r", path, res)
         return
-    except Exception:
-        LOG.debug("upload with metadata failed, trying simple upload", exc_info=True)
+    except Exception as exc:
+        LOG.debug("Upload with metadata failed for %s: %s", path, exc, exc_info=True)
 
     try:
-        # Fallback: basic upload
-        bucket.upload(path, content)
-        # Metadata may not be set in this fallback
+        LOG.debug("Attempting simple upload to %s/%s", BUCKET_NAME, path)
+        res = bucket.upload(path, content)
+        LOG.info("Upload (simple) succeeded for %s; result=%r", path, res)
         return
-    except Exception:
-        LOG.exception("Failed to upload file %s to bucket %s", path, BUCKET_NAME)
+    except Exception as exc:
+        LOG.debug(
+            "Failed to upload file %s to bucket %s: %s",
+            path,
+            BUCKET_NAME,
+            exc,
+            exc_info=True,
+        )
         raise
 
 
@@ -100,6 +129,7 @@ def get_file(file_id: str) -> Dict[str, Any] | None:
 
     try:
         # Many supabase clients provide `.download(path)` returning bytes
+        LOG.debug("Attempting download from %s/%s", BUCKET_NAME, path)
         data = bucket.download(path)
     except Exception:
         LOG.debug("download failed for %s", path, exc_info=True)
@@ -121,6 +151,7 @@ def get_file(file_id: str) -> Dict[str, Any] | None:
 
     # Try reading metadata if available
     try:
+        LOG.debug("Attempting to fetch metadata for %s/%s", BUCKET_NAME, path)
         meta = bucket.get_metadata(path)  # type: ignore[attr-defined]
         if meta:
             # supabase metadata shape varies; try common keys
@@ -133,7 +164,7 @@ def get_file(file_id: str) -> Dict[str, Any] | None:
             )
     except Exception:
         # Not all clients support get_metadata; that's fine
-        LOG.debug("metadata fetch not available for %s", path)
+        LOG.debug("metadata fetch not available for %s", path, exc_info=True)
 
     return {"name": name, "content": content, "content_type": content_type}
 

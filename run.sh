@@ -1,24 +1,14 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-# Run this script from anywhere; it will cd to the script's directory (the backend folder)
-cd "$(dirname "$0")"
+# Get the directory where the script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+cd "$SCRIPT_DIR"
 
-# Allow overriding host/port via env vars
-HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
-VENV="./.venv"
+echo "🚀 Starting Shopify Backend in Debug Mode (Docker)..."
 
-# Enable debug mode for local development (starts cloudflared tunnel for Collabora)
-export DEBUG=true
+# Run the backend and its dependencies
+docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml up -d shopify-backend
 
-# Prefer running uvicorn via the venv python (avoids broken script shebangs if the venv was moved/renamed)
-if [ -x "$VENV/bin/python" ]; then
-  exec "$VENV/bin/python" -m uvicorn main:app --reload --host "$HOST" --port "$PORT"
-elif [ -x "$VENV/bin/uvicorn" ]; then
-  # Fallback to the uvicorn script if the python module path is not available
-  exec "$VENV/bin/uvicorn" main:app --reload --host "$HOST" --port "$PORT"
-else
-  # Final fallback to system python/module; useful if you rely on a global env
-  exec python -m uvicorn main:app --reload --host "$HOST" --port "$PORT"
-fi
+echo "✅ Backend started! You can attach the VS Code debugger now."
+echo "📝 Use 'docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml logs -f shopify-backend' to see logs."

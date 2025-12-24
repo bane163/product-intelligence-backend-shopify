@@ -16,6 +16,22 @@
       ],
       "cwd": "${workspaceFolder}/shopify_supabase_backend",
       "jinja": true
+    },
+    {
+      "name": "Python: Attach (Docker debugpy)",
+      "type": "python",
+      "request": "attach",
+      "connect": {
+        "host": "localhost",
+        "port": 5678
+      },
+      "pathMappings": [
+        {
+          "localRoot": "${workspaceFolder}",
+          "remoteRoot": "/app"
+        }
+      ],
+      "justMyCode": true
     }
   ]
 }

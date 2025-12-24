@@ -53,13 +53,29 @@ def _try_get_bucket():
         return None
 
 
+
+def _get_supabase_client():
+    """Attempt to return the Supabase client or None."""
+    try:
+        from ..supabase_client import get_supabase
+        return get_supabase()
+    except ImportError:
+        try:
+            from supabase_client import get_supabase
+            return get_supabase()
+        except ImportError:
+            return None
+    except Exception:
+        LOG.debug("Supabase client unavailable", exc_info=True)
+        return None
+
 def save_file(
     file_id: str, name: str, content: bytes, content_type: Optional[str] = None
 ) -> None:
     """Store the file bytes in Supabase Storage under key `file_id`.
 
     Attempts to set basic metadata (`name`, `content-type`) when supported by
-    the client library; falls back to a plain upload.
+    the client library; falls back to a plain upload. Also syncs to `file_metadata` table.
     """
     bucket = _try_get_bucket()
     # If Supabase is not available use in-memory storage for tests/development
@@ -82,6 +98,7 @@ def save_file(
     )
 
     # Try common upload signatures used by supabase client libraries.
+    upload_success = False
     try:
         # Preferred: upload with content-type/metadata kwargs
         LOG.debug("Attempting upload with metadata to %s/%s", BUCKET_NAME, path)
@@ -94,24 +111,40 @@ def save_file(
             },
         )
         LOG.info("Upload (with metadata) succeeded for %s; result=%r", path, res)
-        return
+        upload_success = True
     except Exception as exc:
         LOG.debug("Upload with metadata failed for %s: %s", path, exc, exc_info=True)
 
-    try:
-        LOG.debug("Attempting simple upload to %s/%s", BUCKET_NAME, path)
-        res = bucket.upload(path, content)
-        LOG.info("Upload (simple) succeeded for %s; result=%r", path, res)
-        return
-    except Exception as exc:
-        LOG.debug(
-            "Failed to upload file %s to bucket %s: %s",
-            path,
-            BUCKET_NAME,
-            exc,
-            exc_info=True,
-        )
-        raise
+    if not upload_success:
+        try:
+            LOG.debug("Attempting simple upload to %s/%s", BUCKET_NAME, path)
+            res = bucket.upload(path, content)
+            LOG.info("Upload (simple) succeeded for %s; result=%r", path, res)
+            upload_success = True
+        except Exception as exc:
+            LOG.debug(
+                "Failed to upload file %s to bucket %s: %s",
+                path,
+                BUCKET_NAME,
+                exc,
+                exc_info=True,
+            )
+            raise exc
+
+    # Sync to file_metadata table
+    if upload_success:
+        try:
+            client = _get_supabase_client()
+            if client:
+                client.table("file_metadata").insert({
+                    "storage_path": path,
+                    "filename": name,
+                    "content_type": content_type or "application/octet-stream",
+                    "size": len(content) if content else 0
+                }).execute()
+                LOG.info("Inserted metadata into table for %s", path)
+        except Exception:
+            LOG.exception("Failed to insert metadata into DB for %s", path)
 
 
 def get_file(file_id: str) -> Dict[str, Any] | None:
@@ -149,9 +182,23 @@ def get_file(file_id: str) -> Dict[str, Any] | None:
     name = file_id
     content_type = "application/octet-stream"
 
-    # Try reading metadata if available
+    # Try reading from file_metadata table first (most reliable)
     try:
-        LOG.debug("Attempting to fetch metadata for %s/%s", BUCKET_NAME, path)
+        client = _get_supabase_client()
+        if client:
+            res = client.table("file_metadata").select("*").eq("storage_path", path).execute()
+            if res.data and len(res.data) > 0:
+                meta_row = res.data[0]
+                name = meta_row.get("filename", name)
+                content_type = meta_row.get("content_type", content_type)
+                LOG.debug("Resolved metadata from DB for %s: name=%s", path, name)
+                return {"name": name, "content": content, "content_type": content_type}
+    except Exception:
+        LOG.debug("DB metadata fetch failed for %s", path, exc_info=True)
+
+    # Fallback to storage metadata
+    try:
+        LOG.debug("Attempting to fetch storage metadata for %s/%s", BUCKET_NAME, path)
         meta = bucket.get_metadata(path)  # type: ignore[attr-defined]
         if meta:
             # supabase metadata shape varies; try common keys
@@ -180,6 +227,15 @@ def delete_file(file_id: str) -> bool:
         return False
 
     path = file_id
+    
+    # Try deleting from DB first (cleanup)
+    try:
+        client = _get_supabase_client()
+        if client:
+            client.table("file_metadata").delete().eq("storage_path", path).execute()
+    except Exception:
+        LOG.warning("Failed to delete metadata from DB for %s", path, exc_info=True)
+
     try:
         # Many clients accept a list of paths to remove
         bucket.remove([path])
@@ -187,3 +243,4 @@ def delete_file(file_id: str) -> bool:
     except Exception:
         LOG.debug("delete failed or file not found: %s", path, exc_info=True)
         return False
+

@@ -1,0 +1,11 @@
+services:
+  shopify-backend:
+    ports:
+      - "5678:5678"
+    # Use the system Python binary inside the image so a mounted project venv
+    # (e.g. /app/.venv from the host) doesn't get used and cause "No module
+    # named debugpy" when debugpy was only installed globally in the image.
+    environment:
+      - PYTHONPATH=/app/.venv/lib/python3.13/site-packages
+    command: ["/usr/local/bin/python", "-m", "debugpy", "--listen", "0.0.0.0:5678", "--wait-for-client", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+

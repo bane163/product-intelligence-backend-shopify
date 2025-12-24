@@ -43,7 +43,7 @@ async def start_tunnel(target_port: int = 9980, timeout: float = 30.0) -> Option
     try:
         # Start cloudflared tunnel process using asyncio subprocess
         process = await asyncio.create_subprocess_exec(
-            "cloudflared", "tunnel", "--url", target_url,
+            "cloudflared", "tunnel", "--url", target_url, "--no-autoupdate",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -62,7 +62,7 @@ async def start_tunnel(target_port: int = 9980, timeout: float = 30.0) -> Option
                 if not line:
                     return None
                 line_str = line.decode('utf-8', errors='replace')
-                logger.debug(f"cloudflared: {line_str.strip()}")
+                logger.info(f"cloudflared output: {line_str.strip()}")
                 match = url_pattern.search(line_str)
                 if match:
                     _tunnel_url = match.group(1)

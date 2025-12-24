@@ -12,9 +12,16 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 
 from ai.excel_workflow import run_excel_agent_workflow
-from ._storage import save_file, get_file, delete_file
+from ._storage import save_file, get_file, delete_file, list_files
 
 router = APIRouter(tags=["agents"])
+
+
+@router.get("/files", summary="List uploaded files")
+async def list_uploaded_files(limit: int = 100, offset: int = 0) -> dict:
+    """List all uploaded files."""
+    files = list_files(limit=limit, offset=offset)
+    return {"files": files}
 
 
 @router.get("/collabora-url", summary="Get current Collabora URL")

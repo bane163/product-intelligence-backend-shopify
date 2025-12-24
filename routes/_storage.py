@@ -4,6 +4,7 @@ This module exposes the same API as the previous in-memory helper:
 - `save_file(file_id, name, content, content_type)`
 - `get_file(file_id)` -> Optional[dict(name, content, content_type)]
 - `delete_file(file_id)` -> bool
+- `list_files(limit, offset)` -> List[Dict]
 
 The implementation now persists file bytes to a Supabase Storage bucket and
 reads metadata where possible. Environment variable `FILES_BUCKET_NAME` can be
@@ -147,6 +148,57 @@ def save_file(
             LOG.exception("Failed to insert metadata into DB for %s", path)
 
 
+def list_files(limit: int = 100, offset: int = 0) -> list[Dict[str, Any]]:
+    """List files from the file_metadata table.
+
+    Returns a list of dicts with file metadata. Use this for listing
+    available files without downloading their content.
+    """
+    try:
+        client = _get_supabase_client()
+        if client:
+            res = (
+                client.table("file_metadata")
+                .select("*")
+                .order("created_at", desc=True)
+                .range(offset, offset + limit - 1)
+                .execute()
+            )
+            return res.data or []
+    except Exception:
+        LOG.exception("Failed to list files from DB")
+
+    # Fallback to listing from bucket if DB fails or isn't populated
+    # Note: bucket.list() might not return all metadata depending on the adapter
+    bucket = _try_get_bucket()
+    if bucket is None:
+        # In-memory fallback
+        return [
+            {"file_id": k, "filename": v["name"], "content_type": v["content_type"]}
+            for k, v in file_storage.items()
+        ]
+
+    try:
+        LOG.debug("Listing files from bucket %s", BUCKET_NAME)
+        files = bucket.list(path=None)  # top level
+        # Transform bucket list result to match DB schema roughly
+        return [
+            {
+                "file_id": f.get("name"),  # we use file_id as path
+                "storage_path": f.get("name"),
+                "filename": f.get("metadata", {}).get("name", f.get("name")),
+                "content_type": f.get("metadata", {}).get("mimetype"),
+                "size": f.get("metadata", {}).get("size"),
+                "created_at": f.get("created_at"),
+            }
+            for f in files
+        ]
+    except Exception:
+        LOG.exception("Failed to list files from bucket")
+        return []
+
+
+
 def get_file(file_id: str) -> Dict[str, Any] | None:
     """Retrieve a file from storage and return a dict with `name`, `content`, `content_type`.
 
@@ -225,22 +277,19 @@ def delete_file(file_id: str) -> bool:
             del file_storage[file_id]
             return True
         return False
-
-    path = file_id
     
     # Try deleting from DB first (cleanup)
     try:
         client = _get_supabase_client()
         if client:
-            client.table("file_metadata").delete().eq("storage_path", path).execute()
+            client.table("file_metadata").delete().eq("id", file_id).execute()
     except Exception:
-        LOG.warning("Failed to delete metadata from DB for %s", path, exc_info=True)
+        LOG.warning("Failed to delete metadata from DB for %s", file_id, exc_info=True)
 
     try:
-        # Many clients accept a list of paths to remove
-        bucket.remove([path])
+        bucket.remove([file_id])
         return True
     except Exception:
-        LOG.debug("delete failed or file not found: %s", path, exc_info=True)
+        LOG.debug("delete failed or file not found: %s", file_id, exc_info=True)
         return False
 

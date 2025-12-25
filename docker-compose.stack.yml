@@ -37,8 +37,10 @@ services:
     environment:
       - COLLABORA_URL=http://collabora:9980
       - DEBUG=true
+      - SUPABASE_URL=http://host.docker.internal:54321
     volumes:
       - ./:/app
+      - /app/.venv
     ports:
       - "8000:8000"
     depends_on:

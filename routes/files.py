@@ -129,6 +129,7 @@ async def get_file_info(file_id: str) -> dict:
         "filename": file_entry["name"],
         "size": len(file_entry["content"]),
         "content_type": file_entry["content_type"],
+        "storage_path": file_entry["storage_path"],
     }
 
 

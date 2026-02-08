@@ -8,7 +8,6 @@ from auth import router as auth_router
 
 # Import routers from the routes package
 from routes.shopify_products import router as shopify_router
-from routes.maf import router as microsoft_router
 from routes.agents import router as agents_router
 
 # Configure logging
@@ -52,7 +51,6 @@ app.add_middleware(
 
 app.include_router(shopify_router)
 app.include_router(auth_router)
-app.include_router(microsoft_router)
 app.include_router(agents_router)
 
 

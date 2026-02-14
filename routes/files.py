@@ -9,59 +9,38 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 
-from ai.excel_workflow import run_excel_agent_workflow
-from ._run_logs import complete_run, emit_run_event, stream_run_events
-from ._run_logs_db import (
-    append_run_event,
-    append_run_message,
-    create_or_update_run,
-    finalize_run,
-    get_run,
-    get_run_history,
-    list_runs,
-)
-from ._storage import save_file, get_file, delete_file, list_files
+from app_context import AppContext, get_ctx
 
 router = APIRouter(tags=["agents"])
 
 
 @router.get("/files", summary="List uploaded files")
-async def list_uploaded_files(limit: int = 100, offset: int = 0) -> dict:
+async def list_uploaded_files(
+    limit: int = 100, offset: int = 0, ctx: AppContext = Depends(get_ctx)
+) -> dict:
     """List all uploaded files."""
-    files = list_files(limit=limit, offset=offset)
+    files = ctx.services.supabase.list_files(limit=limit, offset=offset)
     return {"files": files}
 
 
 @router.get("/collabora-url", summary="Get current Collabora URL")
-async def get_collabora_url() -> dict:
+async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict:
     """Get the current Collabora URL and WOPI base URL for interactive viewer."""
-    from cloudflare_tunnel import get_tunnel_url
-
-    tunnel_url = get_tunnel_url()
-    fallback_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
-
-    # WOPI base URL - accessible from Collabora container via Docker network
-    wopi_host = os.getenv("WOPI_HOST", "shopify-backend")
-    wopi_port = os.getenv("WOPI_PORT", "8000")
-    wopi_base_url = f"http://{wopi_host}:{wopi_port}/agents/wopi/files"
-
-    return {
-        "collabora_url": tunnel_url or fallback_url,
-        "wopi_base_url": wopi_base_url,
-        "is_tunnel": tunnel_url is not None,
-    }
+    return ctx.services.collabora.get_collabora_url_payload()
 
 
 @router.post("/upload", summary="Upload a file for preview and processing")
-async def upload_file(file: UploadFile = File(...)) -> dict:
+async def upload_file(
+    file: UploadFile = File(...), ctx: AppContext = Depends(get_ctx)
+) -> dict:
     """Upload a file and return a file_id for WOPI preview."""
     file_bytes = await file.read()
     file_id = str(uuid.uuid4())
 
-    save_file(
+    ctx.services.supabase.save_file(
         file_id,
         name=file.filename or "document.xlsx",
         content=file_bytes,
@@ -69,7 +48,7 @@ async def upload_file(file: UploadFile = File(...)) -> dict:
         or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    file_name_dict = get_file(file_id)
+    file_name_dict = ctx.services.supabase.get_file(file_id)
     file_name = file_name_dict["name"] if file_name_dict else "unknown"
 
     return {
@@ -89,6 +68,7 @@ async def process_excel(
     write_to_file: bool = Form(False),
     output_path: str | None = Form(None),
     writer_prompt: str | None = Form(None),
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict:
     """Process an Excel file through the AI agent workflow.
 
@@ -111,7 +91,7 @@ async def process_excel(
     ):
         nonlocal event_seq
         event_seq += 1
-        event = emit_run_event(
+        event = ctx.services.tracing.emit_run_event(
             run_id,
             phase=phase,
             message=message,
@@ -120,7 +100,7 @@ async def process_excel(
             error=error,
             metadata=metadata,
         )
-        append_run_event(run_id, event, event_seq)
+        ctx.services.supabase.append_run_event(run_id, event, event_seq)
         return event
 
     def trace_event(**kwargs):
@@ -137,7 +117,7 @@ async def process_excel(
         transcript_role = kwargs.get("transcript_role")
         if transcript_text and transcript_role:
             message_seq += 1
-            append_run_message(
+            ctx.services.supabase.append_run_message(
                 run_id,
                 role=transcript_role,
                 message=transcript_text,
@@ -150,7 +130,7 @@ async def process_excel(
             usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
             usage_totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
             usage_totals["total_tokens"] += int(usage.get("total_tokens") or 0)
-            create_or_update_run(
+            ctx.services.supabase.create_or_update_run(
                 run_id,
                 {
                     "prompt_tokens": usage_totals["prompt_tokens"],
@@ -159,7 +139,7 @@ async def process_excel(
                 },
             )
         if isinstance(metadata, dict) and metadata.get("model_name"):
-            create_or_update_run(
+            ctx.services.supabase.create_or_update_run(
                 run_id,
                 {
                     "model_name": metadata.get("model_name"),
@@ -168,7 +148,7 @@ async def process_excel(
             )
         return event
 
-    create_or_update_run(
+    ctx.services.supabase.create_or_update_run(
         run_id,
         {
             "status": "running",
@@ -188,7 +168,7 @@ async def process_excel(
     input_name: str | None = None
     input_content_type: str | None = None
     if file_id:
-        file_entry = get_file(file_id)
+        file_entry = ctx.services.supabase.get_file(file_id)
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
         file_bytes = file_entry["content"]
@@ -203,7 +183,7 @@ async def process_excel(
             status_code=400,
             detail="Either file_id (from /agents/upload) or file upload is required",
         )
-    create_or_update_run(
+    ctx.services.supabase.create_or_update_run(
         run_id,
         {
             "input_file_id": file_id,
@@ -219,7 +199,7 @@ async def process_excel(
             message="Starting excel workflow execution",
             payload_preview={"input_bytes": len(file_bytes)},
         )
-        result = await run_excel_agent_workflow(
+        result = await ctx.services.llm.run_excel_agent_workflow(
             file_bytes,
             collabora_base_url=collabora_url,
             agent_prompt=prompt,
@@ -237,8 +217,10 @@ async def process_excel(
             error=str(exc),
         )
         duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-        finalize_run(run_id, status="error", duration_ms=duration_ms, error=str(exc))
-        complete_run(run_id)
+        ctx.services.supabase.finalize_run(
+            run_id, status="error", duration_ms=duration_ms, error=str(exc)
+        )
+        ctx.services.tracing.complete_run(run_id)
         raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:
         emit_and_persist(
@@ -248,8 +230,10 @@ async def process_excel(
             error=str(exc),
         )
         duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-        finalize_run(run_id, status="error", duration_ms=duration_ms, error=str(exc))
-        complete_run(run_id)
+        ctx.services.supabase.finalize_run(
+            run_id, status="error", duration_ms=duration_ms, error=str(exc)
+        )
+        ctx.services.tracing.complete_run(run_id)
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
 
     # If the writer already uploaded to storage and returned metadata, accept it
@@ -273,7 +257,7 @@ async def process_excel(
                         if generated_filename.lower().endswith(".csv")
                         else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    save_file(
+                    ctx.services.supabase.save_file(
                         generated_file_id,
                         name=generated_filename,
                         content=out_bytes,
@@ -300,7 +284,7 @@ async def process_excel(
 
     # Optionally clean up the stored file after processing
     if file_id:
-        delete_file(file_id)
+        ctx.services.supabase.delete_file(file_id)
     output_meta = {}
     if isinstance(result, dict):
         output_meta = {
@@ -308,17 +292,19 @@ async def process_excel(
             "output_filename": result.get("filename"),
         }
     duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-    finalize_run(run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta)
+    ctx.services.supabase.finalize_run(
+        run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta
+    )
     emit_and_persist(phase="request_done", message="Completed /agents/excel request")
-    complete_run(run_id)
+    ctx.services.tracing.complete_run(run_id)
 
     return {"run_id": run_id, "result": result}
 
 
 @router.get("/runs/{run_id}/events", summary="Stream live workflow events")
-async def stream_events(run_id: str) -> StreamingResponse:
+async def stream_events(run_id: str, ctx: AppContext = Depends(get_ctx)) -> StreamingResponse:
     return StreamingResponse(
-        stream_run_events(run_id),
+        ctx.services.tracing.stream_run_events(run_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -329,30 +315,32 @@ async def stream_events(run_id: str) -> StreamingResponse:
 
 
 @router.get("/runs", summary="List persisted LLM runs")
-async def list_llm_runs(limit: int = 50, offset: int = 0, status: str | None = None) -> dict:
-    return {"runs": list_runs(limit=limit, offset=offset, status=status)}
+async def list_llm_runs(
+    limit: int = 50, offset: int = 0, status: str | None = None, ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    return {"runs": ctx.services.supabase.list_runs(limit=limit, offset=offset, status=status)}
 
 
 @router.get("/runs/{run_id}", summary="Get persisted LLM run")
-async def get_llm_run(run_id: str) -> dict:
-    run = get_run(run_id)
+async def get_llm_run(run_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
+    run = ctx.services.supabase.get_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return {"run": run}
 
 
 @router.get("/runs/{run_id}/history", summary="Get persisted LLM run history")
-async def get_llm_run_history(run_id: str) -> dict:
-    history = get_run_history(run_id)
+async def get_llm_run_history(run_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
+    history = ctx.services.supabase.get_run_history(run_id)
     if history.get("run") is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return history
 
 
 @router.get("/files/{file_id}", summary="Get file info")
-async def get_file_info(file_id: str) -> dict:
+async def get_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
     """Get information about an uploaded file."""
-    file_entry = get_file(file_id)
+    file_entry = ctx.services.supabase.get_file(file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -366,24 +354,20 @@ async def get_file_info(file_id: str) -> dict:
 
 
 @router.delete("/files/{file_id}", summary="Delete an uploaded file")
-async def delete_file_route(file_id: str) -> dict:  # rename to avoid shadowing helper
+async def delete_file_route(
+    file_id: str, ctx: AppContext = Depends(get_ctx)
+) -> dict:  # rename to avoid shadowing helper
     """Delete an uploaded file from storage."""
-    if not delete_file(file_id):
+    if not ctx.services.supabase.delete_file(file_id):
         raise HTTPException(status_code=404, detail="File not found")
 
     return {"status": "deleted", "file_id": file_id}
 
 
 @router.get("/preview/{file_id}", summary="Get PNG preview of file")
-async def get_file_preview(file_id: str) -> Response:
+async def get_file_preview(file_id: str, ctx: AppContext = Depends(get_ctx)) -> Response:
     """Convert the uploaded file to PNG and return it for preview."""
-    from ai.collabora_utils import (
-        convert_excel_to_pdf_collabora,
-        convert_pdf_to_png_collabora,
-    )
-    from cloudflare_tunnel import get_tunnel_url
-
-    file_entry = get_file(file_id)
+    file_entry = ctx.services.supabase.get_file(file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -392,17 +376,15 @@ async def get_file_preview(file_id: str) -> Response:
         return Response(content=file_entry["preview_png"], media_type="image/png")
 
     try:
-        collabora_url = get_tunnel_url() or os.getenv(
-            "COLLABORA_URL", "http://localhost:9980"
-        )
+        collabora_url = ctx.services.collabora.get_runtime_url(default="http://localhost:9980")
 
         # Convert Excel to PDF
-        pdf_bytes = await convert_excel_to_pdf_collabora(
+        pdf_bytes = await ctx.services.collabora.convert_excel_to_pdf_collabora(
             file_entry["content"], collabora_base_url=collabora_url
         )
 
         # Convert PDF to PNG
-        png_list = await convert_pdf_to_png_collabora(
+        png_list = await ctx.services.collabora.convert_pdf_to_png_collabora(
             pdf_bytes, collabora_base_url=collabora_url
         )
 

@@ -3,21 +3,21 @@
 These endpoints live under `/agents/wopi/*` when included by the top-level `agents` router.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
-from ._storage import get_file
+from app_context import AppContext, get_ctx
 
 router = APIRouter(prefix="/wopi", tags=["agents"])
 
 
 @router.get("/files/{file_id}", summary="WOPI CheckFileInfo")
-async def wopi_check_file_info(file_id: str) -> dict:
+async def wopi_check_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
     """WOPI CheckFileInfo endpoint.
 
     Returns metadata about the file for Collabora Online.
     """
-    file_data = get_file(file_id)
+    file_data = ctx.services.supabase.get_file(file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -36,12 +36,12 @@ async def wopi_check_file_info(file_id: str) -> dict:
 
 
 @router.get("/files/{file_id}/contents", summary="WOPI GetFile")
-async def wopi_get_file(file_id: str) -> Response:
+async def wopi_get_file(file_id: str, ctx: AppContext = Depends(get_ctx)) -> Response:
     """WOPI GetFile endpoint.
 
     Returns the file contents for Collabora Online to display.
     """
-    file_data = get_file(file_id)
+    file_data = ctx.services.supabase.get_file(file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
 

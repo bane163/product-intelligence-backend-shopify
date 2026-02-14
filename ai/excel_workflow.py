@@ -1,6 +1,5 @@
 import os
-import json
-from typing import Any, Dict, Optional, Union
+from typing import Dict, Optional, Union
 
 from agent_framework import (
     AgentRunResponse,
@@ -11,92 +10,14 @@ from agent_framework import (
 )
 from typing_extensions import Never
 from dotenv import load_dotenv
+from objects.workflow_payload import resolve_payload
 
 load_dotenv()
 
 from .excel_utils import extract_excel_contents, extract_csv_contents
-from .collabora_utils import (
-    convert_excel_to_pdf_collabora,
-    convert_pdf_to_png_collabora,
-)
 from .agent_client import run_agent_on_inputs, run_excel_writer_agent
 from .agent_collector import AgentCollector
 from .models import ProductsList
-
-
-def _extract_path_from_str(s: str) -> Optional[str]:
-    """Try to extract a filesystem path from a string input.
-
-    Heuristics (in order):
-    - If the string is JSON and contains an "input" field, return that value.
-    - If the entire string is a path that exists, return it.
-    - If the string looks like a command + path, return the last whitespace token
-      when it points to an existing path.
-    Returns None when no candidate path is found.
-    """
-    s_strip = s.strip()
-
-    # 1) JSON object as a string: '{"input":"..."}'
-    if s_strip.startswith("{"):
-        try:
-            parsed = json.loads(s_strip)
-            if isinstance(parsed, dict):
-                input_val = parsed.get("input")
-                if isinstance(input_val, str):
-                    return input_val
-        except json.JSONDecodeError:
-            # Not valid JSON; fall through to other heuristics
-            pass
-
-    # 2) Plain path
-    if os.path.exists(s_strip):
-        return s_strip
-
-    # 3) Command-like string: take the last token if it exists on disk
-    tokens = s_strip.split()
-    if tokens:
-        candidate = tokens[-1]
-        if os.path.exists(candidate):
-            return candidate
-
-    return None
-
-
-def _read_file_bytes_from_path(path: str) -> bytes:
-    if not isinstance(path, str):
-        raise RuntimeError("Expected file path to be a string")
-    if not os.path.exists(path):
-        raise RuntimeError(f"File not found: {path}")
-    with open(path, "rb") as fh:
-        return fh.read()
-
-
-def _resolve_payload(data: Any) -> bytes:
-    """Normalize incoming data into raw bytes.
-
-    Accepts:
-    - dict with an "input" string key -> reads that file
-    - string: tries JSON parse / path heuristics and reads file
-    - bytes: returned as-is
-    Raises RuntimeError when a string cannot be resolved to an existing path.
-    """
-    # dict input with explicit 'input' key
-    if isinstance(data, dict):
-        path = data.get("input")
-        if not isinstance(path, str):
-            raise RuntimeError("Expected 'input' field in dict to be a string path")
-        return _read_file_bytes_from_path(path)
-
-    # string input: try to parse/resolve to a path
-    if isinstance(data, str):
-        path = _extract_path_from_str(data)
-        if path:
-            return _read_file_bytes_from_path(path)
-        # No path resolved — preserve original behavior and raise
-        raise RuntimeError(f"String input didn't resolve to a file path: {data!r}")
-
-    # Assume bytes-like
-    return data
 
 
 def get_agent_workflow(
@@ -109,6 +30,8 @@ def get_agent_workflow(
     output_path: Optional[str] = None,
     writer_agent_prompt: Optional[str] = None,
     trace_event=None,
+    collabora_service=None,
+    supabase_service=None,
 ) -> Workflow:
     """Build and return a Workflow for the provided excel/csv bytes or a
     filesystem path to an excel/csv file.
@@ -155,7 +78,7 @@ def get_agent_workflow(
         """
         # Centralize payload resolution into a helper for readability.
         try:
-            payload = _resolve_payload(data)
+            payload = resolve_payload(data)
         except Exception as exc:
             # Surface a helpful message and re-raise so callers can see why
             print(f"file_executor error resolving payload: {exc}")
@@ -189,7 +112,14 @@ def get_agent_workflow(
         collabora = collabora_base_url or os.getenv(
             "COLLABORA_URL", "http://localhost:8080"
         )
-        pdf = await convert_excel_to_pdf_collabora(data, collabora_base_url=collabora)
+        if collabora_service is not None:
+            pdf = await collabora_service.convert_excel_to_pdf_collabora(
+                data, collabora_base_url=collabora
+            )
+        else:
+            from .collabora_utils import convert_excel_to_pdf_collabora
+
+            pdf = await convert_excel_to_pdf_collabora(data, collabora_base_url=collabora)
         _trace("collabora_pdf_done", "Converted workbook to PDF", payload_preview={"bytes": len(pdf)})
         await ctx.send_message(pdf)
 
@@ -198,9 +128,14 @@ def get_agent_workflow(
         collabora = collabora_base_url or os.getenv(
             "COLLABORA_URL", "http://localhost:8080"
         )
-        pngs = await convert_pdf_to_png_collabora(
-            pdf_bytes, collabora_base_url=collabora
-        )
+        if collabora_service is not None:
+            pngs = await collabora_service.convert_pdf_to_png_collabora(
+                pdf_bytes, collabora_base_url=collabora
+            )
+        else:
+            from .collabora_utils import convert_pdf_to_png_collabora
+
+            pngs = await convert_pdf_to_png_collabora(pdf_bytes, collabora_base_url=collabora)
         _trace("collabora_png_done", "Converted PDF to PNG pages", payload_preview={"pages": len(pngs)})
 
         await ctx.send_message({"png_bytes": pngs})
@@ -250,6 +185,7 @@ def get_agent_workflow(
                 agent_prompt=writer_prompt,
                 model_env=model_env,
                 trace_event=trace_event,
+                supabase_service=supabase_service,
             )
             response_text = response.text or f"Workbook saved to {excel_output_path}"
             print(f"Excel writer agent response: {response_text}")
@@ -314,6 +250,8 @@ async def run_excel_agent_workflow(
     output_path: Optional[str] = None,
     writer_agent_prompt: Optional[str] = None,
     trace_event=None,
+    collabora_service=None,
+    supabase_service=None,
 ) -> ProductsList | dict | str | None:
     """Run the workflow built for the given bytes or filesystem path and
     return the ProductsList, workbook metadata/path, or None.
@@ -331,6 +269,8 @@ async def run_excel_agent_workflow(
         output_path=output_path,
         writer_agent_prompt=writer_agent_prompt,
         trace_event=trace_event,
+        collabora_service=collabora_service,
+        supabase_service=supabase_service,
     )
 
     # Pass the original input through to the workflow run. If a filesystem

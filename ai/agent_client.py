@@ -222,6 +222,7 @@ async def run_excel_writer_agent(
     agent_prompt: str = "Create an Excel workbook for the provided products.",
     model_env: Dict[str, str] | None = None,
     trace_event: TraceFn = None,
+    supabase_service=None,
 ) -> AgentRunResponse:
     """Create a tool-enabled agent that writes the ProductsList to an Excel workbook.
 
@@ -248,12 +249,6 @@ async def run_excel_writer_agent(
         """
         # Import here to avoid import-time dependency when Supabase isn't configured
         from .excel_writer import create_excel_bytes
-        try:
-            from ..routes._storage import save_file
-        except Exception:
-            # fallback absolute import
-            from routes._storage import save_file
-
         import uuid
 
         xlsx_bytes = create_excel_bytes(products_list)
@@ -263,12 +258,25 @@ async def run_excel_writer_agent(
         filename = f"{base_name}.xlsx"
 
         # Upload to Supabase storage (or in-memory fallback)
-        save_file(
-            file_id,
-            filename,
-            xlsx_bytes,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        if supabase_service is not None:
+            supabase_service.save_file(
+                file_id,
+                filename,
+                xlsx_bytes,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            try:
+                from ..routes._storage import save_file
+            except Exception:
+                from routes._storage import save_file
+
+            save_file(
+                file_id,
+                filename,
+                xlsx_bytes,
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
         _trace(
             trace_event,
             phase="writer_upload",

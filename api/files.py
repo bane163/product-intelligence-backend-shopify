@@ -5,6 +5,7 @@ previews, and file metadata.
 """
 
 import os
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -13,8 +14,22 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 
 from app_context import AppContext, get_ctx
+from shopify import ShopifyClient
 
 router = APIRouter(tags=["agents"])
+shopify_client = ShopifyClient()
+
+
+def _parse_products_json(products_json: str) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(products_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid products JSON: {exc}")
+    if isinstance(parsed, dict) and isinstance(parsed.get("products"), list):
+        return [item for item in parsed["products"] if isinstance(item, dict)]
+    if isinstance(parsed, list):
+        return [item for item in parsed if isinstance(item, dict)]
+    raise HTTPException(status_code=400, detail="products_json must be a list or {'products': [...]}")
 
 
 @router.get("/files", summary="List uploaded files")
@@ -318,6 +333,137 @@ async def process_excel(
     ctx.services.tracing.complete_run(run_id)
 
     return {"run_id": run_id, "result": result}
+
+
+@router.post("/product-drafts", summary="Save extracted products as draft")
+async def save_product_draft(
+    products_json: str = Form(...),
+    run_id: str | None = Form(None),
+    import_mode: str = Form("dry_run"),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict:
+    products = _parse_products_json(products_json)
+    if not products:
+        raise HTTPException(status_code=400, detail="No products provided")
+    draft_id = str(uuid.uuid4())
+    saved = ctx.services.supabase.save_product_draft(
+        draft_id=draft_id,
+        run_id=run_id,
+        import_mode=import_mode,
+        products=products,
+    )
+    return {
+        "draft_id": saved["draft_id"],
+        "run_id": saved.get("run_id"),
+        "import_mode": saved["import_mode"],
+        "product_count": saved["product_count"],
+        "first_product_title": saved.get("first_product_title"),
+        "created_at": saved.get("created_at"),
+    }
+
+
+@router.get("/product-drafts", summary="List product drafts")
+async def list_product_drafts(
+    limit: int = 50, offset: int = 0, ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    drafts = ctx.services.supabase.list_product_drafts(limit=limit, offset=offset)
+    return {"drafts": drafts}
+
+
+@router.get("/product-drafts/{draft_id}", summary="Get product draft")
+async def get_product_draft(draft_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
+    draft = ctx.services.supabase.get_product_draft(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return {"draft": draft}
+
+
+@router.post("/submit-products", summary="Submit extracted products to Shopify")
+async def submit_products_to_shopify(
+    products_json: str = Form(...),
+    import_mode: str = Form(...),
+) -> dict:
+    if import_mode not in {"create", "update"}:
+        raise HTTPException(status_code=400, detail="Submit is only allowed for create or update mode")
+    products = _parse_products_json(products_json)
+    if not products:
+        raise HTTPException(status_code=400, detail="No products provided")
+
+    results: list[dict[str, Any]] = []
+    success_count = 0
+    for index, product in enumerate(products):
+        title = product.get("title")
+        if not title:
+            results.append(
+                {
+                    "index": index,
+                    "title": None,
+                    "status": "failed",
+                    "errors": [{"field": ["title"], "message": "Missing title"}],
+                }
+            )
+            continue
+        try:
+            if import_mode == "create":
+                response = await shopify_client.create_product_from_input(product)
+                payload = response.get("data", {}).get("productCreate", {})
+            else:
+                gid = product.get("id") or product.get("shopify_gid")
+                if not gid and product.get("handle"):
+                    gid = await shopify_client.find_product_id_by_handle(str(product["handle"]))
+                if not gid:
+                    results.append(
+                        {
+                            "index": index,
+                            "title": title,
+                            "status": "failed",
+                            "errors": [{"field": ["id"], "message": "Missing Shopify product id/handle for update"}],
+                        }
+                    )
+                    continue
+                response = await shopify_client.update_product_from_input({**product, "id": gid})
+                payload = response.get("data", {}).get("productUpdate", {})
+
+            errors = payload.get("userErrors") or []
+            product_data = payload.get("product") or {}
+            if errors:
+                results.append(
+                    {
+                        "index": index,
+                        "title": title,
+                        "status": "failed",
+                        "shopify_product_id": product_data.get("id"),
+                        "errors": errors,
+                    }
+                )
+            else:
+                success_count += 1
+                results.append(
+                    {
+                        "index": index,
+                        "title": product_data.get("title", title),
+                        "status": "success",
+                        "shopify_product_id": product_data.get("id"),
+                        "errors": [],
+                    }
+                )
+        except Exception as exc:
+            results.append(
+                {
+                    "index": index,
+                    "title": title,
+                    "status": "failed",
+                    "errors": [{"field": None, "message": str(exc)}],
+                }
+            )
+
+    return {
+        "import_mode": import_mode,
+        "total": len(products),
+        "success_count": success_count,
+        "failed_count": len(products) - success_count,
+        "results": results,
+    }
 
 
 @router.get("/runs/{run_id}/events", summary="Stream live workflow events")

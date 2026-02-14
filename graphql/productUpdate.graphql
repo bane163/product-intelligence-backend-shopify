@@ -1,5 +1,5 @@
-mutation productUpdate($input: ProductInput!) {
-  productUpdate(input: $input) {
+mutation productUpdate($product: ProductUpdateInput!) {
+  productUpdate(product: $product) {
     product { id title handle }
     userErrors { field message }
   }

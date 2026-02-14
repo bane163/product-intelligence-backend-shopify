@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -145,3 +146,55 @@ async def test_preview_generates_png(monkeypatch):
         r_preview = await ac.get(f"/agents/preview/{file_id}")
         assert r_preview.status_code == 200
         assert r_preview.content == b"PNG_BYTES_PAGE_1"
+
+
+@pytest.mark.asyncio
+async def test_save_product_draft():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        payload = {
+            "products_json": json.dumps([{"title": "Draft Product"}]),
+            "run_id": "run-1",
+            "import_mode": "create",
+        }
+        r = await ac.post("/agents/product-drafts", data=payload)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["product_count"] == 1
+        assert body["import_mode"] == "create"
+        assert "draft_id" in body
+
+
+@pytest.mark.asyncio
+async def test_submit_products_blocks_dry_run():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        payload = {
+            "products_json": json.dumps([{"title": "Demo"}]),
+            "import_mode": "dry_run",
+        }
+        r = await ac.post("/agents/submit-products", data=payload)
+        assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_list_and_get_product_draft():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        payload = {
+            "products_json": json.dumps([{"title": "Draft A"}]),
+            "run_id": "run-a",
+            "import_mode": "create",
+        }
+        created = await ac.post("/agents/product-drafts", data=payload)
+        assert created.status_code == 200
+        draft_id = created.json()["draft_id"]
+
+        listed = await ac.get("/agents/product-drafts")
+        assert listed.status_code == 200
+        drafts = listed.json()["drafts"]
+        assert any(d.get("draft_id") == draft_id for d in drafts)
+
+        detail = await ac.get(f"/agents/product-drafts/{draft_id}")
+        assert detail.status_code == 200
+        assert detail.json()["draft"]["draft_id"] == draft_id

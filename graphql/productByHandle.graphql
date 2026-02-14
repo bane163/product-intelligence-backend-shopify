@@ -1,0 +1,9 @@
+query productByHandle($query: String!) {
+  products(first: 1, query: $query) {
+    nodes {
+      id
+      title
+      handle
+    }
+  }
+}

@@ -47,7 +47,7 @@ class ShopifyClient:
         self._client: Optional[httpx.AsyncClient] = None
         # Build URL lazily when shop known; store template now if shop present
         self.url = (
-            f"http://{self.shop}/graphiql/graphql.json?key=&api_version=2025-10"
+            f"https://{self.shop}/admin/api/2025-10/graphql.json"
             if self.shop
             else None
         )
@@ -80,7 +80,7 @@ class ShopifyClient:
             self.shop = os.getenv("SHOPIFY_STORE")
             if self.shop:
                 self.url = (
-                    f"http://{self.shop}/graphiql/graphql.json?key=&api_version=2025-10"
+                    f"https://{self.shop}/admin/api/2025-10/graphql.json"
                 )
 
         if not self.shop:
@@ -136,7 +136,7 @@ class ShopifyClient:
         mutation = _load_graphql("productCreate.graphql")
         product_payload: Dict[str, Any] = {"title": title}
         if body_html:
-            product_payload["bodyHtml"] = body_html
+            product_payload["descriptionHtml"] = body_html
         if vendor:
             product_payload["vendor"] = vendor
         if product_options:
@@ -144,6 +144,46 @@ class ShopifyClient:
             # [{"name": "Color", "values": [{"name": "Red"}, ...]}, ...]
             product_payload["productOptions"] = product_options
 
+        return await self.graphql(mutation, {"product": product_payload})
+
+    @staticmethod
+    def _normalize_tags(tags: Any) -> list[str] | None:
+        if tags is None:
+            return None
+        if isinstance(tags, list):
+            normalized = [str(tag).strip() for tag in tags if str(tag).strip()]
+            return normalized or None
+        if isinstance(tags, str):
+            normalized = [part.strip() for part in tags.split(",") if part.strip()]
+            return normalized or None
+        return None
+
+    @staticmethod
+    def _build_product_payload(product: Dict[str, Any], *, include_id: bool) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        mapping = {
+            "id": "id",
+            "title": "title",
+            "handle": "handle",
+            "body_html": "descriptionHtml",
+            "vendor": "vendor",
+            "product_type": "productType",
+            "status": "status",
+        }
+        for source_key, target_key in mapping.items():
+            if source_key == "id" and not include_id:
+                continue
+            value = product.get(source_key)
+            if value not in (None, ""):
+                payload[target_key] = value
+        tags = ShopifyClient._normalize_tags(product.get("tags"))
+        if tags:
+            payload["tags"] = tags
+        return payload
+
+    async def create_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
+        mutation = _load_graphql("productCreate.graphql")
+        product_payload = self._build_product_payload(product, include_id=False)
         return await self.graphql(mutation, {"product": product_payload})
 
     async def get_product(self, gid: str) -> Dict[str, Any]:
@@ -158,8 +198,21 @@ class ShopifyClient:
         if title is not None:
             input_payload["title"] = title
         if body_html is not None:
-            input_payload["bodyHtml"] = body_html
-        return await self.graphql(mutation, {"input": input_payload})
+            input_payload["descriptionHtml"] = body_html
+        return await self.graphql(mutation, {"product": input_payload})
+
+    async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
+        mutation = _load_graphql("productUpdate.graphql")
+        product_payload = self._build_product_payload(product, include_id=True)
+        return await self.graphql(mutation, {"product": product_payload})
+
+    async def find_product_id_by_handle(self, handle: str) -> str | None:
+        query = _load_graphql("productByHandle.graphql")
+        resp = await self.graphql(query, {"query": f"handle:{handle}"})
+        nodes = resp.get("data", {}).get("products", {}).get("nodes", [])
+        if not nodes:
+            return None
+        return nodes[0].get("id")
 
     async def delete_product(self, gid: str) -> Dict[str, Any]:
         mutation = _load_graphql("productDelete.graphql")

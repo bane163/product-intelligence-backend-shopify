@@ -44,18 +44,18 @@ async def test_shopify_client_crud():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        mock.post("/admin/api/2024-10/graphql.json").respond(200, json=create_resp)
+        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=create_resp)
         resp = await client.create_product("T", "", None)
         assert resp["data"]["productCreate"]["product"]["title"] == "T"
 
-        mock.post("/admin/api/2024-10/graphql.json").respond(200, json=get_resp)
+        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=get_resp)
         resp = await client.get_product("gid://shopify/Product/1")
         assert resp["data"]["node"]["id"].endswith("/1")
 
-        mock.post("/admin/api/2024-10/graphql.json").respond(200, json=update_resp)
+        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=update_resp)
         resp = await client.update_product("gid://shopify/Product/1", "T updated", None)
         assert resp["data"]["productUpdate"]["product"]["title"] == "T updated"
 
-        mock.post("/admin/api/2024-10/graphql.json").respond(200, json=delete_resp)
+        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=delete_resp)
         resp = await client.delete_product("gid://shopify/Product/1")
         assert resp["data"]["productDelete"]["deletedProductId"].endswith("/1")

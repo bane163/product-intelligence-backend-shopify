@@ -77,7 +77,7 @@ class ProductInput(BaseModel):
     vendor: Optional[str] = None
     product_category: Optional[str] = None
     product_type: Optional[str] = None
-    tags: Optional[str] = None
+    tags: Optional[str | List[str]] = None
     published: Optional[bool] = None
 
     # Options / variants / images

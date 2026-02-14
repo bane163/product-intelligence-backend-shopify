@@ -47,6 +47,21 @@ class SupabaseServiceInterface(Protocol):
 
     def get_run_history(self, run_id: str) -> dict[str, Any]: ...
 
+    def save_product_draft(
+        self,
+        *,
+        draft_id: str,
+        run_id: str | None,
+        import_mode: str,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    def list_product_drafts(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]: ...
+
+    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None: ...
+
 
 class CollaboraServiceInterface(Protocol):
     async def convert_csv_to_excel(

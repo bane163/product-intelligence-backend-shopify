@@ -13,6 +13,7 @@ class SupabaseService(SupabaseServiceInterface):
     def __init__(self, bucket_name: str | None = None):
         self.bucket_name = bucket_name or os.environ.get("FILES_BUCKET_NAME", "documents")
         self.file_storage: dict[str, dict[str, Any]] = {}
+        self.product_drafts: dict[str, dict[str, Any]] = {}
 
     def _try_get_bucket(self):
         try:
@@ -343,3 +344,87 @@ class SupabaseService(SupabaseServiceInterface):
             LOG.exception("Failed fetching llm_run_messages for run_id=%s", run_id)
 
         return {"run": run, "events": events, "messages": messages}
+
+    def save_product_draft(
+        self,
+        *,
+        draft_id: str,
+        run_id: str | None,
+        import_mode: str,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = self._utc_now()
+        first_title = ""
+        if products and isinstance(products[0], dict):
+            first_title = str(products[0].get("title") or "")
+        payload = {
+            "draft_id": draft_id,
+            "run_id": run_id,
+            "import_mode": import_mode,
+            "products": products,
+            "product_count": len(products),
+            "first_product_title": first_title,
+            "created_at": now,
+            "updated_at": now,
+        }
+        client = self._get_supabase_client()
+        if client:
+            try:
+                client.table("product_drafts").upsert(payload, on_conflict="draft_id").execute()
+                return payload
+            except Exception:
+                LOG.exception("Failed saving product draft %s", draft_id)
+                try:
+                    compat_payload = dict(payload)
+                    compat_payload.pop("first_product_title", None)
+                    client.table("product_drafts").upsert(
+                        compat_payload, on_conflict="draft_id"
+                    ).execute()
+                except Exception:
+                    LOG.exception("Fallback save for product draft %s also failed", draft_id)
+        self.product_drafts[draft_id] = payload
+        return payload
+
+    def list_product_drafts(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        db_drafts: list[dict[str, Any]] = []
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_drafts")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .range(offset, offset + limit - 1)
+                    .execute()
+                )
+                db_drafts = res.data or []
+            except Exception:
+                LOG.exception("Failed listing product drafts")
+
+        drafts_map: dict[str, dict[str, Any]] = {
+            str(item.get("draft_id")): item for item in db_drafts if item.get("draft_id")
+        }
+        for key, item in self.product_drafts.items():
+            drafts_map[str(item.get("draft_id") or key)] = item
+
+        drafts = list(drafts_map.values())
+        drafts.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return drafts[offset : offset + limit]
+
+    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_drafts")
+                    .select("*")
+                    .eq("draft_id", draft_id)
+                    .limit(1)
+                    .execute()
+                )
+                rows = res.data or []
+                return rows[0] if rows else None
+            except Exception:
+                LOG.exception("Failed fetching product draft %s", draft_id)
+
+        return self.product_drafts.get(draft_id)

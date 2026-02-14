@@ -141,9 +141,19 @@ class LLMService(LLMServiceInterface):
                 )
                 generated = getattr(response, "generated_file", None)
                 if generated:
-                    await ctx.yield_output(generated)
+                    await ctx.yield_output(
+                        {
+                            **generated,
+                            "products": products_list.model_dump(mode="json").get("products", []),
+                        }
+                    )
                 else:
-                    await ctx.yield_output(excel_output_path)
+                    await ctx.yield_output(
+                        {
+                            "workbook_path": excel_output_path,
+                            "products": products_list.model_dump(mode="json").get("products", []),
+                        }
+                    )
 
         agent_collector = AgentCollector(
             id="agent_collector",

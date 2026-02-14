@@ -5,6 +5,16 @@ from .interfaces import CollaboraServiceInterface
 
 
 class CollaboraService(CollaboraServiceInterface):
+    async def convert_csv_to_excel(
+        self,
+        file_bytes: bytes,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> bytes:
+        return await collabora_utils.convert_csv_to_excel(
+            file_bytes, collabora_base_url=collabora_base_url, timeout=timeout
+        )
+
     async def convert_excel_to_pdf_collabora(
         self,
         file_bytes: bytes,

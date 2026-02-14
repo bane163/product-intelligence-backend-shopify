@@ -27,6 +27,21 @@ async def convert_excel_to_pdf_collabora(
         return resp.content
 
 
+async def convert_csv_to_excel(
+    file_bytes: bytes,
+    collabora_base_url: str = "http://localhost:8080",
+    timeout: int = 60,
+) -> bytes:
+    """Post a CSV file to Collabora's convert-to/xlsx endpoint and return XLSX bytes."""
+    convert_url = collabora_base_url.rstrip("/") + "/lool/convert-to/xlsx"
+    files = {"file": ("file.csv", file_bytes, "text/csv")}
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(convert_url, files=files)
+        resp.raise_for_status()
+        return resp.content
+
+
 async def convert_pdf_to_png_collabora(
     pdf_bytes: bytes,
     collabora_base_url: str = "http://localhost:8080",

@@ -49,6 +49,13 @@ class SupabaseServiceInterface(Protocol):
 
 
 class CollaboraServiceInterface(Protocol):
+    async def convert_csv_to_excel(
+        self,
+        file_bytes: bytes,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> bytes: ...
+
     async def convert_excel_to_pdf_collabora(
         self,
         file_bytes: bytes,

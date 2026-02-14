@@ -39,13 +39,32 @@ async def upload_file(
     """Upload a file and return a file_id for WOPI preview."""
     file_bytes = await file.read()
     file_id = str(uuid.uuid4())
+    original_name = file.filename or "document.xlsx"
+    original_content_type = file.content_type or ""
+    is_csv = original_name.lower().endswith(".csv") or original_content_type.lower() == "text/csv"
+
+    stored_name = original_name
+    stored_content_type = (
+        file.content_type
+        or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    if is_csv:
+        collabora_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
+        try:
+            file_bytes = await ctx.services.collabora.convert_csv_to_excel(
+                file_bytes, collabora_base_url=collabora_url
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"CSV to Excel conversion failed: {exc}")
+        base, _ = os.path.splitext(original_name)
+        stored_name = f"{base or 'document'}.xlsx"
+        stored_content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     ctx.services.supabase.save_file(
         file_id,
-        name=file.filename or "document.xlsx",
+        name=stored_name,
         content=file_bytes,
-        content_type=file.content_type
-        or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        content_type=stored_content_type,
     )
 
     file_name_dict = ctx.services.supabase.get_file(file_id)

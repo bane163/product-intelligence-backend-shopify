@@ -19,7 +19,7 @@ populates them into Shopify.
 1. **User Upload**: The user uploads an Excel (`.xlsx`) or CSV file via the
    Shopify App frontend.
 2. **Workflow Initiation**: The FastAPI backend receives the file and triggers
-   the `excel_workflow`.
+   the LLM workflow via `ctx.services.llm`.
 3. **Data Extraction & Visualization**:
    - **Text extraction**: The backend pulls raw data from the cells.
    - **Visual Processing (Excel only)**: For Excel files, the backend uses

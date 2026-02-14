@@ -10,7 +10,7 @@ class AgentCollector(Executor):
     """Executor that accumulates partial inputs (extracted text and png_bytes)
     and calls an agent once both are present.
 
-    This class is extracted from `excel_workflow` so it can be unit-tested and
+    This class is extracted from the LLM workflow service so it can be unit-tested and
     reused more easily. It does not assume global environment variables; the
     agent prompt and optional model_env are injected at construction time.
     """

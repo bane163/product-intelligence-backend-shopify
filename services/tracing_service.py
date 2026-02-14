@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from objects.sanitize import sanitize_preview
+from .interfaces import TracingServiceInterface
 
 
-class TracingService:
+class TracingService(TracingServiceInterface):
     def __init__(self, max_events_per_run: int = 300):
         self.max_events_per_run = max_events_per_run
         self.run_history: dict[str, deque[dict[str, Any]]] = defaultdict(
@@ -80,4 +81,3 @@ class TracingService:
                 subscribers.remove(queue)
             if not subscribers:
                 self.run_subscribers.pop(run_id, None)
-

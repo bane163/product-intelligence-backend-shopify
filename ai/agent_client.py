@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict
 
 from agent_framework import AgentRunResponse, ChatMessage, TextContent, DataContent
 from agent_framework.openai import OpenAIChatClient
+from services.interfaces import SupabaseServiceInterface
 
 # Use the ProductsList model as a structured response format so the agent
 # returns a JSON object with a 'products' array matching ProductInput.
@@ -222,7 +223,7 @@ async def run_excel_writer_agent(
     agent_prompt: str = "Create an Excel workbook for the provided products.",
     model_env: Dict[str, str] | None = None,
     trace_event: TraceFn = None,
-    supabase_service=None,
+    supabase_service: SupabaseServiceInterface | None = None,
 ) -> AgentRunResponse:
     """Create a tool-enabled agent that writes the ProductsList to an Excel workbook.
 
@@ -356,6 +357,37 @@ async def run_excel_writer_agent(
             # best-effort: not critical if attaching fails
             pass
 
+        return response
+
+    # Fallback: if the agent skipped tool invocation, persist directly when a
+    # service is available so workflow execution does not depend on model behavior.
+    if supabase_service is not None:
+        from .excel_writer import create_excel_bytes
+        import uuid
+
+        xlsx_bytes = create_excel_bytes(products_list)
+        file_id = str(uuid.uuid4())
+        requested_name = os.path.basename(absolute_path) or f"{file_id}.xlsx"
+        base_name, _ = os.path.splitext(requested_name)
+        filename = f"{base_name}.xlsx"
+        supabase_service.save_file(
+            file_id,
+            filename,
+            xlsx_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        generated_file = {"file_id": file_id, "filename": filename, "storage_path": file_id}
+        _trace(
+            trace_event,
+            phase="writer_upload_fallback",
+            level="warning",
+            message="Writer agent skipped tool; uploaded workbook via deterministic fallback",
+            payload_preview={"file_id": file_id, "filename": filename, "bytes": len(xlsx_bytes)},
+        )
+        try:
+            setattr(response, "generated_file", generated_file)
+        except Exception:
+            pass
         return response
 
     # Fallback: if the tool did not run or didn't upload, attempt the previous

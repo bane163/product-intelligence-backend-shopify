@@ -2,14 +2,20 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from services import CollaboraService, LLMService, SupabaseService, TracingService
+from services.interfaces import (
+    CollaboraServiceInterface,
+    LLMServiceInterface,
+    SupabaseServiceInterface,
+    TracingServiceInterface,
+)
 
 
 @dataclass(frozen=True)
 class ServiceRegistry:
-    supabase: SupabaseService
-    llm: LLMService
-    collabora: CollaboraService
-    tracing: TracingService
+    supabase: SupabaseServiceInterface
+    llm: LLMServiceInterface
+    collabora: CollaboraServiceInterface
+    tracing: TracingServiceInterface
 
 
 @dataclass(frozen=True)
@@ -35,4 +41,3 @@ def get_app_context() -> AppContext:
 
 def get_ctx() -> AppContext:
     return get_app_context()
-

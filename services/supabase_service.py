@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from objects.sanitize import sanitize_text
+from .interfaces import SupabaseServiceInterface
 
 LOG = logging.getLogger(__name__)
 
 
-class SupabaseService:
+class SupabaseService(SupabaseServiceInterface):
     def __init__(self, bucket_name: str | None = None):
         self.bucket_name = bucket_name or os.environ.get("FILES_BUCKET_NAME", "documents")
         self.file_storage: dict[str, dict[str, Any]] = {}
@@ -342,4 +343,3 @@ class SupabaseService:
             LOG.exception("Failed fetching llm_run_messages for run_id=%s", run_id)
 
         return {"run": run, "events": events, "messages": messages}
-

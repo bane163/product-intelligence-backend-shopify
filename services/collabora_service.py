@@ -1,9 +1,10 @@
 import os
 
 from ai import collabora_utils
+from .interfaces import CollaboraServiceInterface
 
 
-class CollaboraService:
+class CollaboraService(CollaboraServiceInterface):
     async def convert_excel_to_pdf_collabora(
         self,
         file_bytes: bytes,

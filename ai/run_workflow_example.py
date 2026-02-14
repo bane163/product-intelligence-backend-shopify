@@ -3,7 +3,7 @@ import os
 from agent_framework.observability import setup_observability
 from agent_framework import get_logger
 
-from .excel_workflow import get_agent_workflow
+from app_context import get_ctx
 
 logger = get_logger()
 
@@ -35,7 +35,7 @@ def main(
     collabora = os.getenv("COLLABORA_URL", "http://localhost:9980")
     print(f"Using Collabora: {collabora}")
 
-    workflow = get_agent_workflow(
+    workflow = get_ctx().services.llm.get_agent_workflow(
         data,
         collabora_base_url=collabora,
         write_to_file=write_to_file,

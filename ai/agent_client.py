@@ -150,7 +150,7 @@ async def run_excel_writer_agent(
         caller to inspect after the agent run.
         """
         # Import here to avoid import-time dependency when Supabase isn't configured
-        from .excel_writer import create_csv_bytes
+        from .excel_writer import create_excel_bytes
         try:
             from ..routes._storage import save_file
         except Exception:
@@ -159,12 +159,19 @@ async def run_excel_writer_agent(
 
         import uuid
 
-        csv_bytes = create_csv_bytes(products_list)
+        xlsx_bytes = create_excel_bytes(products_list)
         file_id = str(uuid.uuid4())
-        filename = os.path.basename(absolute_path) or f"{file_id}.csv"
+        requested_name = os.path.basename(absolute_path) or f"{file_id}.xlsx"
+        base_name, _ = os.path.splitext(requested_name)
+        filename = f"{base_name}.xlsx"
 
         # Upload to Supabase storage (or in-memory fallback)
-        save_file(file_id, filename, csv_bytes, content_type="text/csv")
+        save_file(
+            file_id,
+            filename,
+            xlsx_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
         # Record metadata for the caller
         generated_file["file_id"] = file_id

@@ -1,12 +1,7 @@
-import json
 import os
-from typing import Iterable, cast
-
+from io import BytesIO
 from openpyxl import Workbook
-from openpyxl.worksheet.worksheet import Worksheet
 import csv
-from typing import Iterable
-
 from .models import ProductInput, ProductsList
 
 
@@ -170,11 +165,7 @@ def _product_to_rows(product: ProductInput) -> list[list[str]]:
 
 
 def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
-    """Create a CSV workbook (Shopify import format) describing the given products.
-
-    The function writes a CSV file with headers matching the provided template so
-    the output can be directly imported into Shopify or previewed in Collabora.
-    """
+    """Create an XLSX workbook (Shopify template columns) for Collabora preview."""
     if not output_path:
         raise ValueError("output_path must be provided")
 
@@ -183,21 +174,35 @@ def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
     if target_dir and not os.path.exists(target_dir):
         os.makedirs(target_dir, exist_ok=True)
 
-    # If output_path ends with .xlsx we still write a CSV to maintain template
-    # fidelity, but keep the provided suffix so callers get the expected path.
-    csv_path = (
-        absolute_path if absolute_path.lower().endswith(".csv") else absolute_path + ".csv"
+    xlsx_path = (
+        absolute_path
+        if absolute_path.lower().endswith(".xlsx")
+        else f"{absolute_path}.xlsx"
     )
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Products"
+    ws.append(TEMPLATE_HEADERS)
+    for product in products_list.products:
+        for row in _product_to_rows(product):
+            ws.append(row)
+    wb.save(xlsx_path)
+    return xlsx_path
 
-    with open(csv_path, "w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(TEMPLATE_HEADERS)
-        for product in products_list.products:
-            rows = _product_to_rows(product)
-            for r in rows:
-                writer.writerow(r)
 
-    return csv_path
+def create_excel_bytes(products_list: ProductsList) -> bytes:
+    """Return XLSX bytes for the given ProductsList without writing to disk."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Products"
+    ws.append(TEMPLATE_HEADERS)
+    for product in products_list.products:
+        for row in _product_to_rows(product):
+            ws.append(row)
+
+    output = BytesIO()
+    wb.save(output)
+    return output.getvalue()
 
 
 def create_csv_bytes(products_list: ProductsList) -> bytes:

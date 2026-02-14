@@ -10,6 +10,14 @@ echo "🛑 Stopping Shopify Backend (Docker)..."
 # Stop the backend and its dependencies
 docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml down
 
+# Stop Supabase (if installed via npm)
+if command -v npx &> /dev/null; then
+  echo "🔁 Stopping Supabase (npx supabase stop)..."
+  npx supabase stop || echo "⚠️ Supabase stop failed or already stopped"
+else
+  echo "⚠️ npx not available; skipping Supabase stop"
+fi
+
 # Optionally stop Ollama if it's running the specific model
 if command -v ollama &> /dev/null; then
     echo "🦙 Stopping Ollama model (kimi-k2-thinking:cloud) if running..."

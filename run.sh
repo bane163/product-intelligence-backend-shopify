@@ -15,6 +15,14 @@ done
 
 echo "🚀 Starting Shopify Backend in Debug Mode (Docker)..."
 
+# Start Supabase (if installed via npm)
+if command -v npx &> /dev/null; then
+  echo "🔁 Starting Supabase (npx supabase start)..."
+  npx supabase start || echo "⚠️ Supabase start failed or already running"
+else
+  echo "⚠️ npx not available; skipping Supabase start"
+fi
+
 # Run the backend and its dependencies
 docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml up -d shopify-backend
 

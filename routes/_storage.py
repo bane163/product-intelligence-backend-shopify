@@ -98,6 +98,11 @@ def save_file(
         content_type,
     )
 
+    # Normalize/sanitize content type: some Supabase storage policies reject generic text/* types
+    safe_content_type = (content_type or "application/octet-stream")
+    if safe_content_type.startswith("text/"):
+        safe_content_type = "application/octet-stream"
+
     # Try common upload signatures used by supabase client libraries.
     upload_success = False
     try:
@@ -107,7 +112,7 @@ def save_file(
             path,
             content,
             {
-                "content-type": content_type or "application/octet-stream",
+                "content-type": safe_content_type,
                 "metadata": {"name": name},
             },
         )
@@ -119,7 +124,9 @@ def save_file(
     if not upload_success:
         try:
             LOG.debug("Attempting simple upload to %s/%s", BUCKET_NAME, path)
-            res = bucket.upload(path, content)
+            # Provide a safe content type explicitly in the simple upload to avoid
+            # server-side rejection of text/* mimetypes.
+            res = bucket.upload(path, content, {"content-type": safe_content_type})
             LOG.info("Upload (simple) succeeded for %s; result=%r", path, res)
             upload_success = True
         except Exception as exc:

@@ -206,3 +206,64 @@ async def test_list_and_get_product_draft():
         resume_body = resume.json()
         assert "file_id" in resume_body
         assert resume_body["filename"].endswith(".xlsx")
+
+
+@pytest.mark.asyncio
+async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
+    async def fake_create_product_from_input(self, product):
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/1", "title": product.get("title")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import api.files as files_api
+
+    monkeypatch.setattr(files_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        draft_payload = {
+            "products_json": json.dumps([{"title": "Submitted Draft Product"}]),
+            "run_id": "run-submit",
+            "import_mode": "create",
+            "draft_name": "submitted-draft.xlsx",
+        }
+        created_draft = await ac.post("/agents/product-drafts", data=draft_payload)
+        assert created_draft.status_code == 200
+        draft_id = created_draft.json()["draft_id"]
+
+        submit_payload = {
+            "products_json": json.dumps([{"title": "Submitted Draft Product"}]),
+            "import_mode": "create",
+            "run_id": "run-submit-1",
+            "draft_id": draft_id,
+            "document_name": "submitted-draft.xlsx",
+        }
+        submitted = await ac.post("/agents/submit-products", data=submit_payload)
+        assert submitted.status_code == 200
+        submitted_body = submitted.json()
+        assert submitted_body["success_count"] == 1
+        assert submitted_body["submitted_id"]
+
+        drafts_after_submit = await ac.get("/agents/product-drafts")
+        assert drafts_after_submit.status_code == 200
+        draft_ids = [d.get("draft_id") for d in drafts_after_submit.json()["drafts"]]
+        assert draft_id not in draft_ids
+
+        submitted_list = await ac.get("/agents/submitted-documents")
+        assert submitted_list.status_code == 200
+        items = submitted_list.json()["submitted_documents"]
+        assert any(item.get("submitted_id") == submitted_body["submitted_id"] for item in items)
+
+        submitted_detail = await ac.get(f"/agents/submitted-documents/{submitted_body['submitted_id']}")
+        assert submitted_detail.status_code == 200
+
+        submitted_resume = await ac.post(
+            f"/agents/submitted-documents/{submitted_body['submitted_id']}/resume-file"
+        )
+        assert submitted_resume.status_code == 200
+        assert submitted_resume.json()["filename"].endswith(".xlsx")

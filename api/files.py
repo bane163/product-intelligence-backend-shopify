@@ -369,9 +369,20 @@ async def save_product_draft(
 
 @router.get("/product-drafts", summary="List product drafts")
 async def list_product_drafts(
-    limit: int = 50, offset: int = 0, ctx: AppContext = Depends(get_ctx)
+    limit: int = 50,
+    offset: int = 0,
+    search: str | None = None,
+    sort_by: str = "date",
+    sort_dir: str = "desc",
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict:
-    drafts = ctx.services.supabase.list_product_drafts(limit=limit, offset=offset)
+    drafts = ctx.services.supabase.list_product_drafts(
+        limit=limit,
+        offset=offset,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
     return {"drafts": drafts}
 
 
@@ -412,6 +423,8 @@ async def submit_products_to_shopify(
     products_json: str = Form(...),
     import_mode: str = Form(...),
     run_id: str | None = Form(None),
+    draft_id: str | None = Form(None),
+    document_name: str | None = Form(None),
     shop_domain: str | None = Form(None),
     shop_access_token: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
@@ -593,6 +606,30 @@ async def submit_products_to_shopify(
             )
 
     status = "success" if success_count == len(products) else "error"
+    submitted_id: str | None = None
+    if status == "success":
+        inferred_name = document_name
+        if not inferred_name and draft_id:
+            draft = ctx.services.supabase.get_product_draft(draft_id)
+            if draft:
+                inferred_name = draft.get("draft_name") or draft.get("first_product_title")
+        if not inferred_name:
+            inferred_name = str(products[0].get("title") or "Submitted document")
+        submitted = ctx.services.supabase.save_submitted_document(
+            submitted_id=str(uuid.uuid4()),
+            run_id=current_run_id,
+            draft_id=draft_id,
+            name=str(inferred_name),
+            import_mode=import_mode,
+            product_count=len(products),
+            products=products,
+        )
+        submitted_id = str(submitted.get("submitted_id"))
+        emit_and_persist(
+            phase="submit_recorded",
+            message="Recorded submitted document",
+            payload_preview={"submitted_id": submitted_id, "draft_id": draft_id},
+        )
     ctx.services.supabase.finalize_run(
         current_run_id,
         status=status,
@@ -610,12 +647,64 @@ async def submit_products_to_shopify(
 
     return {
         "run_id": current_run_id,
+        "submitted_id": submitted_id,
         "import_mode": import_mode,
         "total": len(products),
         "success_count": success_count,
         "failed_count": len(products) - success_count,
         "results": results,
     }
+
+
+@router.get("/submitted-documents", summary="List submitted documents")
+async def list_submitted_documents(
+    limit: int = 50,
+    offset: int = 0,
+    search: str | None = None,
+    sort_by: str = "date",
+    sort_dir: str = "desc",
+    ctx: AppContext = Depends(get_ctx),
+) -> dict:
+    documents = ctx.services.supabase.list_submitted_documents(
+        limit=limit,
+        offset=offset,
+        search=search,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+    )
+    return {"submitted_documents": documents}
+
+
+@router.get("/submitted-documents/{submitted_id}", summary="Get submitted document")
+async def get_submitted_document(submitted_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
+    document = ctx.services.supabase.get_submitted_document(submitted_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Submitted document not found")
+    return {"submitted_document": document}
+
+
+@router.post("/submitted-documents/{submitted_id}/resume-file", summary="Create preview file from submitted document")
+async def create_submitted_document_resume_file(
+    submitted_id: str, ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    document = ctx.services.supabase.get_submitted_document(submitted_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Submitted document not found")
+    products = document.get("products")
+    if not isinstance(products, list) or not products:
+        raise HTTPException(status_code=400, detail="Submitted document has no products")
+
+    parsed = ProductsList.model_validate({"products": products})
+    output_bytes = create_excel_bytes(parsed)
+    file_id = str(uuid.uuid4())
+    filename = f"submitted-{submitted_id[:8]}.xlsx"
+    ctx.services.supabase.save_file(
+        file_id=file_id,
+        name=filename,
+        content=output_bytes,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    return {"file_id": file_id, "filename": filename}
 
 
 @router.get("/runs/{run_id}/events", summary="Stream live workflow events")

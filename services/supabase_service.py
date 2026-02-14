@@ -14,6 +14,7 @@ class SupabaseService(SupabaseServiceInterface):
         self.bucket_name = bucket_name or os.environ.get("FILES_BUCKET_NAME", "documents")
         self.file_storage: dict[str, dict[str, Any]] = {}
         self.product_drafts: dict[str, dict[str, Any]] = {}
+        self.submitted_documents: dict[str, dict[str, Any]] = {}
 
     def _try_get_bucket(self):
         try:
@@ -388,8 +389,16 @@ class SupabaseService(SupabaseServiceInterface):
         self.product_drafts[draft_id] = payload
         return payload
 
-    def list_product_drafts(self, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+    def list_product_drafts(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
+    ) -> list[dict[str, Any]]:
         db_drafts: list[dict[str, Any]] = []
+        submitted_draft_ids: set[str] = set()
         client = self._get_supabase_client()
         if client:
             try:
@@ -397,12 +406,22 @@ class SupabaseService(SupabaseServiceInterface):
                     client.table("product_drafts")
                     .select("*")
                     .order("created_at", desc=True)
-                    .range(offset, offset + limit - 1)
+                    .limit(1000)
                     .execute()
                 )
                 db_drafts = res.data or []
             except Exception:
                 LOG.exception("Failed listing product drafts")
+            try:
+                submitted_res = (
+                    client.table("submitted_documents").select("draft_id").limit(1000).execute()
+                )
+                for item in submitted_res.data or []:
+                    draft_id = item.get("draft_id")
+                    if draft_id:
+                        submitted_draft_ids.add(str(draft_id))
+            except Exception:
+                LOG.debug("Submitted documents table unavailable for draft filtering", exc_info=True)
 
         drafts_map: dict[str, dict[str, Any]] = {
             str(item.get("draft_id")): item for item in db_drafts if item.get("draft_id")
@@ -410,8 +429,35 @@ class SupabaseService(SupabaseServiceInterface):
         for key, item in self.product_drafts.items():
             drafts_map[str(item.get("draft_id") or key)] = item
 
-        drafts = list(drafts_map.values())
-        drafts.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        for item in self.submitted_documents.values():
+            draft_id = item.get("draft_id")
+            if draft_id:
+                submitted_draft_ids.add(str(draft_id))
+
+        drafts = [
+            item
+            for item in drafts_map.values()
+            if str(item.get("draft_id") or "") not in submitted_draft_ids
+        ]
+        if search:
+            search_lower = search.strip().lower()
+            drafts = [
+                item
+                for item in drafts
+                if search_lower in str(item.get("draft_name") or "").lower()
+                or search_lower in str(item.get("first_product_title") or "").lower()
+            ]
+
+        reverse = sort_dir.lower() != "asc"
+        if sort_by == "name":
+            drafts.sort(
+                key=lambda item: (
+                    str(item.get("draft_name") or item.get("first_product_title") or "").lower()
+                ),
+                reverse=reverse,
+            )
+        else:
+            drafts.sort(key=lambda item: item.get("created_at") or "", reverse=reverse)
         return drafts[offset : offset + limit]
 
     def get_product_draft(self, draft_id: str) -> dict[str, Any] | None:
@@ -431,3 +477,98 @@ class SupabaseService(SupabaseServiceInterface):
                 LOG.exception("Failed fetching product draft %s", draft_id)
 
         return self.product_drafts.get(draft_id)
+
+    def save_submitted_document(
+        self,
+        *,
+        submitted_id: str,
+        run_id: str | None,
+        draft_id: str | None,
+        name: str,
+        import_mode: str,
+        product_count: int,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        now = self._utc_now()
+        payload = {
+            "submitted_id": submitted_id,
+            "run_id": run_id,
+            "draft_id": draft_id,
+            "name": name,
+            "import_mode": import_mode,
+            "product_count": product_count,
+            "products": products,
+            "submitted_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        client = self._get_supabase_client()
+        if client:
+            try:
+                client.table("submitted_documents").upsert(payload, on_conflict="submitted_id").execute()
+                return payload
+            except Exception:
+                LOG.exception("Failed saving submitted document %s", submitted_id)
+                try:
+                    compat_payload = dict(payload)
+                    compat_payload.pop("draft_id", None)
+                    client.table("submitted_documents").upsert(
+                        compat_payload, on_conflict="submitted_id"
+                    ).execute()
+                except Exception:
+                    LOG.exception("Fallback save for submitted document %s also failed", submitted_id)
+        self.submitted_documents[submitted_id] = payload
+        return payload
+
+    def list_submitted_documents(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
+    ) -> list[dict[str, Any]]:
+        db_docs: list[dict[str, Any]] = []
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = client.table("submitted_documents").select("*").limit(1000).execute()
+                db_docs = res.data or []
+            except Exception:
+                LOG.exception("Failed listing submitted documents")
+
+        docs_map: dict[str, dict[str, Any]] = {
+            str(item.get("submitted_id")): item for item in db_docs if item.get("submitted_id")
+        }
+        for key, item in self.submitted_documents.items():
+            docs_map[str(item.get("submitted_id") or key)] = item
+
+        docs = list(docs_map.values())
+        if search:
+            search_lower = search.strip().lower()
+            docs = [doc for doc in docs if search_lower in str(doc.get("name") or "").lower()]
+
+        reverse = sort_dir.lower() != "asc"
+        if sort_by == "name":
+            docs.sort(key=lambda doc: str(doc.get("name") or "").lower(), reverse=reverse)
+        else:
+            docs.sort(key=lambda doc: doc.get("submitted_at") or doc.get("created_at") or "", reverse=reverse)
+        return docs[offset : offset + limit]
+
+    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("submitted_documents")
+                    .select("*")
+                    .eq("submitted_id", submitted_id)
+                    .limit(1)
+                    .execute()
+                )
+                rows = res.data or []
+                if rows:
+                    return rows[0]
+            except Exception:
+                LOG.exception("Failed fetching submitted document %s", submitted_id)
+        return self.submitted_documents.get(submitted_id)

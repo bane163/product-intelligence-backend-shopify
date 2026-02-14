@@ -58,10 +58,38 @@ class SupabaseServiceInterface(Protocol):
     ) -> dict[str, Any]: ...
 
     def list_product_drafts(
-        self, limit: int = 50, offset: int = 0
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
     ) -> list[dict[str, Any]]: ...
 
     def get_product_draft(self, draft_id: str) -> dict[str, Any] | None: ...
+
+    def save_submitted_document(
+        self,
+        *,
+        submitted_id: str,
+        run_id: str | None,
+        draft_id: str | None,
+        name: str,
+        import_mode: str,
+        product_count: int,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    def list_submitted_documents(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
+    ) -> list[dict[str, Any]]: ...
+
+    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None: ...
 
 
 class CollaboraServiceInterface(Protocol):

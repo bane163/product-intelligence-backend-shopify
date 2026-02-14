@@ -156,12 +156,14 @@ async def test_save_product_draft():
             "products_json": json.dumps([{"title": "Draft Product"}]),
             "run_id": "run-1",
             "import_mode": "create",
+            "draft_name": "products.xlsx",
         }
         r = await ac.post("/agents/product-drafts", data=payload)
         assert r.status_code == 200
         body = r.json()
         assert body["product_count"] == 1
         assert body["import_mode"] == "create"
+        assert body["draft_name"] == "products.xlsx"
         assert "draft_id" in body
 
 

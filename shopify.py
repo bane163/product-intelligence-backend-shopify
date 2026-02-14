@@ -1,6 +1,7 @@
 import os
 from typing import Any, Dict, Optional, List
 import pathlib
+from urllib.parse import urlparse
 
 import httpx
 
@@ -25,6 +26,19 @@ def _load_graphql(name: str) -> str:
         raise RuntimeError(f"GraphQL file not found: {path}")
 
 
+def _normalize_shop(shop: str | None) -> str | None:
+    if not shop:
+        return None
+    value = shop.strip()
+    if not value:
+        return None
+    if "://" in value:
+        parsed = urlparse(value)
+        host = parsed.netloc or parsed.path
+        return host.strip("/") or None
+    return value.strip("/")
+
+
 class ShopifyClient:
     """
     Minimal async Shopify GraphQL helper.
@@ -38,7 +52,7 @@ class ShopifyClient:
         # Defer resolution/creation of the httpx client until it's needed.
         # This allows constructing a ShopifyClient with only a shop or only
         # client credentials in process, and attaching the token later.
-        self.shop = shop or os.getenv("SHOPIFY_STORE")
+        self.shop = _normalize_shop(shop or os.getenv("SHOPIFY_STORE"))
         # token may be provided directly; otherwise resolved lazily
         self._token = token or os.getenv("SHOPIFY_ACCESS_TOKEN")
 
@@ -78,6 +92,7 @@ class ShopifyClient:
         # Resolve shop
         if not self.shop:
             self.shop = os.getenv("SHOPIFY_STORE")
+            self.shop = _normalize_shop(self.shop)
             if self.shop:
                 self.url = (
                     f"https://{self.shop}/admin/api/2025-10/graphql.json"

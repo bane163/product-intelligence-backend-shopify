@@ -53,6 +53,7 @@ class SupabaseServiceInterface(Protocol):
         draft_id: str,
         run_id: str | None,
         import_mode: str,
+        draft_name: str | None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
 

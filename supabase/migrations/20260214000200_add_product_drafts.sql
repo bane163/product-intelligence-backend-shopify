@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS public.product_drafts (
     draft_id TEXT UNIQUE NOT NULL,
     run_id TEXT,
     import_mode TEXT NOT NULL,
+    draft_name TEXT,
     product_count INTEGER NOT NULL DEFAULT 0,
     first_product_title TEXT,
     products JSONB NOT NULL DEFAULT '[]'::jsonb,

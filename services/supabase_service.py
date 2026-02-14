@@ -351,6 +351,7 @@ class SupabaseService(SupabaseServiceInterface):
         draft_id: str,
         run_id: str | None,
         import_mode: str,
+        draft_name: str | None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         now = self._utc_now()
@@ -361,6 +362,7 @@ class SupabaseService(SupabaseServiceInterface):
             "draft_id": draft_id,
             "run_id": run_id,
             "import_mode": import_mode,
+            "draft_name": draft_name,
             "products": products,
             "product_count": len(products),
             "first_product_title": first_title,
@@ -377,6 +379,7 @@ class SupabaseService(SupabaseServiceInterface):
                 try:
                     compat_payload = dict(payload)
                     compat_payload.pop("first_product_title", None)
+                    compat_payload.pop("draft_name", None)
                     client.table("product_drafts").upsert(
                         compat_payload, on_conflict="draft_id"
                     ).execute()

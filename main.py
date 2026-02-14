@@ -6,9 +6,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router
 
-# Import routers from the routes package
-from routes.shopify_products import router as shopify_router
-from routes.agents import router as agents_router
+# Import routers from the api package
+from api.shopify_products import router as shopify_router
+from api.agents import router as agents_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

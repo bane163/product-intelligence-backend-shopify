@@ -91,9 +91,14 @@ async def run_agent_on_inputs(
         trace_event,
         phase="llm_prepare",
         message="Preparing agent request payload",
-        payload_preview={"extracted_chars": len(extracted_text), "png_count": len(png_bytes or [])},
+        payload_preview={
+            "extracted_chars": len(extracted_text),
+            "png_count": len(png_bytes or []),
+        },
         metadata={
-            "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+            "model_name": _resolve_model_env(model_env).get(
+                "OLLAMA_MODEL_ID", "deepseek-r1:8b"
+            ),
             "provider": "ollama/openai-compat",
         },
     )
@@ -196,7 +201,9 @@ async def run_agent_on_inputs(
             phase="llm_usage",
             message="Captured LLM token usage",
             metadata={
-                "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+                "model_name": _resolve_model_env(model_env).get(
+                    "OLLAMA_MODEL_ID", "deepseek-r1:8b"
+                ),
                 "provider": "ollama/openai-compat",
                 "usage": usage,
             },
@@ -209,7 +216,9 @@ async def run_agent_on_inputs(
             message="LLM token usage unavailable from provider response",
             level="warning",
             metadata={
-                "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+                "model_name": _resolve_model_env(model_env).get(
+                    "OLLAMA_MODEL_ID", "deepseek-r1:8b"
+                ),
                 "provider": "ollama/openai-compat",
             },
             payload_preview={},
@@ -258,31 +267,28 @@ async def run_excel_writer_agent(
         base_name, _ = os.path.splitext(requested_name)
         filename = f"{base_name}.xlsx"
 
-        # Upload to Supabase storage (or in-memory fallback)
-        if supabase_service is not None:
-            supabase_service.save_file(
-                file_id,
-                filename,
-                xlsx_bytes,
-                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        if supabase_service is None:
+            raise RuntimeError(
+                "Supabase service required for storage upload in write_products_workbook tool"
             )
-        else:
-            try:
-                from ..routes._storage import save_file
-            except Exception:
-                from routes._storage import save_file
 
-            save_file(
-                file_id,
-                filename,
-                xlsx_bytes,
-                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        # Upload to Supabase storage
+        supabase_service.save_file(
+            file_id,
+            filename,
+            xlsx_bytes,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
         _trace(
             trace_event,
             phase="writer_upload",
             message="Uploaded generated workbook to storage",
-            payload_preview={"file_id": file_id, "filename": filename, "bytes": len(xlsx_bytes)},
+            payload_preview={
+                "file_id": file_id,
+                "filename": filename,
+                "bytes": len(xlsx_bytes),
+            },
         )
 
         # Record metadata for the caller
@@ -342,7 +348,9 @@ async def run_excel_writer_agent(
             phase="writer_usage",
             message="Captured writer token usage",
             metadata={
-                "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+                "model_name": _resolve_model_env(model_env).get(
+                    "OLLAMA_MODEL_ID", "deepseek-r1:8b"
+                ),
                 "provider": "ollama/openai-compat",
                 "usage": usage,
             },
@@ -376,13 +384,21 @@ async def run_excel_writer_agent(
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        generated_file = {"file_id": file_id, "filename": filename, "storage_path": file_id}
+        generated_file = {
+            "file_id": file_id,
+            "filename": filename,
+            "storage_path": file_id,
+        }
         _trace(
             trace_event,
             phase="writer_upload_fallback",
             level="warning",
             message="Writer agent skipped tool; uploaded workbook via deterministic fallback",
-            payload_preview={"file_id": file_id, "filename": filename, "bytes": len(xlsx_bytes)},
+            payload_preview={
+                "file_id": file_id,
+                "filename": filename,
+                "bytes": len(xlsx_bytes),
+            },
         )
         try:
             setattr(response, "generated_file", generated_file)

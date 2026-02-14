@@ -108,6 +108,7 @@ def get_agent_workflow(
     write_to_file: bool = False,
     output_path: Optional[str] = None,
     writer_agent_prompt: Optional[str] = None,
+    trace_event=None,
 ) -> Workflow:
     """Build and return a Workflow for the provided excel/csv bytes or a
     filesystem path to an excel/csv file.
@@ -132,6 +133,16 @@ def get_agent_workflow(
 
     is_csv = not is_excel
 
+    def _trace(phase: str, message: str, *, level: str = "info", payload_preview=None, error=None) -> None:
+        if trace_event:
+            trace_event(
+                phase=phase,
+                message=message,
+                level=level,
+                payload_preview=payload_preview,
+                error=error,
+            )
+
     # Simple start executor — forwards the incoming bytes to downstream nodes.
     @executor(id="file_executor")
     async def file_executor(
@@ -148,8 +159,10 @@ def get_agent_workflow(
         except Exception as exc:
             # Surface a helpful message and re-raise so callers can see why
             print(f"file_executor error resolving payload: {exc}")
+            _trace("file_resolve_error", "Failed to resolve workflow payload", level="error", error=str(exc))
             raise
 
+        _trace("file_resolved", "Workflow payload resolved", payload_preview={"bytes": len(payload) if isinstance(payload, (bytes, bytearray)) else None})
         await ctx.send_message(payload)
 
     # Extract executor — converts bytes -> extracted text and forwards a dict
@@ -158,12 +171,16 @@ def get_agent_workflow(
         # Use CSV extractor for CSV files, otherwise Excel extractor.
         if is_csv:
             print("Extracting CSV contents")
+            _trace("extract_start", "Starting CSV extraction")
             text = extract_csv_contents(data)
+            _trace("extract_done", "CSV extraction completed", payload_preview={"chars": len(text)})
             # For CSVs we won't produce a png; include an empty png_bytes so
             # AgentCollector can run without waiting for image input.
             await ctx.send_message({"extracted": text, "png_bytes": None})
         else:
+            _trace("extract_start", "Starting Excel extraction")
             text = extract_excel_contents(data)
+            _trace("extract_done", "Excel extraction completed", payload_preview={"chars": len(text)})
             await ctx.send_message({"extracted": text})
 
     # Convert executor chain: excel bytes -> pdf -> png (base64)
@@ -173,6 +190,7 @@ def get_agent_workflow(
             "COLLABORA_URL", "http://localhost:8080"
         )
         pdf = await convert_excel_to_pdf_collabora(data, collabora_base_url=collabora)
+        _trace("collabora_pdf_done", "Converted workbook to PDF", payload_preview={"bytes": len(pdf)})
         await ctx.send_message(pdf)
 
     @executor(id="pdf_to_png_executor")
@@ -183,6 +201,7 @@ def get_agent_workflow(
         pngs = await convert_pdf_to_png_collabora(
             pdf_bytes, collabora_base_url=collabora
         )
+        _trace("collabora_png_done", "Converted PDF to PNG pages", payload_preview={"pages": len(pngs)})
 
         await ctx.send_message({"png_bytes": pngs})
 
@@ -201,6 +220,7 @@ def get_agent_workflow(
             products_list = ProductsList.model_validate_json(response.text)
 
         print(f"The products list contains: {products_list}")
+        _trace("products_parsed", "Parsed products list from LLM response", payload_preview={"products": len(products_list.products)})
 
         if write_to_file:
             await ctx.send_message(products_list)
@@ -229,6 +249,7 @@ def get_agent_workflow(
                 output_path=excel_output_path,
                 agent_prompt=writer_prompt,
                 model_env=model_env,
+                trace_event=trace_event,
             )
             response_text = response.text or f"Workbook saved to {excel_output_path}"
             print(f"Excel writer agent response: {response_text}")
@@ -250,6 +271,7 @@ def get_agent_workflow(
         agent_prompt=agent_prompt,
         model_env=model_env,
         allow_without_image=is_csv,
+        trace_event=trace_event,
     )
 
     # Build the workflow graph. For CSV inputs skip the Collabora conversion
@@ -291,9 +313,10 @@ async def run_excel_agent_workflow(
     write_to_file: bool = False,
     output_path: Optional[str] = None,
     writer_agent_prompt: Optional[str] = None,
-) -> ProductsList | str | None:
+    trace_event=None,
+) -> ProductsList | dict | str | None:
     """Run the workflow built for the given bytes or filesystem path and
-    return the ProductsList or workbook path.
+    return the ProductsList, workbook metadata/path, or None.
 
     This function builds the workflow via `get_agent_workflow`, runs it, and
     returns either the first ProductsList output, the path to a generated workbook
@@ -307,6 +330,7 @@ async def run_excel_agent_workflow(
         write_to_file=write_to_file,
         output_path=output_path,
         writer_agent_prompt=writer_agent_prompt,
+        trace_event=trace_event,
     )
 
     # Pass the original input through to the workflow run. If a filesystem

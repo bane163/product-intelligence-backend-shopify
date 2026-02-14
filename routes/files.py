@@ -6,12 +6,23 @@ previews, and file metadata.
 
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from ai.excel_workflow import run_excel_agent_workflow
+from ._run_logs import complete_run, emit_run_event, stream_run_events
+from ._run_logs_db import (
+    append_run_event,
+    append_run_message,
+    create_or_update_run,
+    finalize_run,
+    get_run,
+    get_run_history,
+    list_runs,
+)
 from ._storage import save_file, get_file, delete_file, list_files
 
 router = APIRouter(tags=["agents"])
@@ -70,6 +81,7 @@ async def upload_file(file: UploadFile = File(...)) -> dict:
 
 @router.post("/excel", summary="Process an Excel file through the AI agent workflow")
 async def process_excel(
+    run_id: str | None = Form(None),
     file_id: str = Form(None),
     file: UploadFile = File(None),
     prompt: str = Form("Please analyze the spreadsheet and the associated image(s)."),
@@ -82,21 +94,131 @@ async def process_excel(
 
     Accepts either file_id or direct upload.
     """
+    run_id = run_id or str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    event_seq = 0
+    message_seq = 0
+    usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def emit_and_persist(
+        *,
+        phase: str,
+        message: str,
+        level: str = "info",
+        payload_preview: Any = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        nonlocal event_seq
+        event_seq += 1
+        event = emit_run_event(
+            run_id,
+            phase=phase,
+            message=message,
+            level=level,
+            payload_preview=payload_preview,
+            error=error,
+            metadata=metadata,
+        )
+        append_run_event(run_id, event, event_seq)
+        return event
+
+    def trace_event(**kwargs):
+        nonlocal message_seq
+        event = emit_and_persist(
+            phase=kwargs.get("phase", "trace"),
+            message=kwargs.get("message", ""),
+            level=kwargs.get("level", "info"),
+            payload_preview=kwargs.get("payload_preview"),
+            error=kwargs.get("error"),
+            metadata=kwargs.get("metadata"),
+        )
+        transcript_text = kwargs.get("transcript_text")
+        transcript_role = kwargs.get("transcript_role")
+        if transcript_text and transcript_role:
+            message_seq += 1
+            append_run_message(
+                run_id,
+                role=transcript_role,
+                message=transcript_text,
+                seq=message_seq,
+                meta=kwargs.get("transcript_meta"),
+            )
+        metadata = kwargs.get("metadata") or {}
+        usage = metadata.get("usage") if isinstance(metadata, dict) else None
+        if isinstance(usage, dict):
+            usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            usage_totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            usage_totals["total_tokens"] += int(usage.get("total_tokens") or 0)
+            create_or_update_run(
+                run_id,
+                {
+                    "prompt_tokens": usage_totals["prompt_tokens"],
+                    "completion_tokens": usage_totals["completion_tokens"],
+                    "total_tokens": usage_totals["total_tokens"],
+                },
+            )
+        if isinstance(metadata, dict) and metadata.get("model_name"):
+            create_or_update_run(
+                run_id,
+                {
+                    "model_name": metadata.get("model_name"),
+                    "provider": metadata.get("provider"),
+                },
+            )
+        return event
+
+    create_or_update_run(
+        run_id,
+        {
+            "status": "running",
+            "source": "excel_import",
+            "started_at": started_at.isoformat(),
+            "prompt": prompt,
+            "writer_prompt": writer_prompt,
+        },
+    )
+    emit_and_persist(
+        phase="request_received",
+        message="Received /agents/excel request",
+        payload_preview={"write_to_file": write_to_file, "has_file_id": bool(file_id)},
+    )
+
     # Get file bytes from either file_id or direct upload
+    input_name: str | None = None
+    input_content_type: str | None = None
     if file_id:
         file_entry = get_file(file_id)
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
         file_bytes = file_entry["content"]
+        input_name = file_entry.get("name")
+        input_content_type = file_entry.get("content_type")
     elif file:
         file_bytes = await file.read()
+        input_name = file.filename
+        input_content_type = file.content_type
     else:
         raise HTTPException(
             status_code=400,
             detail="Either file_id (from /agents/upload) or file upload is required",
         )
+    create_or_update_run(
+        run_id,
+        {
+            "input_file_id": file_id,
+            "input_filename": input_name,
+            "input_content_type": input_content_type,
+            "input_size_bytes": len(file_bytes),
+        },
+    )
 
     try:
+        emit_and_persist(
+            phase="workflow_start",
+            message="Starting excel workflow execution",
+            payload_preview={"input_bytes": len(file_bytes)},
+        )
         result = await run_excel_agent_workflow(
             file_bytes,
             collabora_base_url=collabora_url,
@@ -104,49 +226,31 @@ async def process_excel(
             write_to_file=write_to_file,
             output_path=output_path,
             writer_agent_prompt=writer_prompt,
+            trace_event=trace_event,
         )
+        emit_and_persist(phase="workflow_done", message="Excel workflow completed")
     except RuntimeError as exc:
+        emit_and_persist(
+            phase="workflow_error",
+            message="Excel workflow failed",
+            level="error",
+            error=str(exc),
+        )
+        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        finalize_run(run_id, status="error", duration_ms=duration_ms, error=str(exc))
+        complete_run(run_id)
         raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:
+        emit_and_persist(
+            phase="workflow_error",
+            message="Unexpected workflow error",
+            level="error",
+            error=str(exc),
+        )
+        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        finalize_run(run_id, status="error", duration_ms=duration_ms, error=str(exc))
+        complete_run(run_id)
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
-
-    # If the workflow wrote an output workbook to disk, save it to storage so the
-    # Collabora viewer can open it via the existing WOPI flow. Return the new
-    # file_id and filename in the response so the frontend can show the viewer.
-    generated_file_id = None
-    generated_filename = None
-    if write_to_file and isinstance(result, str):
-        try:
-            if os.path.exists(result):
-                with open(result, "rb") as fh:
-                    out_bytes = fh.read()
-                generated_file_id = str(uuid.uuid4())
-                generated_filename = os.path.basename(result)
-                # Determine content type based on extension (CSV vs XLSX)
-                ct = (
-                    "text/csv"
-                    if generated_filename.lower().endswith(".csv")
-                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                save_file(
-                    generated_file_id,
-                    name=generated_filename,
-                    content=out_bytes,
-                    content_type=ct,
-                )
-                # Remove the local file after uploading so nothing is persisted locally
-                try:
-                    os.remove(result)
-                except Exception:
-                    pass
-                # Replace result with metadata so callers can easily access viewer
-                result = {
-                    "workbook_path": result,
-                    "file_id": generated_file_id,
-                    "filename": generated_filename,
-                }
-        except Exception:
-            LOG = None  # avoid lint error if LOG not used; ignore storage failures
 
     # If the writer already uploaded to storage and returned metadata, accept it
     generated_file_id = None
@@ -186,14 +290,63 @@ async def process_excel(
                         "file_id": generated_file_id,
                         "filename": generated_filename,
                     }
-            except Exception:
-                LOG = None  # avoid lint error if LOG not used; ignore storage failures
+            except Exception as exc:
+                emit_and_persist(
+                    phase="storage_upload_error",
+                    message="Failed to persist generated workbook to storage",
+                    level="error",
+                    error=str(exc),
+                )
 
     # Optionally clean up the stored file after processing
     if file_id:
         delete_file(file_id)
+    output_meta = {}
+    if isinstance(result, dict):
+        output_meta = {
+            "output_file_id": result.get("file_id"),
+            "output_filename": result.get("filename"),
+        }
+    duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+    finalize_run(run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta)
+    emit_and_persist(phase="request_done", message="Completed /agents/excel request")
+    complete_run(run_id)
 
-    return {"result": result}
+    return {"run_id": run_id, "result": result}
+
+
+@router.get("/runs/{run_id}/events", summary="Stream live workflow events")
+async def stream_events(run_id: str) -> StreamingResponse:
+    return StreamingResponse(
+        stream_run_events(run_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/runs", summary="List persisted LLM runs")
+async def list_llm_runs(limit: int = 50, offset: int = 0, status: str | None = None) -> dict:
+    return {"runs": list_runs(limit=limit, offset=offset, status=status)}
+
+
+@router.get("/runs/{run_id}", summary="Get persisted LLM run")
+async def get_llm_run(run_id: str) -> dict:
+    run = get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"run": run}
+
+
+@router.get("/runs/{run_id}/history", summary="Get persisted LLM run history")
+async def get_llm_run_history(run_id: str) -> dict:
+    history = get_run_history(run_id)
+    if history.get("run") is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return history
 
 
 @router.get("/files/{file_id}", summary="Get file info")

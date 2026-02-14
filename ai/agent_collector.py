@@ -22,6 +22,7 @@ class AgentCollector(Executor):
         model_env: Optional[Dict[str, str]] = None,
         *,
         allow_without_image: bool = True,
+        trace_event=None,
     ):
         super().__init__(id=id)
         # naive in-memory buffer keyed by a single run; for demo only
@@ -31,6 +32,7 @@ class AgentCollector(Executor):
         # If True, run the agent when only extracted text is available
         # (useful for CSV inputs which have no image/png).
         self._allow_without_image = allow_without_image
+        self._trace_event = trace_event
 
     @handler
     async def handle(
@@ -47,6 +49,12 @@ class AgentCollector(Executor):
         print(f"Has png: {has_png}, has extracted: {has_extracted}")
 
         if has_extracted and (has_png or self._allow_without_image):
+            if self._trace_event:
+                self._trace_event(
+                    phase="agent_collect",
+                    message="Collected workflow inputs for LLM call",
+                    payload_preview={"has_png": has_png, "has_extracted": has_extracted},
+                )
             extracted = self._buffer.pop("extracted")
             png_bytes: list[bytes] | None = (
                 self._buffer.pop("png_bytes") if has_png else None
@@ -58,6 +66,7 @@ class AgentCollector(Executor):
                 png_bytes,
                 agent_prompt=self._agent_prompt,
                 model_env=self._model_env,
+                trace_event=self._trace_event,
             )
 
             # Forward the agent response to downstream executors so they can

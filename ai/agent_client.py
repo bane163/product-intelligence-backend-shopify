@@ -1,6 +1,6 @@
 import base64
 import os
-from typing import Dict
+from typing import Any, Callable, Dict
 
 from agent_framework import AgentRunResponse, ChatMessage, TextContent, DataContent
 from agent_framework.openai import OpenAIChatClient
@@ -9,6 +9,49 @@ from agent_framework.openai import OpenAIChatClient
 # returns a JSON object with a 'products' array matching ProductInput.
 from .models import ProductsList
 from .excel_writer import create_excel_workbook
+
+TraceFn = Callable[..., None] | None
+
+
+def _trace(
+    trace_event: TraceFn,
+    *,
+    phase: str,
+    message: str,
+    level: str = "info",
+    payload_preview: Any = None,
+    error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    transcript_role: str | None = None,
+    transcript_text: str | None = None,
+    transcript_meta: dict[str, Any] | None = None,
+) -> None:
+    if trace_event is None:
+        return
+    trace_event(
+        phase=phase,
+        message=message,
+        level=level,
+        payload_preview=payload_preview,
+        error=error,
+        metadata=metadata,
+        transcript_role=transcript_role,
+        transcript_text=transcript_text,
+        transcript_meta=transcript_meta,
+    )
+
+
+def _extract_usage(response: AgentRunResponse) -> dict[str, Any] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
 
 
 def _resolve_model_env(model_env: Dict[str, str] | None) -> dict[str, str]:
@@ -36,12 +79,23 @@ async def run_agent_on_inputs(
     png_bytes: list[bytes] | None,
     agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
     model_env: Dict[str, str] | None = None,
+    trace_event: TraceFn = None,
 ) -> AgentRunResponse:
     """Create an agent and run it on the provided extracted text and png (base64).
 
     This encapsulates creating the OpenAI/Ollama client and running the agent so
     caller code stays small and focused.
     """
+    _trace(
+        trace_event,
+        phase="llm_prepare",
+        message="Preparing agent request payload",
+        payload_preview={"extracted_chars": len(extracted_text), "png_count": len(png_bytes or [])},
+        metadata={
+            "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+            "provider": "ollama/openai-compat",
+        },
+    )
     client = _create_chat_client(model_env)
 
     instructions = (
@@ -115,9 +169,51 @@ async def run_agent_on_inputs(
         contents=contents,
     )
 
-    # agent.run returns an AgentRunResponse; when structured parsing succeeds,
-    # response.value contains the ProductsList instance we requested.
-    return await agent.run(user_message)
+    _trace(
+        trace_event,
+        phase="llm_request",
+        message="Calling LLM for product extraction",
+        payload_preview={"prompt_preview": full_prompt[:700]},
+        transcript_role="user",
+        transcript_text=full_prompt,
+        transcript_meta={"call": "extractor"},
+    )
+    response = await agent.run(user_message)
+    _trace(
+        trace_event,
+        phase="llm_response",
+        message="Received LLM extraction response",
+        payload_preview=(response.text or "")[:700],
+        transcript_role="assistant",
+        transcript_text=(response.text or ""),
+        transcript_meta={"call": "extractor"},
+    )
+    usage = _extract_usage(response)
+    if usage:
+        _trace(
+            trace_event,
+            phase="llm_usage",
+            message="Captured LLM token usage",
+            metadata={
+                "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+                "provider": "ollama/openai-compat",
+                "usage": usage,
+            },
+            payload_preview=usage,
+        )
+    else:
+        _trace(
+            trace_event,
+            phase="llm_usage",
+            message="LLM token usage unavailable from provider response",
+            level="warning",
+            metadata={
+                "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+                "provider": "ollama/openai-compat",
+            },
+            payload_preview={},
+        )
+    return response
 
 
 async def run_excel_writer_agent(
@@ -125,6 +221,7 @@ async def run_excel_writer_agent(
     output_path: str,
     agent_prompt: str = "Create an Excel workbook for the provided products.",
     model_env: Dict[str, str] | None = None,
+    trace_event: TraceFn = None,
 ) -> AgentRunResponse:
     """Create a tool-enabled agent that writes the ProductsList to an Excel workbook.
 
@@ -172,6 +269,12 @@ async def run_excel_writer_agent(
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        _trace(
+            trace_event,
+            phase="writer_upload",
+            message="Uploaded generated workbook to storage",
+            payload_preview={"file_id": file_id, "filename": filename, "bytes": len(xlsx_bytes)},
+        )
 
         # Record metadata for the caller
         generated_file["file_id"] = file_id
@@ -204,7 +307,38 @@ async def run_excel_writer_agent(
 
     user_message = ChatMessage(role="user", contents=[TextContent(text=user_prompt)])
 
+    _trace(
+        trace_event,
+        phase="writer_request",
+        message="Calling writer agent",
+        payload_preview={"product_count": len(products_list.products)},
+        transcript_role="user",
+        transcript_text=user_prompt,
+        transcript_meta={"call": "writer"},
+    )
     response = await agent.run(user_message)
+    _trace(
+        trace_event,
+        phase="writer_response",
+        message="Writer agent completed",
+        payload_preview=(response.text or "")[:500],
+        transcript_role="assistant",
+        transcript_text=(response.text or ""),
+        transcript_meta={"call": "writer"},
+    )
+    usage = _extract_usage(response)
+    if usage:
+        _trace(
+            trace_event,
+            phase="writer_usage",
+            message="Captured writer token usage",
+            metadata={
+                "model_name": _resolve_model_env(model_env).get("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+                "provider": "ollama/openai-compat",
+                "usage": usage,
+            },
+            payload_preview=usage,
+        )
 
     # If the agent tool uploaded to storage, attach the metadata to the response
     if generated_file:

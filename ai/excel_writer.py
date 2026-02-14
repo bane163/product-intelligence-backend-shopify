@@ -198,3 +198,19 @@ def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
                 writer.writerow(r)
 
     return csv_path
+
+
+def create_csv_bytes(products_list: ProductsList) -> bytes:
+    """Return CSV bytes for the given ProductsList without writing to disk."""
+    import io
+    import csv as _csv
+
+    output = io.StringIO()
+    writer = _csv.writer(output)
+    writer.writerow(TEMPLATE_HEADERS)
+    for product in products_list.products:
+        rows = _product_to_rows(product)
+        for r in rows:
+            writer.writerow(r)
+
+    return output.getvalue().encode("utf-8")

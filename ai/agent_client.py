@@ -126,23 +126,59 @@ async def run_excel_writer_agent(
     agent_prompt: str = "Create an Excel workbook for the provided products.",
     model_env: Dict[str, str] | None = None,
 ) -> AgentRunResponse:
-    """Create a tool-enabled agent that writes the ProductsList to an Excel workbook."""
+    """Create a tool-enabled agent that writes the ProductsList to an Excel workbook.
+
+    This implementation uploads the generated CSV bytes directly to Supabase storage
+    instead of writing to a local filesystem path. The agent may still call the
+    tool `write_products_workbook` during its run; that tool will perform the
+    upload and record the generated file metadata which is attached to the
+    returned AgentRunResponse as `generated_file`.
+    """
 
     client = _create_chat_client(model_env)
 
     absolute_path = os.path.abspath(output_path)
 
-    def write_products_workbook() -> str:
-        """Persist the captured ProductsList to an Excel workbook."""
+    # Holder for information the tool will populate when it uploads to storage
+    generated_file: dict[str, str] = {}
 
-        return create_excel_workbook(products_list, absolute_path)
+    def write_products_workbook() -> str:
+        """Persist the captured ProductsList to Supabase Storage and return the storage key.
+
+        The tool writes CSV bytes in-memory and uploads them using the `save_file`
+        helper. It records `file_id` and `filename` into `generated_file` for the
+        caller to inspect after the agent run.
+        """
+        # Import here to avoid import-time dependency when Supabase isn't configured
+        from .excel_writer import create_csv_bytes
+        try:
+            from ..routes._storage import save_file
+        except Exception:
+            # fallback absolute import
+            from routes._storage import save_file
+
+        import uuid
+
+        csv_bytes = create_csv_bytes(products_list)
+        file_id = str(uuid.uuid4())
+        filename = os.path.basename(absolute_path) or f"{file_id}.csv"
+
+        # Upload to Supabase storage (or in-memory fallback)
+        save_file(file_id, filename, csv_bytes, content_type="text/csv")
+
+        # Record metadata for the caller
+        generated_file["file_id"] = file_id
+        generated_file["filename"] = filename
+        generated_file["storage_path"] = file_id
+
+        return file_id
 
     write_products_workbook.__name__ = "write_products_workbook"
 
     agent_instructions = (
         "You generate Excel workbooks for Shopify product imports. "
         "Call the tool `write_products_workbook` exactly once to create the workbook using the provided data. "
-        "After calling the tool, respond with a confirmation that includes the saved file path."
+        "After calling the tool, respond with a confirmation that includes the saved file path or identifier."
     )
 
     agent = client.create_agent(
@@ -163,21 +199,31 @@ async def run_excel_writer_agent(
 
     response = await agent.run(user_message)
 
+    # If the agent tool uploaded to storage, attach the metadata to the response
+    if generated_file:
+        try:
+            setattr(response, "generated_file", generated_file)
+        except Exception:
+            # best-effort: not critical if attaching fails
+            pass
+
+        return response
+
+    # Fallback: if the tool did not run or didn't upload, attempt the previous
+    # disk-based heuristics so older behavior remains supported.
     if not os.path.exists(absolute_path):
-        # Try an alternate CSV path next to the requested file
         csv_path = absolute_path + ".csv"
         if os.path.exists(csv_path):
             absolute_path = csv_path
         else:
-            # Attempt to find a .csv path in the agent response text before failing
             csv_candidate = None
             resp_text = getattr(response, "text", None)
             if isinstance(resp_text, str):
                 import re
+
                 m = re.search(r"(/?[^\\s'\"<>]*?\\.csv)", resp_text)
                 if m:
                     candidate = m.group(1)
-                    # Make absolute if necessary
                     if not os.path.isabs(candidate):
                         candidate = os.path.abspath(candidate)
                     if os.path.exists(candidate):

@@ -164,9 +164,29 @@ async def run_excel_writer_agent(
     response = await agent.run(user_message)
 
     if not os.path.exists(absolute_path):
-        raise RuntimeError(
-            "Excel writer agent did not produce a workbook at the expected location: "
-            f"{absolute_path}"
-        )
+        # Try an alternate CSV path next to the requested file
+        csv_path = absolute_path + ".csv"
+        if os.path.exists(csv_path):
+            absolute_path = csv_path
+        else:
+            # Attempt to find a .csv path in the agent response text before failing
+            csv_candidate = None
+            resp_text = getattr(response, "text", None)
+            if isinstance(resp_text, str):
+                import re
+                m = re.search(r"(/?[^\\s'\"<>]*?\\.csv)", resp_text)
+                if m:
+                    candidate = m.group(1)
+                    # Make absolute if necessary
+                    if not os.path.isabs(candidate):
+                        candidate = os.path.abspath(candidate)
+                    if os.path.exists(candidate):
+                        absolute_path = candidate
+                        csv_candidate = candidate
+            if not os.path.exists(absolute_path):
+                raise RuntimeError(
+                    "Excel writer agent did not produce a workbook at the expected location: "
+                    f"{absolute_path}"
+                )
 
     return response

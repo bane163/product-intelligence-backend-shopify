@@ -118,17 +118,27 @@ async def process_excel(
     if write_to_file and isinstance(result, str):
         try:
             if os.path.exists(result):
-                out_bytes = open(result, "rb").read()
+                with open(result, "rb") as fh:
+                    out_bytes = fh.read()
                 generated_file_id = str(uuid.uuid4())
                 generated_filename = os.path.basename(result)
+                # Determine content type based on extension (CSV vs XLSX)
+                ct = (
+                    "text/csv"
+                    if generated_filename.lower().endswith(".csv")
+                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
                 save_file(
                     generated_file_id,
                     name=generated_filename,
                     content=out_bytes,
-                    content_type=(
-                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    ),
+                    content_type=ct,
                 )
+                # Remove the local file after uploading so nothing is persisted locally
+                try:
+                    os.remove(result)
+                except Exception:
+                    pass
                 # Replace result with metadata so callers can easily access viewer
                 result = {
                     "workbook_path": result,

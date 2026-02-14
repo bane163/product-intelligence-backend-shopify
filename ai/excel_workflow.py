@@ -217,7 +217,7 @@ def get_agent_workflow(
         excel_output_path = os.path.abspath(
             output_path
             if output_path is not None
-            else os.path.join(os.getcwd(), "agent_products.xlsx")
+            else os.path.join(os.getcwd(), "agent_products.csv")
         )
 
         @executor(id="excel_writer_executor")

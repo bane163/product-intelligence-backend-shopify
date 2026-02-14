@@ -110,6 +110,34 @@ async def process_excel(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
 
+    # If the workflow wrote an output workbook to disk, save it to storage so the
+    # Collabora viewer can open it via the existing WOPI flow. Return the new
+    # file_id and filename in the response so the frontend can show the viewer.
+    generated_file_id = None
+    generated_filename = None
+    if write_to_file and isinstance(result, str):
+        try:
+            if os.path.exists(result):
+                out_bytes = open(result, "rb").read()
+                generated_file_id = str(uuid.uuid4())
+                generated_filename = os.path.basename(result)
+                save_file(
+                    generated_file_id,
+                    name=generated_filename,
+                    content=out_bytes,
+                    content_type=(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    ),
+                )
+                # Replace result with metadata so callers can easily access viewer
+                result = {
+                    "workbook_path": result,
+                    "file_id": generated_file_id,
+                    "filename": generated_filename,
+                }
+        except Exception:
+            LOG = None  # avoid lint error if LOG not used; ignore storage failures
+
     # Optionally clean up the stored file after processing
     if file_id:
         delete_file(file_id)

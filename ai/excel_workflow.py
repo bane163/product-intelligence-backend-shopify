@@ -222,7 +222,7 @@ def get_agent_workflow(
 
         @executor(id="excel_writer_executor")
         async def excel_writer_executor(
-            products_list: ProductsList, ctx: WorkflowContext[Never, str]
+            products_list: ProductsList, ctx: WorkflowContext[Never, dict | str]
         ) -> None:
             response = await run_excel_writer_agent(
                 products_list,
@@ -232,7 +232,15 @@ def get_agent_workflow(
             )
             response_text = response.text or f"Workbook saved to {excel_output_path}"
             print(f"Excel writer agent response: {response_text}")
-            await ctx.yield_output(excel_output_path)
+            # If the writer uploaded directly to storage it will attach metadata
+            # under `generated_file` on the AgentRunResponse. Yield that so
+            # callers (routes/files) can provide the Collabora viewer using the
+            # storage file_id rather than trying to read a local file.
+            generated = getattr(response, "generated_file", None)
+            if generated:
+                await ctx.yield_output(generated)
+            else:
+                await ctx.yield_output(excel_output_path)
 
     # Agent-collector executor: accumulate partial inputs and call the agent
     # The implementation lives in `ai.agent_collector.AgentCollector` and is

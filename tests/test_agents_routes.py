@@ -198,3 +198,9 @@ async def test_list_and_get_product_draft():
         detail = await ac.get(f"/agents/product-drafts/{draft_id}")
         assert detail.status_code == 200
         assert detail.json()["draft"]["draft_id"] == draft_id
+
+        resume = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
+        assert resume.status_code == 200
+        resume_body = resume.json()
+        assert "file_id" in resume_body
+        assert resume_body["filename"].endswith(".xlsx")

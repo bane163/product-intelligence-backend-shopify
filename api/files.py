@@ -14,6 +14,8 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response, StreamingResponse
 
 from app_context import AppContext, get_ctx
+from ai.excel_writer import create_excel_bytes
+from ai.models import ProductsList
 from shopify import ShopifyClient
 
 router = APIRouter(tags=["agents"])
@@ -376,6 +378,30 @@ async def get_product_draft(draft_id: str, ctx: AppContext = Depends(get_ctx)) -
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
     return {"draft": draft}
+
+
+@router.post("/product-drafts/{draft_id}/resume-file", summary="Create preview file from draft")
+async def create_product_draft_resume_file(
+    draft_id: str, ctx: AppContext = Depends(get_ctx)
+) -> dict:
+    draft = ctx.services.supabase.get_product_draft(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    products = draft.get("products")
+    if not isinstance(products, list) or not products:
+        raise HTTPException(status_code=400, detail="Draft has no products")
+
+    parsed = ProductsList.model_validate({"products": products})
+    output_bytes = create_excel_bytes(parsed)
+    file_id = str(uuid.uuid4())
+    filename = f"draft-{draft_id[:8]}.xlsx"
+    ctx.services.supabase.save_file(
+        file_id=file_id,
+        name=filename,
+        content=output_bytes,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    return {"file_id": file_id, "filename": filename}
 
 
 @router.post("/submit-products", summary="Submit extracted products to Shopify")

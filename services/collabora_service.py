@@ -21,9 +21,8 @@ class CollaboraService(CollaboraServiceInterface):
         collabora_base_url: str = "http://localhost:8080",
         timeout: int = 60,
     ) -> bytes:
-        _ = timeout
         return await collabora_utils.convert_excel_to_pdf_collabora(
-            file_bytes, collabora_base_url=collabora_base_url
+            file_bytes, collabora_base_url=collabora_base_url, timeout=timeout
         )
 
     async def convert_pdf_to_png_collabora(
@@ -32,9 +31,25 @@ class CollaboraService(CollaboraServiceInterface):
         collabora_base_url: str = "http://localhost:8080",
         timeout: int = 60,
     ) -> list[bytes]:
-        _ = timeout
         return await collabora_utils.convert_pdf_to_png_collabora(
-            pdf_bytes, collabora_base_url=collabora_base_url
+            pdf_bytes, collabora_base_url=collabora_base_url, timeout=timeout
+        )
+
+    async def convert_document_to_png_collabora(
+        self,
+        file_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> list[bytes]:
+        return await collabora_utils.convert_document_to_png_collabora(
+            file_bytes,
+            filename=filename,
+            content_type=content_type,
+            collabora_base_url=collabora_base_url,
+            timeout=timeout,
         )
 
     @staticmethod

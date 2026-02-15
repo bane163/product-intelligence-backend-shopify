@@ -15,6 +15,10 @@ class SupabaseServiceInterface(Protocol):
 
     def delete_file(self, file_id: str) -> bool: ...
 
+    def save_file_thumbnail(self, *, file_id: str, content: bytes) -> str | None: ...
+
+    def get_file_thumbnail(self, file_id: str) -> bytes | None: ...
+
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None: ...
 
     def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None: ...
@@ -159,6 +163,16 @@ class CollaboraServiceInterface(Protocol):
     async def convert_pdf_to_png_collabora(
         self,
         pdf_bytes: bytes,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> list[bytes]: ...
+
+    async def convert_document_to_png_collabora(
+        self,
+        file_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str,
         collabora_base_url: str = "http://localhost:8080",
         timeout: int = 60,
     ) -> list[bytes]: ...

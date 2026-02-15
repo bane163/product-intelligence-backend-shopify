@@ -22,6 +22,10 @@ class SupabaseService(SupabaseServiceInterface):
         self.submitted_documents: dict[str, dict[str, Any]] = {}
         self.llm_model_configs: dict[str, dict[str, Any]] = {}
 
+    @staticmethod
+    def _thumbnail_path(file_id: str) -> str:
+        return f"thumbnails/{file_id}.png"
+
     def _try_get_bucket(self):
         try:
             from supabase_client import get_storage
@@ -57,6 +61,8 @@ class SupabaseService(SupabaseServiceInterface):
                 "content": content,
                 "content_type": content_type or "application/octet-stream",
                 "storage_path": file_id,
+                "thumbnail_storage_path": None,
+                "thumbnail_content": None,
             }
             return
 
@@ -123,6 +129,7 @@ class SupabaseService(SupabaseServiceInterface):
                     "storage_path": k,
                     "filename": v["name"],
                     "content_type": v["content_type"],
+                    "thumbnail_storage_path": v.get("thumbnail_storage_path"),
                 }
                 for k, v in self.file_storage.items()
             ]
@@ -137,6 +144,7 @@ class SupabaseService(SupabaseServiceInterface):
                     "content_type": f.get("metadata", {}).get("mimetype"),
                     "size": f.get("metadata", {}).get("size"),
                     "created_at": f.get("created_at"),
+                    "thumbnail_storage_path": None,
                 }
                 for f in files
             ]
@@ -162,6 +170,7 @@ class SupabaseService(SupabaseServiceInterface):
 
         name = file_id
         content_type = "application/octet-stream"
+        thumbnail_storage_path = None
         try:
             client = self._get_supabase_client()
             if client:
@@ -177,6 +186,7 @@ class SupabaseService(SupabaseServiceInterface):
                     meta = rows[0]
                     name = meta.get("filename", name)
                     content_type = meta.get("content_type", content_type)
+                    thumbnail_storage_path = meta.get("thumbnail_storage_path")
         except Exception:
             LOG.debug("DB metadata fetch failed for %s", file_id, exc_info=True)
 
@@ -185,7 +195,101 @@ class SupabaseService(SupabaseServiceInterface):
             "content": content,
             "content_type": content_type,
             "storage_path": file_id,
+            "thumbnail_storage_path": thumbnail_storage_path,
         }
+
+    def save_file_thumbnail(self, *, file_id: str, content: bytes) -> str | None:
+        bucket = self._try_get_bucket()
+        thumbnail_path = self._thumbnail_path(file_id)
+        if bucket is None:
+            file_entry = self.file_storage.get(file_id)
+            if not file_entry:
+                return None
+            file_entry["thumbnail_content"] = content
+            file_entry["thumbnail_storage_path"] = thumbnail_path
+            return thumbnail_path
+
+        try:
+            bucket.upload(
+                thumbnail_path,
+                content,
+                {"content-type": "image/png", "upsert": "true"},
+            )
+        except Exception:
+            try:
+                bucket.update(
+                    thumbnail_path,
+                    content,
+                    {"content-type": "image/png"},
+                )
+            except Exception:
+                LOG.exception("Failed saving thumbnail for file %s", file_id)
+                return None
+
+        try:
+            client = self._get_supabase_client()
+            if client:
+                existing = (
+                    client.table("file_metadata")
+                    .select("storage_path")
+                    .eq("storage_path", file_id)
+                    .limit(1)
+                    .execute()
+                )
+                rows = existing.data or []
+                if rows:
+                    client.table("file_metadata").update(
+                        {"thumbnail_storage_path": thumbnail_path}
+                    ).eq("storage_path", file_id).execute()
+                else:
+                    file_entry = self.get_file(file_id)
+                    if not file_entry:
+                        LOG.error(
+                            "Cannot persist thumbnail path: missing file entry for %s",
+                            file_id,
+                        )
+                        return None
+                    client.table("file_metadata").insert(
+                        {
+                            "storage_path": file_id,
+                            "filename": file_entry.get("name") or file_id,
+                            "content_type": file_entry.get("content_type")
+                            or "application/octet-stream",
+                            "size": len(file_entry.get("content") or b""),
+                            "thumbnail_storage_path": thumbnail_path,
+                        }
+                    ).execute()
+        except Exception:
+            LOG.exception(
+                "Failed updating thumbnail metadata for %s; verify thumbnail_storage_path migration is applied",
+                file_id,
+            )
+            return None
+        return thumbnail_path
+
+    def get_file_thumbnail(self, file_id: str) -> bytes | None:
+        file_entry = self.get_file(file_id)
+        if not file_entry:
+            return None
+        thumbnail_path = file_entry.get("thumbnail_storage_path")
+        if not thumbnail_path:
+            return None
+
+        bucket = self._try_get_bucket()
+        if bucket is None:
+            return file_entry.get("thumbnail_content")
+
+        try:
+            data = bucket.download(thumbnail_path)
+            return data.read() if hasattr(data, "read") else data
+        except Exception:
+            LOG.debug(
+                "Failed downloading thumbnail %s for %s",
+                thumbnail_path,
+                file_id,
+                exc_info=True,
+            )
+            return None
 
     def delete_file(self, file_id: str) -> bool:
         bucket = self._try_get_bucket()
@@ -195,12 +299,34 @@ class SupabaseService(SupabaseServiceInterface):
                 return True
             return False
 
+        thumbnail_path = None
         try:
             client = self._get_supabase_client()
             if client:
+                existing = (
+                    client.table("file_metadata")
+                    .select("thumbnail_storage_path")
+                    .eq("storage_path", file_id)
+                    .limit(1)
+                    .execute()
+                )
+                existing_rows = existing.data or []
+                if existing_rows:
+                    thumbnail_path = existing_rows[0].get("thumbnail_storage_path")
                 client.table("file_metadata").delete().eq("storage_path", file_id).execute()
         except Exception:
             LOG.warning("Failed deleting metadata for %s", file_id, exc_info=True)
+
+        if thumbnail_path:
+            try:
+                bucket.remove([thumbnail_path])
+            except Exception:
+                LOG.warning(
+                    "Failed deleting thumbnail object %s for %s",
+                    thumbnail_path,
+                    file_id,
+                    exc_info=True,
+                )
 
         try:
             bucket.remove([file_id])

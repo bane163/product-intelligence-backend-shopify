@@ -1,5 +1,6 @@
 """Agent file upload and processing routes (under `/agents/*`)."""
 
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -11,6 +12,26 @@ from fastapi.responses import Response
 from app_context import AppContext, get_ctx
 
 router = APIRouter()
+LOG = logging.getLogger(__name__)
+
+
+async def _generate_thumbnail_bytes(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    content_type: str,
+    collabora_url: str,
+    ctx: AppContext,
+) -> bytes:
+    png_list = await ctx.services.collabora.convert_document_to_png_collabora(
+        file_bytes,
+        filename=filename,
+        content_type=content_type,
+        collabora_base_url=collabora_url,
+    )
+    if not png_list:
+        raise RuntimeError("No PNG pages returned by Collabora convert-to")
+    return png_list[0]
 
 
 @router.get("/files", summary="List uploaded files")
@@ -37,7 +58,10 @@ async def upload_file(
     file_id = str(uuid.uuid4())
     original_name = file.filename or "document.xlsx"
     original_content_type = file.content_type or ""
-    is_csv = original_name.lower().endswith(".csv") or original_content_type.lower() == "text/csv"
+    is_csv = (
+        original_name.lower().endswith(".csv")
+        or original_content_type.lower() == "text/csv"
+    )
 
     stored_name = original_name
     stored_content_type = (
@@ -54,7 +78,9 @@ async def upload_file(
             raise HTTPException(status_code=500, detail=f"CSV conversion failed: {exc}")
         base, _ = os.path.splitext(original_name)
         stored_name = f"{base or 'document'}.xlsx"
-        stored_content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        stored_content_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     ctx.services.supabase.save_file(
         file_id,
@@ -62,6 +88,24 @@ async def upload_file(
         content=file_bytes,
         content_type=stored_content_type,
     )
+    thumbnail_generated = False
+    try:
+        collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
+        thumbnail_bytes = await _generate_thumbnail_bytes(
+            file_bytes=file_bytes,
+            filename=stored_name,
+            content_type=stored_content_type,
+            collabora_url=collabora_url,
+            ctx=ctx,
+        )
+        thumbnail_path = ctx.services.supabase.save_file_thumbnail(
+            file_id=file_id, content=thumbnail_bytes
+        )
+        thumbnail_generated = bool(thumbnail_path)
+    except Exception as e:
+        LOG.warning(
+            "Thumbnail generation failed for file_id=%s: %s", file_id, e, exc_info=True
+        )
 
     file_name_dict = ctx.services.supabase.get_file(file_id)
     file_name = file_name_dict["name"] if file_name_dict else "unknown"
@@ -70,6 +114,7 @@ async def upload_file(
         "file_id": file_id,
         "filename": file_name,
         "size": len(file_bytes),
+        "thumbnail_generated": thumbnail_generated,
     }
 
 
@@ -145,7 +190,9 @@ async def process_excel(
         usage = metadata.get("usage") if isinstance(metadata, dict) else None
         if isinstance(usage, dict):
             usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-            usage_totals["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            usage_totals["completion_tokens"] += int(
+                usage.get("completion_tokens") or 0
+            )
             usage_totals["total_tokens"] += int(usage.get("total_tokens") or 0)
             ctx.services.supabase.create_or_update_run(
                 run_id,
@@ -254,7 +301,9 @@ async def process_excel(
                     name, ext = os.path.splitext(base_name)
                     # Append "-products" before the extension, preserving the original extension.
                     suffixed = f"{name}-products{ext or ''}"
-                    final_output_path = os.path.abspath(os.path.join(os.getcwd(), suffixed))
+                    final_output_path = os.path.abspath(
+                        os.path.join(os.getcwd(), suffixed)
+                    )
                 elif output_path:
                     final_output_path = os.path.abspath(output_path)
                 else:
@@ -282,7 +331,9 @@ async def process_excel(
             level="error",
             error=str(exc),
         )
-        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
         ctx.services.supabase.finalize_run(
             run_id, status="error", duration_ms=duration_ms, error=str(exc)
         )
@@ -295,7 +346,9 @@ async def process_excel(
             level="error",
             error=str(exc),
         )
-        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
         ctx.services.supabase.finalize_run(
             run_id, status="error", duration_ms=duration_ms, error=str(exc)
         )
@@ -374,6 +427,7 @@ async def get_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dic
         "size": len(file_entry["content"]),
         "content_type": file_entry["content_type"],
         "storage_path": file_entry["storage_path"],
+        "thumbnail_storage_path": file_entry.get("thumbnail_storage_path"),
     }
 
 
@@ -389,31 +443,28 @@ async def delete_file_route(
 
 
 @router.get("/preview/{file_id}", summary="Get PNG preview of file")
-async def get_file_preview(file_id: str, ctx: AppContext = Depends(get_ctx)) -> Response:
+async def get_file_preview(
+    file_id: str, ctx: AppContext = Depends(get_ctx)
+) -> Response:
     """Convert the uploaded file to PNG and return it for preview."""
     file_entry = ctx.services.supabase.get_file(file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
 
-    if "preview_png" in file_entry:
-        return Response(content=file_entry["preview_png"], media_type="image/png")
+    thumbnail_bytes = ctx.services.supabase.get_file_thumbnail(file_id)
+    if thumbnail_bytes:
+        return Response(content=thumbnail_bytes, media_type="image/png")
 
     try:
-        collabora_url = ctx.services.collabora.get_runtime_url(default="http://localhost:9980")
-
-        pdf_bytes = await ctx.services.collabora.convert_excel_to_pdf_collabora(
-            file_entry["content"], collabora_base_url=collabora_url
+        collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
+        preview_png = await _generate_thumbnail_bytes(
+            file_bytes=file_entry["content"],
+            filename=file_entry["name"],
+            content_type=file_entry["content_type"],
+            collabora_url=collabora_url,
+            ctx=ctx,
         )
-
-        png_list = await ctx.services.collabora.convert_pdf_to_png_collabora(
-            pdf_bytes, collabora_base_url=collabora_url
-        )
-
-        if not png_list:
-            raise HTTPException(status_code=500, detail="Failed to generate preview")
-
-        preview_png = png_list[0]
-        file_entry["preview_png"] = preview_png
+        ctx.services.supabase.save_file_thumbnail(file_id=file_id, content=preview_png)
 
         return Response(content=preview_png, media_type="image/png")
     except Exception as exc:

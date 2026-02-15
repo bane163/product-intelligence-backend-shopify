@@ -2479,6 +2479,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "agent-framework" },
     { name = "black" },
+    { name = "cryptography" },
     { name = "fastapi", extra = ["standard"] },
     { name = "httpx" },
     { name = "ollama" },
@@ -2499,6 +2500,7 @@ dev = [
 requires-dist = [
     { name = "agent-framework", specifier = ">=1.0.0b251108" },
     { name = "black", specifier = ">=25.11.0" },
+    { name = "cryptography", specifier = ">=44.0.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.120.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ollama", specifier = ">=0.6.0" },

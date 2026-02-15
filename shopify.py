@@ -227,6 +227,18 @@ class ShopifyClient:
         nodes = resp.get("data", {}).get("products", {}).get("nodes", [])
         if not nodes:
             return None
+        if len(nodes) > 1:
+            raise RuntimeError(f"Multiple products matched handle '{handle}'")
+        return nodes[0].get("id")
+
+    async def find_product_id_by_sku(self, sku: str) -> str | None:
+        query = _load_graphql("productByHandle.graphql")
+        resp = await self.graphql(query, {"query": f"sku:{sku}"})
+        nodes = resp.get("data", {}).get("products", {}).get("nodes", [])
+        if not nodes:
+            return None
+        if len(nodes) > 1:
+            raise RuntimeError(f"Multiple products matched SKU '{sku}'")
         return nodes[0].get("id")
 
     async def delete_product(self, gid: str) -> Dict[str, Any]:

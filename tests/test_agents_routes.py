@@ -168,15 +168,64 @@ async def test_save_product_draft():
 
 
 @pytest.mark.asyncio
-async def test_submit_products_blocks_dry_run():
+async def test_submit_products_auto_mode(monkeypatch):
+    async def fake_create_product_from_input(self, product):
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/2", "title": product.get("title")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         payload = {
             "products_json": json.dumps([{"title": "Demo"}]),
-            "import_mode": "dry_run",
+            "import_mode": "auto",
         }
         r = await ac.post("/agents/submit-products", data=payload)
-        assert r.status_code == 400
+        assert r.status_code == 200
+        assert r.json()["success_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_products_auto_updates_when_id_present(monkeypatch):
+    async def fake_update_product_from_input(self, product):
+        return {
+            "data": {
+                "productUpdate": {
+                    "product": {"id": product.get("id"), "title": product.get("title")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    async def fail_create_product_from_input(self, product):
+        _ = (self, product)
+        raise AssertionError("create_product_from_input should not be called when id is present")
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(submit_api.ShopifyClient, "update_product_from_input", fake_update_product_from_input)
+    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fail_create_product_from_input)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        payload = {
+            "products_json": json.dumps([{"id": "gid://shopify/Product/99", "title": "Existing Demo"}]),
+            "import_mode": "auto",
+        }
+        r = await ac.post("/agents/submit-products", data=payload)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success_count"] == 1
+        assert body["results"][0]["mode"] == "update"
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ shopify_client = ShopifyClient()
 @router.post("/submit-products", summary="Submit extracted products to Shopify")
 async def submit_products_to_shopify(
     products_json: str = Form(...),
-    import_mode: str = Form(...),
+    import_mode: str = Form("auto"),
     run_id: str | None = Form(None),
     draft_id: str | None = Form(None),
     document_name: str | None = Form(None),
@@ -63,18 +63,6 @@ async def submit_products_to_shopify(
         else shopify_client
     )
 
-    if import_mode not in {"create", "update"}:
-        emit_and_persist(
-            phase="workflow_error",
-            message="Invalid submit mode",
-            level="error",
-            error="Submit is only allowed for create or update mode",
-        )
-        ctx.services.supabase.finalize_run(
-            current_run_id, status="error", error="Submit is only allowed for create or update mode"
-        )
-        ctx.services.tracing.complete_run(current_run_id)
-        raise HTTPException(status_code=400, detail="Submit is only allowed for create or update mode")
     products = parse_products_json(products_json)
     if not products:
         emit_and_persist(
@@ -91,11 +79,25 @@ async def submit_products_to_shopify(
         message="Loaded products for submit",
         payload_preview={
             "count": len(products),
-            "mode": import_mode,
+            "mode": "auto",
             "shop_domain": shop_domain,
             "has_token": bool(shop_access_token),
         },
     )
+
+    def _extract_first_sku(item: dict[str, Any]) -> str | None:
+        sku = item.get("sku")
+        if isinstance(sku, str) and sku.strip():
+            return sku.strip()
+        variants = item.get("variants")
+        if isinstance(variants, list):
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                variant_sku = variant.get("sku")
+                if isinstance(variant_sku, str) and variant_sku.strip():
+                    return variant_sku.strip()
+        return None
 
     results: list[dict[str, Any]] = []
     success_count = 0
@@ -119,32 +121,43 @@ async def submit_products_to_shopify(
             )
             continue
         try:
-            if import_mode == "create":
-                response = await submit_client.create_product_from_input(product)
-                payload = response.get("data", {}).get("productCreate", {})
-            else:
-                gid = product.get("id") or product.get("shopify_gid")
-                if not gid and product.get("handle"):
-                    gid = await submit_client.find_product_id_by_handle(str(product["handle"]))
-                if not gid:
-                    emit_and_persist(
-                        phase="submit_item_error",
-                        message=f"Product '{title}' missing id/handle for update",
-                        level="error",
-                        error="Missing Shopify product id/handle for update",
-                        payload_preview={"index": index, "title": title},
-                    )
-                    results.append(
-                        {
-                            "index": index,
-                            "title": title,
-                            "status": "failed",
-                            "errors": [{"field": ["id"], "message": "Missing Shopify product id/handle for update"}],
-                        }
-                    )
-                    continue
+            gid = product.get("id") or product.get("shopify_gid")
+            resolve_reason = "id" if gid else None
+            if not gid and product.get("handle"):
+                gid = await submit_client.find_product_id_by_handle(str(product["handle"]))
+                if gid:
+                    resolve_reason = "handle"
+            if not gid:
+                sku = _extract_first_sku(product)
+                if sku:
+                    gid = await submit_client.find_product_id_by_sku(sku)
+                    if gid:
+                        resolve_reason = "sku"
+
+            if gid:
+                emit_and_persist(
+                    phase="submit_item_mode",
+                    message=f"Resolved update target for '{title}'",
+                    payload_preview={
+                        "index": index,
+                        "title": title,
+                        "mode": "update",
+                        "reason": resolve_reason,
+                        "shopify_product_id": gid,
+                    },
+                )
                 response = await submit_client.update_product_from_input({**product, "id": gid})
                 payload = response.get("data", {}).get("productUpdate", {})
+                mode_used = "update"
+            else:
+                emit_and_persist(
+                    phase="submit_item_mode",
+                    message=f"No existing match found for '{title}', creating",
+                    payload_preview={"index": index, "title": title, "mode": "create"},
+                )
+                response = await submit_client.create_product_from_input(product)
+                payload = response.get("data", {}).get("productCreate", {})
+                mode_used = "create"
 
             errors = payload.get("userErrors") or []
             product_data = payload.get("product") or {}
@@ -169,9 +182,10 @@ async def submit_products_to_shopify(
                 success_count += 1
                 emit_and_persist(
                     phase="submit_item_success",
-                    message=f"Submitted product '{product_data.get('title', title)}'",
+                    message=f"Submitted product '{product_data.get('title', title)}' via {mode_used}",
                     payload_preview={
                         "index": index,
+                        "mode": mode_used,
                         "shopify_product_id": product_data.get("id"),
                     },
                 )
@@ -180,6 +194,7 @@ async def submit_products_to_shopify(
                         "index": index,
                         "title": product_data.get("title", title),
                         "status": "success",
+                        "mode": mode_used,
                         "shopify_product_id": product_data.get("id"),
                         "errors": [],
                     }
@@ -216,7 +231,7 @@ async def submit_products_to_shopify(
             run_id=current_run_id,
             draft_id=draft_id,
             name=str(inferred_name),
-            import_mode=import_mode,
+            import_mode="auto",
             product_count=len(products),
             products=products,
         )
@@ -231,7 +246,7 @@ async def submit_products_to_shopify(
         status=status,
         error=None if status == "success" else "Some products failed to submit",
         extra_fields={
-            "output_filename": f"submit:{import_mode}",
+            "output_filename": "submit:auto",
         },
     )
     emit_and_persist(
@@ -244,7 +259,7 @@ async def submit_products_to_shopify(
     return {
         "run_id": current_run_id,
         "submitted_id": submitted_id,
-        "import_mode": import_mode,
+        "import_mode": "auto",
         "total": len(products),
         "success_count": success_count,
         "failed_count": len(products) - success_count,

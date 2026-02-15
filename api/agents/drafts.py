@@ -18,7 +18,7 @@ router = APIRouter()
 async def save_product_draft(
     products_json: str = Form(...),
     run_id: str | None = Form(None),
-    import_mode: str = Form("dry_run"),
+    import_mode: str = Form("auto"),
     draft_name: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:

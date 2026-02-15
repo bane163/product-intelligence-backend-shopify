@@ -20,6 +20,8 @@ async def save_product_draft(
     run_id: str | None = Form(None),
     import_mode: str = Form("auto"),
     draft_name: str | None = Form(None),
+    input_file_id: str | None = Form(None),
+    input_filename: str | None = Form(None),
     output_file_id: str | None = Form(None),
     output_filename: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
@@ -33,6 +35,8 @@ async def save_product_draft(
         run_id=run_id,
         import_mode=import_mode,
         draft_name=draft_name,
+        input_file_id=input_file_id,
+        input_filename=input_filename,
         output_file_id=output_file_id,
         output_filename=output_filename,
         products=products,
@@ -42,6 +46,8 @@ async def save_product_draft(
         "run_id": saved.get("run_id"),
         "import_mode": saved["import_mode"],
         "draft_name": saved.get("draft_name"),
+        "input_file_id": saved.get("input_file_id"),
+        "input_filename": saved.get("input_filename"),
         "output_file_id": saved.get("output_file_id"),
         "output_filename": saved.get("output_filename"),
         "product_count": saved["product_count"],
@@ -88,6 +94,18 @@ async def create_product_draft_resume_file(
     if not isinstance(products, list) or not products:
         raise HTTPException(status_code=400, detail="Draft has no products")
 
+    existing_output_file_id = draft.get("output_file_id")
+    existing_output_filename = draft.get("output_filename")
+    if isinstance(existing_output_file_id, str) and existing_output_file_id:
+        existing_file = ctx.services.supabase.get_file(existing_output_file_id)
+        if existing_file:
+            resolved_name = (
+                existing_output_filename
+                if isinstance(existing_output_filename, str) and existing_output_filename
+                else existing_file.get("name") or f"draft-{draft_id[:8]}.xlsx"
+            )
+            return {"file_id": existing_output_file_id, "filename": resolved_name}
+
     parsed = ProductsList.model_validate({"products": products})
     output_bytes = create_excel_bytes(parsed)
     file_id = str(uuid.uuid4())
@@ -97,6 +115,25 @@ async def create_product_draft_resume_file(
         name=filename,
         content=output_bytes,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    ctx.services.supabase.save_product_draft(
+        draft_id=draft_id,
+        run_id=draft.get("run_id") if isinstance(draft.get("run_id"), str) else None,
+        import_mode=(
+            draft.get("import_mode")
+            if isinstance(draft.get("import_mode"), str) and draft.get("import_mode")
+            else "auto"
+        ),
+        draft_name=draft.get("draft_name") if isinstance(draft.get("draft_name"), str) else None,
+        input_file_id=(
+            draft.get("input_file_id") if isinstance(draft.get("input_file_id"), str) else None
+        ),
+        input_filename=(
+            draft.get("input_filename") if isinstance(draft.get("input_filename"), str) else None
+        ),
+        output_file_id=file_id,
+        output_filename=filename,
+        products=products,
     )
     return {"file_id": file_id, "filename": filename}
 

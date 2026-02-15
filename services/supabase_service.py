@@ -369,6 +369,8 @@ class SupabaseService(SupabaseServiceInterface):
         run_id: str | None,
         import_mode: str,
         draft_name: str | None,
+        input_file_id: str | None = None,
+        input_filename: str | None = None,
         output_file_id: str | None = None,
         output_filename: str | None = None,
         products: list[dict[str, Any]],
@@ -382,6 +384,8 @@ class SupabaseService(SupabaseServiceInterface):
             "run_id": run_id,
             "import_mode": import_mode,
             "draft_name": draft_name,
+            "input_file_id": input_file_id,
+            "input_filename": input_filename,
             "output_file_id": output_file_id,
             "output_filename": output_filename,
             "products": products,
@@ -401,6 +405,8 @@ class SupabaseService(SupabaseServiceInterface):
                     compat_payload = dict(payload)
                     compat_payload.pop("first_product_title", None)
                     compat_payload.pop("draft_name", None)
+                    compat_payload.pop("input_file_id", None)
+                    compat_payload.pop("input_filename", None)
                     compat_payload.pop("output_file_id", None)
                     compat_payload.pop("output_filename", None)
                     client.table("product_drafts").upsert(
@@ -483,6 +489,7 @@ class SupabaseService(SupabaseServiceInterface):
         return drafts[offset : offset + limit]
 
     def get_product_draft(self, draft_id: str) -> dict[str, Any] | None:
+        memory_draft = self.product_drafts.get(draft_id)
         client = self._get_supabase_client()
         if client:
             try:
@@ -494,11 +501,14 @@ class SupabaseService(SupabaseServiceInterface):
                     .execute()
                 )
                 rows = res.data or []
-                return rows[0] if rows else None
+                if rows:
+                    if memory_draft:
+                        return {**rows[0], **memory_draft}
+                    return rows[0]
             except Exception:
                 LOG.exception("Failed fetching product draft %s", draft_id)
 
-        return self.product_drafts.get(draft_id)
+        return memory_draft
     
     def delete_product_draft(self, draft_id: str) -> bool:
         deleted = False

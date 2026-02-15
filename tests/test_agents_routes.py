@@ -157,6 +157,8 @@ async def test_save_product_draft():
             "run_id": "run-1",
             "import_mode": "create",
             "draft_name": "products.xlsx",
+            "input_file_id": "input-file-1",
+            "input_filename": "source.xlsx",
         }
         r = await ac.post("/agents/product-drafts", data=payload)
         assert r.status_code == 200
@@ -164,6 +166,8 @@ async def test_save_product_draft():
         assert body["product_count"] == 1
         assert body["import_mode"] == "create"
         assert body["draft_name"] == "products.xlsx"
+        assert body["input_file_id"] == "input-file-1"
+        assert body["input_filename"] == "source.xlsx"
         assert "draft_id" in body
 
 
@@ -236,6 +240,8 @@ async def test_list_and_get_product_draft():
             "products_json": json.dumps([{"title": "Draft A"}]),
             "run_id": "run-a",
             "import_mode": "create",
+            "input_file_id": "input-file-a",
+            "input_filename": "draft-input.xlsx",
         }
         created = await ac.post("/agents/product-drafts", data=payload)
         assert created.status_code == 200
@@ -249,12 +255,22 @@ async def test_list_and_get_product_draft():
         detail = await ac.get(f"/agents/product-drafts/{draft_id}")
         assert detail.status_code == 200
         assert detail.json()["draft"]["draft_id"] == draft_id
+        assert detail.json()["draft"]["input_file_id"] == "input-file-a"
+        assert detail.json()["draft"]["input_filename"] == "draft-input.xlsx"
 
         resume = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
         assert resume.status_code == 200
         resume_body = resume.json()
         assert "file_id" in resume_body
         assert resume_body["filename"].endswith(".xlsx")
+        persisted_detail = await ac.get(f"/agents/product-drafts/{draft_id}")
+        assert persisted_detail.status_code == 200
+        persisted_draft = persisted_detail.json()["draft"]
+        assert persisted_draft["output_file_id"] == resume_body["file_id"]
+        assert persisted_draft["output_filename"] == resume_body["filename"]
+        resume_again = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
+        assert resume_again.status_code == 200
+        assert resume_again.json()["file_id"] == resume_body["file_id"]
 
 
 @pytest.mark.asyncio

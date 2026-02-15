@@ -95,6 +95,47 @@ class SupabaseServiceInterface(Protocol):
     
     def delete_submitted_document(self, submitted_id: str) -> bool: ...
 
+    def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]: ...
+
+    def create_llm_model_config(
+        self,
+        *,
+        shop_domain: str,
+        name: str,
+        provider: str,
+        base_url: str,
+        model_id: str,
+        api_key: str,
+        version: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
+        is_active: bool = False,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def update_llm_model_config(
+        self,
+        config_id: str,
+        *,
+        name: str | None = None,
+        provider: str | None = None,
+        base_url: str | None = None,
+        model_id: str | None = None,
+        api_key: str | None = None,
+        version: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    def delete_llm_model_config(self, config_id: str, *, shop_domain: str) -> bool: ...
+
+    def activate_llm_model_config(self, config_id: str, *, shop_domain: str) -> dict[str, Any] | None: ...
+
+    def get_active_llm_model_config(self, shop_domain: str) -> dict[str, Any] | None: ...
+
 
 class CollaboraServiceInterface(Protocol):
     async def convert_csv_to_excel(

@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from . import drafts, files, runs, submit, submitted, wopi
+from . import drafts, files, llm_configs, runs, submit, submitted, wopi
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -12,4 +12,5 @@ router.include_router(drafts.router)
 router.include_router(submit.router)
 router.include_router(submitted.router)
 router.include_router(runs.router)
+router.include_router(llm_configs.router)
 router.include_router(wopi.router)

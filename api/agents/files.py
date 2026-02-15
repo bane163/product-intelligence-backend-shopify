@@ -83,6 +83,7 @@ async def process_excel(
     write_to_file: bool = Form(False),
     output_path: str | None = Form(None),
     writer_prompt: str | None = Form(None),
+    shop_domain: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict:
     """Process an Excel file through the AI agent workflow.
@@ -208,6 +209,33 @@ async def process_excel(
         },
     )
 
+    model_env: dict[str, str] | None = None
+    if shop_domain:
+        active_model = ctx.services.supabase.get_active_llm_model_config(shop_domain)
+        if active_model:
+            model_env = {
+                "OLLAMA_CLOUD_URL": str(active_model.get("base_url") or ""),
+                "OLLAMA_MODEL_ID": str(active_model.get("model_id") or ""),
+                "OLLAMA_API_KEY": str(active_model.get("api_key") or ""),
+            }
+            ctx.services.supabase.create_or_update_run(
+                run_id,
+                {
+                    "model_name": active_model.get("model_id"),
+                    "provider": active_model.get("provider"),
+                },
+            )
+            emit_and_persist(
+                phase="model_config_selected",
+                message="Resolved active LLM config from database",
+                payload_preview={
+                    "shop_domain": shop_domain,
+                    "model_name": active_model.get("model_id"),
+                    "provider": active_model.get("provider"),
+                    "config_name": active_model.get("name"),
+                },
+            )
+
     try:
         emit_and_persist(
             phase="workflow_start",
@@ -218,6 +246,7 @@ async def process_excel(
             file_bytes,
             collabora_base_url=collabora_url,
             agent_prompt=prompt,
+            model_env=model_env,
             write_to_file=write_to_file,
             output_path=output_path,
             writer_agent_prompt=writer_prompt,

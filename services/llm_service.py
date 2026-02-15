@@ -138,7 +138,9 @@ class LLMService(LLMServiceInterface):
         )
         if write_to_file:
             excel_output_path = os.path.abspath(
-                output_path if output_path is not None else os.path.join(os.getcwd(), "agent_products.xlsx")
+                output_path
+                if output_path is not None
+                else os.path.join(os.getcwd(), "import-products.xlsx")
             )
 
             @executor(id="excel_writer_executor")

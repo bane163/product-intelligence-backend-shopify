@@ -243,13 +243,34 @@ async def process_excel(
             message="Starting document workflow execution",
             payload_preview={"input_bytes": len(file_bytes)},
         )
+        # Prefer preserving the original filename when asking the writer to
+        # produce an output file. Use the input filename if available; otherwise
+        # fall back to the provided output_path or a default name.
+        final_output_path = None
+        if write_to_file:
+            try:
+                base_name = os.path.basename(input_name) if input_name else None
+                if base_name:
+                    name, ext = os.path.splitext(base_name)
+                    # Append "-products" before the extension, preserving the original extension.
+                    suffixed = f"{name}-products{ext or ''}"
+                    final_output_path = os.path.abspath(os.path.join(os.getcwd(), suffixed))
+                elif output_path:
+                    final_output_path = os.path.abspath(output_path)
+                else:
+                    final_output_path = os.path.abspath(
+                        os.path.join(os.getcwd(), "import-products.xlsx")
+                    )
+            except Exception:
+                final_output_path = output_path
+
         result = await ctx.services.llm.run_excel_agent_workflow(
             file_bytes,
             collabora_base_url=collabora_url,
             agent_prompt=prompt,
             model_env=model_env,
             write_to_file=write_to_file,
-            output_path=output_path,
+            output_path=final_output_path,
             writer_agent_prompt=writer_prompt,
             trace_event=trace_event,
         )

@@ -1,5 +1,7 @@
 """Run tracing endpoints."""
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
@@ -37,7 +39,7 @@ async def get_llm_run(run_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[s
 
 
 @router.get("/runs/{run_id}/history", summary="Get persisted LLM run history")
-async def get_llm_run_history(run_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, dict]:
+async def get_llm_run_history(run_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
     history = ctx.services.supabase.get_run_history(run_id)
     if history.get("run") is None:
         raise HTTPException(status_code=404, detail="Run not found")

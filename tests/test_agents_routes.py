@@ -220,9 +220,9 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
             }
         }
 
-    import api.files as files_api
+    import api.agents.submit as submit_api
 
-    monkeypatch.setattr(files_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:

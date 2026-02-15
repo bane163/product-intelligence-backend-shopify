@@ -8,8 +8,8 @@ It composes `files` and `wopi` routers under the `/agents` prefix.
 
 from fastapi import APIRouter
 
-from .files import router as files_router
-from .wopi import router as wopi_router
+from .agents.files import router as files_router
+from .agents.wopi import router as wopi_router
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 

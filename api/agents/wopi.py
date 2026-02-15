@@ -1,17 +1,14 @@
-"""WOPI endpoints for Collabora Online integration.
-
-These endpoints live under `/agents/wopi/*` when included by the top-level `agents` router.
-"""
+"""WOPI endpoints for Collabora Online integration."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 
 from app_context import AppContext, get_ctx
 
-router = APIRouter(prefix="/wopi", tags=["agents"])
+router = APIRouter()
 
 
-@router.get("/files/{file_id}", summary="WOPI CheckFileInfo")
+@router.get("/wopi/files/{file_id}", summary="WOPI CheckFileInfo")
 async def wopi_check_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
     """WOPI CheckFileInfo endpoint.
 
@@ -28,14 +25,14 @@ async def wopi_check_file_info(file_id: str, ctx: AppContext = Depends(get_ctx))
         "UserId": "shopify_user",
         "UserFriendlyName": "Shopify User",
         "Version": "1.0",
-        "SupportsUpdate": False,  # Read-only preview
+        "SupportsUpdate": False,
         "SupportsLocks": False,
         "UserCanWrite": False,
         "UserCanNotWriteRelative": True,
     }
 
 
-@router.get("/files/{file_id}/contents", summary="WOPI GetFile")
+@router.get("/wopi/files/{file_id}/contents", summary="WOPI GetFile")
 async def wopi_get_file(file_id: str, ctx: AppContext = Depends(get_ctx)) -> Response:
     """WOPI GetFile endpoint.
 

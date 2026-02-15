@@ -1,7 +1,9 @@
 import os
+import re
 from typing import Dict, Optional, Union
 
 from agent_framework import AgentRunResponse, Workflow, WorkflowBuilder, WorkflowContext, executor
+from pydantic import ValidationError
 from typing_extensions import Never
 
 from ai.agent_client import run_excel_writer_agent
@@ -10,6 +12,14 @@ from ai.excel_utils import extract_csv_contents, extract_excel_contents
 from ai.models import ProductsList
 from objects.workflow_payload import resolve_payload
 from .interfaces import CollaboraServiceInterface, LLMServiceInterface, SupabaseServiceInterface
+
+
+def _strip_markdown_json_fence(text: str) -> str:
+    stripped = text.strip()
+    fence_match = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", stripped, flags=re.IGNORECASE)
+    if fence_match:
+        return fence_match.group(1).strip()
+    return stripped
 
 
 class LLMService(LLMServiceInterface):
@@ -105,7 +115,11 @@ class LLMService(LLMServiceInterface):
             elif response.value is not None:
                 products_list = ProductsList.model_validate(response.value)
             else:
-                products_list = ProductsList.model_validate_json(response.text)
+                raw_text = response.text or ""
+                try:
+                    products_list = ProductsList.model_validate_json(raw_text)
+                except ValidationError:
+                    products_list = ProductsList.model_validate_json(_strip_markdown_json_fence(raw_text))
 
             _trace(
                 "products_parsed",

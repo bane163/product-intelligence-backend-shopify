@@ -31,4 +31,3 @@ def complete_run(run_id: str) -> None:
 async def stream_run_events(run_id: str):
     async for chunk in get_ctx().services.tracing.stream_run_events(run_id):
         yield chunk
-

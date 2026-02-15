@@ -1,5 +1,5 @@
 """API package for FastAPI routers."""
 
-from . import agents, shopify_products, files, wopi
+from . import agents, shopify_products
 
-__all__ = ["agents", "files", "wopi", "shopify_products"]
+__all__ = ["agents", "shopify_products"]

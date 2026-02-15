@@ -1,6 +1,7 @@
 import os
 from io import BytesIO
 from openpyxl import Workbook
+from openpyxl.styles import Protection
 import csv
 from .models import ProductInput, ProductsList
 
@@ -164,6 +165,21 @@ def _product_to_rows(product: ProductInput) -> list[list[str]]:
     return rows
 
 
+def _protect_header_row(worksheet) -> None:
+    """Lock row 1 headers and keep data rows editable."""
+    for cell in worksheet[1]:
+        cell.protection = Protection(locked=True)
+    for row in worksheet.iter_rows(
+        min_row=2,
+        max_row=max(worksheet.max_row, 2),
+        min_col=1,
+        max_col=max(worksheet.max_column, 1),
+    ):
+        for cell in row:
+            cell.protection = Protection(locked=False)
+    worksheet.protection.sheet = True
+
+
 def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
     """Create an XLSX workbook (Shopify template columns) for Collabora preview."""
     if not output_path:
@@ -186,6 +202,7 @@ def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
     for product in products_list.products:
         for row in _product_to_rows(product):
             ws.append(row)
+    _protect_header_row(ws)
     wb.save(xlsx_path)
     return xlsx_path
 
@@ -199,6 +216,7 @@ def create_excel_bytes(products_list: ProductsList) -> bytes:
     for product in products_list.products:
         for row in _product_to_rows(product):
             ws.append(row)
+    _protect_header_row(ws)
 
     output = BytesIO()
     wb.save(output)

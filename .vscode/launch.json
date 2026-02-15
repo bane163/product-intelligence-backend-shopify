@@ -8,13 +8,12 @@
       "module": "uvicorn",
       "args": [
         "main:app",
-        "--reload",
         "--host",
         "127.0.0.1",
         "--port",
         "8000"
       ],
-      "cwd": "${workspaceFolder}/shopify_supabase_backend",
+      "cwd": "${workspaceFolder}",
       "jinja": true
     },
     {

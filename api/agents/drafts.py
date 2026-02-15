@@ -20,6 +20,8 @@ async def save_product_draft(
     run_id: str | None = Form(None),
     import_mode: str = Form("auto"),
     draft_name: str | None = Form(None),
+    output_file_id: str | None = Form(None),
+    output_filename: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     products = parse_products_json(products_json)
@@ -31,6 +33,8 @@ async def save_product_draft(
         run_id=run_id,
         import_mode=import_mode,
         draft_name=draft_name,
+        output_file_id=output_file_id,
+        output_filename=output_filename,
         products=products,
     )
     return {
@@ -38,6 +42,8 @@ async def save_product_draft(
         "run_id": saved.get("run_id"),
         "import_mode": saved["import_mode"],
         "draft_name": saved.get("draft_name"),
+        "output_file_id": saved.get("output_file_id"),
+        "output_filename": saved.get("output_filename"),
         "product_count": saved["product_count"],
         "first_product_title": saved.get("first_product_title"),
         "created_at": saved.get("created_at"),

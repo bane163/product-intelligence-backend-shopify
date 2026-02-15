@@ -74,7 +74,17 @@ class SupabaseService(SupabaseServiceInterface):
                 },
             )
         except Exception:
-            bucket.upload(file_id, content, {"content-type": safe_content_type})
+            try:
+                bucket.update(
+                    file_id,
+                    content,
+                    {
+                        "content-type": safe_content_type,
+                        "metadata": {"name": name},
+                    },
+                )
+            except Exception:
+                bucket.upload(file_id, content, {"content-type": safe_content_type, "upsert": "true"})
 
         try:
             client = self._get_supabase_client()
@@ -359,6 +369,8 @@ class SupabaseService(SupabaseServiceInterface):
         run_id: str | None,
         import_mode: str,
         draft_name: str | None,
+        output_file_id: str | None = None,
+        output_filename: str | None = None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         now = self._utc_now()
@@ -370,6 +382,8 @@ class SupabaseService(SupabaseServiceInterface):
             "run_id": run_id,
             "import_mode": import_mode,
             "draft_name": draft_name,
+            "output_file_id": output_file_id,
+            "output_filename": output_filename,
             "products": products,
             "product_count": len(products),
             "first_product_title": first_title,
@@ -387,6 +401,8 @@ class SupabaseService(SupabaseServiceInterface):
                     compat_payload = dict(payload)
                     compat_payload.pop("first_product_title", None)
                     compat_payload.pop("draft_name", None)
+                    compat_payload.pop("output_file_id", None)
+                    compat_payload.pop("output_filename", None)
                     client.table("product_drafts").upsert(
                         compat_payload, on_conflict="draft_id"
                     ).execute()

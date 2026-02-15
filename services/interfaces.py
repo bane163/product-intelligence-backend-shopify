@@ -54,6 +54,8 @@ class SupabaseServiceInterface(Protocol):
         run_id: str | None,
         import_mode: str,
         draft_name: str | None,
+        output_file_id: str | None = None,
+        output_filename: str | None = None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
 

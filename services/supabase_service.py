@@ -477,6 +477,20 @@ class SupabaseService(SupabaseServiceInterface):
                 LOG.exception("Failed fetching product draft %s", draft_id)
 
         return self.product_drafts.get(draft_id)
+    
+    def delete_product_draft(self, draft_id: str) -> bool:
+        deleted = False
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = client.table("product_drafts").delete().eq("draft_id", draft_id).execute()
+                deleted = bool(res.data)
+            except Exception:
+                LOG.exception("Failed deleting product draft %s", draft_id)
+        if draft_id in self.product_drafts:
+            del self.product_drafts[draft_id]
+            deleted = True
+        return deleted
 
     def save_submitted_document(
         self,
@@ -572,3 +586,22 @@ class SupabaseService(SupabaseServiceInterface):
             except Exception:
                 LOG.exception("Failed fetching submitted document %s", submitted_id)
         return self.submitted_documents.get(submitted_id)
+    
+    def delete_submitted_document(self, submitted_id: str) -> bool:
+        deleted = False
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("submitted_documents")
+                    .delete()
+                    .eq("submitted_id", submitted_id)
+                    .execute()
+                )
+                deleted = bool(res.data)
+            except Exception:
+                LOG.exception("Failed deleting submitted document %s", submitted_id)
+        if submitted_id in self.submitted_documents:
+            del self.submitted_documents[submitted_id]
+            deleted = True
+        return deleted

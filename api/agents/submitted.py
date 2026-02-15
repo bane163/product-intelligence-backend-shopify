@@ -61,3 +61,12 @@ async def create_submitted_document_resume_file(
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     return {"file_id": file_id, "filename": filename}
+
+
+@router.delete("/submitted-documents/{submitted_id}", summary="Delete submitted document")
+async def delete_submitted_document(
+    submitted_id: str, ctx: AppContext = Depends(get_ctx)
+) -> dict[str, str]:
+    if not ctx.services.supabase.delete_submitted_document(submitted_id):
+        raise HTTPException(status_code=404, detail="Submitted document not found")
+    return {"status": "deleted", "submitted_id": submitted_id}

@@ -93,3 +93,10 @@ async def create_product_draft_resume_file(
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     return {"file_id": file_id, "filename": filename}
+
+
+@router.delete("/product-drafts/{draft_id}", summary="Delete product draft")
+async def delete_product_draft(draft_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, str]:
+    if not ctx.services.supabase.delete_product_draft(draft_id):
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return {"status": "deleted", "draft_id": draft_id}

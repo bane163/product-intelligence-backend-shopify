@@ -36,7 +36,7 @@ class LLMService(LLMServiceInterface):
         self,
         excel_input: Union[bytes, str],
         collabora_base_url: Optional[str] = None,
-        agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
+        agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
         *,
         write_to_file: bool = False,
@@ -85,16 +85,16 @@ class LLMService(LLMServiceInterface):
                 _trace("extract_done", "CSV extraction completed", payload_preview={"chars": len(text)})
                 await ctx.send_message({"extracted": text, "png_bytes": None})
             else:
-                _trace("extract_start", "Starting Excel extraction")
+                _trace("extract_start", "Starting document extraction")
                 text = extract_excel_contents(data)
-                _trace("extract_done", "Excel extraction completed", payload_preview={"chars": len(text)})
+                _trace("extract_done", "Document extraction completed", payload_preview={"chars": len(text)})
                 await ctx.send_message({"extracted": text})
 
         @executor(id="convert_to_pdf_executor")
         async def convert_to_pdf_executor(data: bytes, ctx: WorkflowContext[bytes]) -> None:
             collabora = collabora_base_url or os.getenv("COLLABORA_URL", "http://localhost:8080")
             pdf = await self.collabora.convert_excel_to_pdf_collabora(data, collabora_base_url=collabora)
-            _trace("collabora_pdf_done", "Converted workbook to PDF", payload_preview={"bytes": len(pdf)})
+            _trace("collabora_pdf_done", "Converted document to PDF", payload_preview={"bytes": len(pdf)})
             await ctx.send_message(pdf)
 
         @executor(id="pdf_to_png_executor")
@@ -134,7 +134,7 @@ class LLMService(LLMServiceInterface):
         excel_output_path: Optional[str] = None
         writer_prompt = (
             writer_agent_prompt
-            or "Use the available tool to write the provided products to an Excel workbook and confirm the saved path."
+            or "Use the available tool to write the provided products to a spreadsheet and confirm the saved path."
         )
         if write_to_file:
             excel_output_path = os.path.abspath(
@@ -193,7 +193,7 @@ class LLMService(LLMServiceInterface):
         self,
         excel_input: Union[bytes, str],
         collabora_base_url: Optional[str] = None,
-        agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
+        agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
         *,
         write_to_file: bool = False,

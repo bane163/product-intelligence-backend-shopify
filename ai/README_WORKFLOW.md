@@ -1,4 +1,4 @@
-# Excel -> Collabora -> PDF -> PNG -> Agent workflow
+# Document -> Collabora -> PDF -> PNG -> Agent workflow
 
 Quick notes to run the example workflow included in `ai/`.
 

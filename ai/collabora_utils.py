@@ -10,7 +10,7 @@ async def convert_excel_to_pdf_collabora(
     collabora_base_url: str = "http://localhost:8080",
     timeout: int = 60,
 ) -> bytes:
-    """Post an Excel file to Collabora's convert-to/pdf endpoint and return PDF bytes."""
+    """Post a document (e.g., spreadsheet) to Collabora's convert-to/pdf endpoint and return PDF bytes."""
     convert_url = collabora_base_url.rstrip("/") + "/lool/convert-to/pdf"
 
     files = {

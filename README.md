@@ -13,19 +13,14 @@ This project consists of a **Shopify App Frontend** (React/Remix/Vite) and a
 
 ## 🔄 Overall Flow Walkthrough
 
-The project automates the extraction of product data from spreadsheets and
+The project automates the extraction of product data from spreadsheets and other document types
 populates them into Shopify.
 
-1. **User Upload**: The user uploads an Excel (`.xlsx`) or CSV file via the
-   Shopify App frontend.
-2. **Workflow Initiation**: The FastAPI backend receives the file and triggers
-   the LLM workflow via `ctx.services.llm`.
+1. **User Upload**: The user uploads a spreadsheet (`.xlsx`) or CSV file, or other supported document types via the Shopify App frontend.
+2. **Workflow Initiation**: The FastAPI backend receives the file and triggers the LLM workflow via `ctx.services.llm`.
 3. **Data Extraction & Visualization**:
-   - **Text extraction**: The backend pulls raw data from the cells.
-   - **Visual Processing (Excel only)**: For Excel files, the backend uses
-     **Collabora Online** to convert the spreadsheet into high-resolution
-     images. This gives the AI "visual context" of the spreadsheet layout
-     (headers, colors, merged cells).
+   - **Text extraction**: The backend pulls raw data from the document (e.g., spreadsheet cells or structured text).
+   - **Visual Processing (spreadsheets/documents)**: For supported documents, the backend can use **Collabora Online** to convert the document into high-resolution images. This gives the AI "visual context" of the document layout (headers, colors, merged cells).
 4. **AI Agent Analysis**: An autonomous agent receives both the raw text and the
    visual images. It uses a Large Language Model (LLM) to intelligently map the
    messy spreadsheet data into a structured `ProductsList` format.

@@ -51,7 +51,7 @@ async def upload_file(
                 file_bytes, collabora_base_url=collabora_url
             )
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"CSV to Excel conversion failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"CSV conversion failed: {exc}")
         base, _ = os.path.splitext(original_name)
         stored_name = f"{base or 'document'}.xlsx"
         stored_content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -74,11 +74,12 @@ async def upload_file(
 
 
 @router.post("/excel", summary="Process an Excel file through the AI agent workflow")
+@router.post("/import", summary="Process a document through the AI agent workflow")
 async def process_excel(
     run_id: str | None = Form(None),
     file_id: str = Form(None),
     file: UploadFile = File(None),
-    prompt: str = Form("Please analyze the spreadsheet and the associated image(s)."),
+    prompt: str = Form("Please analyze the document and the associated image(s)."),
     collabora_url: str | None = Form(None),
     write_to_file: bool = Form(False),
     output_path: str | None = Form(None),
@@ -86,7 +87,7 @@ async def process_excel(
     shop_domain: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict:
-    """Process an Excel file through the AI agent workflow.
+    """Process a document through the AI agent workflow.
 
     Accepts either file_id or direct upload.
     """
@@ -168,7 +169,7 @@ async def process_excel(
         run_id,
         {
             "status": "running",
-            "source": "excel_import",
+            "source": "document_import",
             "started_at": started_at.isoformat(),
             "prompt": prompt,
             "writer_prompt": writer_prompt,
@@ -176,7 +177,7 @@ async def process_excel(
     )
     emit_and_persist(
         phase="request_received",
-        message="Received /agents/excel request",
+        message="Received /agents/import request",
         payload_preview={"write_to_file": write_to_file, "has_file_id": bool(file_id)},
     )
 
@@ -239,7 +240,7 @@ async def process_excel(
     try:
         emit_and_persist(
             phase="workflow_start",
-            message="Starting excel workflow execution",
+            message="Starting document workflow execution",
             payload_preview={"input_bytes": len(file_bytes)},
         )
         result = await ctx.services.llm.run_excel_agent_workflow(
@@ -252,11 +253,11 @@ async def process_excel(
             writer_agent_prompt=writer_prompt,
             trace_event=trace_event,
         )
-        emit_and_persist(phase="workflow_done", message="Excel workflow completed")
+        emit_and_persist(phase="workflow_done", message="Document workflow completed")
     except RuntimeError as exc:
         emit_and_persist(
             phase="workflow_error",
-            message="Excel workflow failed",
+            message="Document workflow failed",
             level="error",
             error=str(exc),
         )
@@ -333,7 +334,7 @@ async def process_excel(
     ctx.services.supabase.finalize_run(
         run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta
     )
-    emit_and_persist(phase="request_done", message="Completed /agents/excel request")
+    emit_and_persist(phase="request_done", message="Completed /agents/import request")
     ctx.services.tracing.complete_run(run_id)
 
     return {"run_id": run_id, "result": result}

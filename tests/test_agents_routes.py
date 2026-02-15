@@ -106,7 +106,7 @@ async def test_upload_csv_conversion_failure_returns_500_and_skips_save(monkeypa
         files = {"file": ("products.csv", io.BytesIO(b"a,b\n1,2\n"), "text/csv")}
         r = await ac.post("/agents/upload", files=files)
         assert r.status_code == 500
-        assert "CSV to Excel conversion failed" in r.json()["detail"]
+        assert "CSV conversion failed" in r.json()["detail"]
         assert save_called["value"] is False
 
 

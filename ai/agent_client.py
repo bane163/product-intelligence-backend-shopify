@@ -78,7 +78,7 @@ def _create_chat_client(model_env: Dict[str, str] | None) -> OpenAIChatClient:
 async def run_agent_on_inputs(
     extracted_text: str,
     png_bytes: list[bytes] | None,
-    agent_prompt: str = "Please analyze the spreadsheet and the associated image(s).",
+    agent_prompt: str = "Please analyze the document and the associated image(s).",
     model_env: Dict[str, str] | None = None,
     trace_event: TraceFn = None,
 ) -> AgentRunResponse:
@@ -106,8 +106,8 @@ async def run_agent_on_inputs(
 
     instructions = (
         "You will be given two inputs:\n"
-        "1) A textual extraction of an Excel spreadsheet.\n"
-        "2) A PNG image rendering of the spreadsheet (base64).\n\n"
+        "1) A textual extraction of the document (e.g., spreadsheet or other supported document).\n"
+        "2) A PNG image rendering of the document (base64).\n\n"
         "Use both sources to identify one or more products suitable for Shopify import. "
         "Return a JSON object that matches the ProductsList schema: an object with a 'products' field, "
         "which is an array of product objects. Each product should follow the ProductInput shape: "
@@ -128,7 +128,7 @@ async def run_agent_on_inputs(
 
     # Request the model to return a structured ProductsList JSON payload.
     agent = client.create_agent(
-        name="excel_inspector",
+        name="document_inspector",
         instructions=instructions,
         response_format=ProductsList,
     )
@@ -229,12 +229,12 @@ async def run_agent_on_inputs(
 async def run_excel_writer_agent(
     products_list: ProductsList,
     output_path: str,
-    agent_prompt: str = "Create an Excel workbook for the provided products.",
+    agent_prompt: str = "Create a spreadsheet for the provided products.",
     model_env: Dict[str, str] | None = None,
     trace_event: TraceFn = None,
     supabase_service: SupabaseServiceInterface | None = None,
 ) -> AgentRunResponse:
-    """Create a tool-enabled agent that writes the ProductsList to an Excel workbook.
+    """Create a tool-enabled agent that writes the ProductsList to a spreadsheet.
 
     This implementation uploads the generated CSV bytes directly to Supabase storage
     instead of writing to a local filesystem path. The agent may still call the
@@ -283,7 +283,7 @@ async def run_excel_writer_agent(
         _trace(
             trace_event,
             phase="writer_upload",
-            message="Uploaded generated workbook to storage",
+            message="Uploaded generated file to storage",
             payload_preview={
                 "file_id": file_id,
                 "filename": filename,
@@ -301,8 +301,8 @@ async def run_excel_writer_agent(
     write_products_workbook.__name__ = "write_products_workbook"
 
     agent_instructions = (
-        "You generate Excel workbooks for Shopify product imports. "
-        "Call the tool `write_products_workbook` exactly once to create the workbook using the provided data. "
+        "You generate spreadsheets for Shopify product imports. "
+        "Call the tool `write_products_workbook` exactly once to create the file using the provided data. "
         "After calling the tool, respond with a confirmation that includes the saved file path or identifier."
     )
 
@@ -428,7 +428,7 @@ async def run_excel_writer_agent(
                         csv_candidate = candidate
             if not os.path.exists(absolute_path):
                 raise RuntimeError(
-                    "Excel writer agent did not produce a workbook at the expected location: "
+                    "Writer agent did not produce the expected file at the expected location: "
                     f"{absolute_path}"
                 )
 

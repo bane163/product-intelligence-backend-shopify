@@ -5,7 +5,7 @@ from typing import Any
 
 from ai.excel_writer import create_excel_bytes
 from ai.models import ProductsList
-from services.interfaces import SupabaseServiceInterface
+from application.ports.supabase_port import SupabasePort
 
 
 def _optional_str(data: dict[str, Any], key: str) -> str | None:
@@ -13,7 +13,7 @@ def _optional_str(data: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def execute(supabase: SupabaseServiceInterface, draft_id: str) -> dict[str, str]:
+def execute(supabase: SupabasePort, draft_id: str) -> dict[str, str]:
     draft = supabase.get_product_draft(draft_id)
     if not draft:
         raise LookupError("Draft not found")

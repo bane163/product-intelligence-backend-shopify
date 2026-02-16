@@ -1,8 +1,8 @@
 """Use-case: get run history via supabase port."""
 
 from typing import Any
-from services.interfaces import SupabaseServiceInterface
+from application.ports.supabase_port import SupabasePort
 
 
-def execute(supabase: SupabaseServiceInterface, run_id: str) -> dict[str, Any]:
+def execute(supabase: SupabasePort, run_id: str) -> dict[str, Any]:
     return supabase.get_run_history(run_id)

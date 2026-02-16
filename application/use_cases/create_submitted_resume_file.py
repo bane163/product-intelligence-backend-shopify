@@ -2,10 +2,10 @@
 import uuid
 from ai.excel_writer import create_excel_bytes
 from ai.models import ProductsList
-from services.interfaces import SupabaseServiceInterface
+from application.ports.supabase_port import SupabasePort
 
 
-def execute(supabase: SupabaseServiceInterface, submitted_id: str) -> dict[str, str]:
+def execute(supabase: SupabasePort, submitted_id: str) -> dict[str, str]:
     document = supabase.get_submitted_document(submitted_id)
     if not document:
         raise LookupError("Submitted document not found")

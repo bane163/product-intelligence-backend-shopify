@@ -1,11 +1,11 @@
 """Use-case: bulk delete submitted documents via supabase port."""
 
 from typing import Iterable
-from services.interfaces import SupabaseServiceInterface
+from application.ports.supabase_port import SupabasePort
 
 
 def execute(
-    supabase: SupabaseServiceInterface, ids: Iterable[str]
+    supabase: SupabasePort, ids: Iterable[str]
 ) -> dict[str, list[str]]:
     deleted_ids = []
     failed_ids = []

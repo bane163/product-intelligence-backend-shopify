@@ -1,15 +1,238 @@
 from typing import Any
 
+from application.ports.supabase_port import SupabasePort
+from services.interfaces import SupabaseServiceInterface
 
-class SupabaseAdapter:
+
+class SupabaseAdapter(SupabasePort):
     """Adapter that proxies calls to the real SupabaseService instance.
 
     This keeps the application layer depending on an interface/port while
     reusing the existing SupabaseService implementation.
     """
 
-    def __init__(self, service: Any) -> None:
+    def __init__(self, service: SupabaseServiceInterface) -> None:
         self._service = service
 
-    def __getattr__(self, name: str):
-        return getattr(self._service, name)
+    def save_file(
+        self, file_id: str, name: str, content: bytes, content_type: str | None = None
+    ) -> None:
+        return self._service.save_file(file_id, name, content, content_type)
+
+    def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        return self._service.list_files(limit, offset)
+
+    def get_file(self, file_id: str) -> dict[str, Any] | None:
+        return self._service.get_file(file_id)
+
+    def delete_file(self, file_id: str) -> bool:
+        return self._service.delete_file(file_id)
+
+    def save_file_thumbnail(self, *, file_id: str, content: bytes) -> str | None:
+        return self._service.save_file_thumbnail(file_id=file_id, content=content)
+
+    def get_file_thumbnail(self, file_id: str) -> bytes | None:
+        return self._service.get_file_thumbnail(file_id)
+
+    def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None:
+        return self._service.create_or_update_run(run_id, fields)
+
+    def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None:
+        return self._service.append_run_event(run_id, event, seq)
+
+    def append_run_message(
+        self,
+        run_id: str,
+        *,
+        role: str,
+        message: Any,
+        seq: int,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        return self._service.append_run_message(
+            run_id, role=role, message=message, seq=seq, meta=meta
+        )
+
+    def finalize_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        duration_ms: int | None = None,
+        error: str | None = None,
+        extra_fields: dict[str, Any] | None = None,
+    ) -> None:
+        return self._service.finalize_run(
+            run_id,
+            status=status,
+            duration_ms=duration_ms,
+            error=error,
+            extra_fields=extra_fields,
+        )
+
+    def list_runs(
+        self, limit: int = 50, offset: int = 0, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self._service.list_runs(limit, offset, status)
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        return self._service.get_run(run_id)
+
+    def get_run_history(self, run_id: str) -> dict[str, Any]:
+        return self._service.get_run_history(run_id)
+
+    def save_product_draft(
+        self,
+        *,
+        draft_id: str,
+        run_id: str | None,
+        import_mode: str,
+        draft_name: str | None,
+        input_file_id: str | None = None,
+        input_filename: str | None = None,
+        output_file_id: str | None = None,
+        output_filename: str | None = None,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._service.save_product_draft(
+            draft_id=draft_id,
+            run_id=run_id,
+            import_mode=import_mode,
+            draft_name=draft_name,
+            input_file_id=input_file_id,
+            input_filename=input_filename,
+            output_file_id=output_file_id,
+            output_filename=output_filename,
+            products=products,
+        )
+
+    def list_product_drafts(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
+    ) -> list[dict[str, Any]]:
+        return self._service.list_product_drafts(limit, offset, search, sort_by, sort_dir)
+
+    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None:
+        return self._service.get_product_draft(draft_id)
+
+    def delete_product_draft(self, draft_id: str) -> bool:
+        return self._service.delete_product_draft(draft_id)
+
+    def save_submitted_document(
+        self,
+        *,
+        submitted_id: str,
+        run_id: str | None,
+        draft_id: str | None,
+        name: str,
+        import_mode: str,
+        product_count: int,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._service.save_submitted_document(
+            submitted_id=submitted_id,
+            run_id=run_id,
+            draft_id=draft_id,
+            name=name,
+            import_mode=import_mode,
+            product_count=product_count,
+            products=products,
+        )
+
+    def list_submitted_documents(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
+    ) -> list[dict[str, Any]]:
+        return self._service.list_submitted_documents(
+            limit, offset, search, sort_by, sort_dir
+        )
+
+    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None:
+        return self._service.get_submitted_document(submitted_id)
+
+    def delete_submitted_document(self, submitted_id: str) -> bool:
+        return self._service.delete_submitted_document(submitted_id)
+
+    def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]:
+        return self._service.list_llm_model_configs(shop_domain)
+
+    def create_llm_model_config(
+        self,
+        *,
+        shop_domain: str,
+        name: str,
+        provider: str,
+        base_url: str,
+        model_id: str,
+        api_key: str,
+        version: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
+        is_active: bool = False,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._service.create_llm_model_config(
+            shop_domain=shop_domain,
+            name=name,
+            provider=provider,
+            base_url=base_url,
+            model_id=model_id,
+            api_key=api_key,
+            version=version,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            is_active=is_active,
+            extra=extra,
+        )
+
+    def update_llm_model_config(
+        self,
+        config_id: str,
+        *,
+        name: str | None = None,
+        provider: str | None = None,
+        base_url: str | None = None,
+        model_id: str | None = None,
+        api_key: str | None = None,
+        version: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        return self._service.update_llm_model_config(
+            config_id,
+            name=name,
+            provider=provider,
+            base_url=base_url,
+            model_id=model_id,
+            api_key=api_key,
+            version=version,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            extra=extra,
+        )
+
+    def delete_llm_model_config(self, config_id: str, *, shop_domain: str) -> bool:
+        return self._service.delete_llm_model_config(config_id, shop_domain=shop_domain)
+
+    def activate_llm_model_config(
+        self, config_id: str, *, shop_domain: str
+    ) -> dict[str, Any] | None:
+        return self._service.activate_llm_model_config(config_id, shop_domain=shop_domain)
+
+    def get_active_llm_model_config(
+        self, shop_domain: str
+    ) -> dict[str, Any] | None:
+        return self._service.get_active_llm_model_config(shop_domain)

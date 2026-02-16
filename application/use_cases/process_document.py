@@ -5,18 +5,15 @@ import uuid
 
 from app_context import AppContext
 
-
-from services.interfaces import (
-    SupabaseServiceInterface,
-    LLMServiceInterface,
-    TracingServiceInterface,
-)
+from application.ports.llm_port import LLMPort
+from application.ports.supabase_port import SupabasePort
+from application.ports.tracing_port import TracingPort
 
 
 async def execute(
-    supabase: SupabaseServiceInterface,
-    llm: LLMServiceInterface,
-    tracing: TracingServiceInterface,
+    supabase: SupabasePort,
+    llm: LLMPort,
+    tracing: TracingPort,
     ctx: AppContext,
     file_bytes: bytes,
     input_name: str | None = None,

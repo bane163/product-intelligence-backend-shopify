@@ -2,15 +2,16 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 from application.ports.shopify_port import ShopifyPort
-from services.interfaces import SupabaseServiceInterface, TracingServiceInterface
+from application.ports.supabase_port import SupabasePort
+from application.ports.tracing_port import TracingPort
 
 from api.agents.utils import parse_products_json
 
 
 async def execute(
-    supabase: SupabaseServiceInterface,
+    supabase: SupabasePort,
     shopify: ShopifyPort,
-    tracing: TracingServiceInterface,
+    tracing: TracingPort,
     products_json: str,
     import_mode: str = "auto",
     run_id: str | None = None,

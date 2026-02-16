@@ -1,7 +1,7 @@
-from services.interfaces import SupabaseServiceInterface
+from application.ports.supabase_port import SupabasePort
 
 
-def execute(supabase: SupabaseServiceInterface, ids: list[str]) -> dict[str, list[str]]:
+def execute(supabase: SupabasePort, ids: list[str]) -> dict[str, list[str]]:
     deleted_ids: list[str] = []
     failed_ids: list[str] = []
     for file_id in ids:

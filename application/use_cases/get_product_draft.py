@@ -1,7 +1,7 @@
 """Use-case: get a product draft via supabase port."""
 from typing import Any
-from services.interfaces import SupabaseServiceInterface
+from application.ports.supabase_port import SupabasePort
 
 
-def execute(supabase: SupabaseServiceInterface, draft_id: str) -> dict[str, Any] | None:
+def execute(supabase: SupabasePort, draft_id: str) -> dict[str, Any] | None:
     return supabase.get_product_draft(draft_id)

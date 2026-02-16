@@ -2,23 +2,21 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from services import CollaboraService, LLMService, SupabaseService, TracingService
-from services.interfaces import (
-    CollaboraServiceInterface,
-    LLMServiceInterface,
-    SupabaseServiceInterface,
-    TracingServiceInterface,
-)
 
+from application.ports.collabora_port import CollaboraPort
+from application.ports.llm_port import LLMPort
+from application.ports.supabase_port import SupabasePort
 from application.ports.shopify_port import ShopifyPort
+from application.ports.tracing_port import TracingPort
 from infrastructure.adapters.shopify_adapter import ShopifyAdapter
 
 
 @dataclass(frozen=True)
 class ServiceRegistry:
-    supabase: SupabaseServiceInterface
-    llm: LLMServiceInterface
-    collabora: CollaboraServiceInterface
-    tracing: TracingServiceInterface
+    supabase: SupabasePort
+    llm: LLMPort
+    collabora: CollaboraPort
+    tracing: TracingPort
     shopify: ShopifyPort
 
 

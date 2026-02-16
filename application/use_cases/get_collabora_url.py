@@ -1,6 +1,6 @@
 """Use-case: return collabora URL payload via collabora port."""
-from services.interfaces import CollaboraServiceInterface
+from application.ports.collabora_port import CollaboraPort
 
 
-def execute(collabora: CollaboraServiceInterface) -> dict[str, object]:
+def execute(collabora: CollaboraPort) -> dict[str, object]:
     return collabora.get_collabora_url_payload()

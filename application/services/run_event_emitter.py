@@ -1,6 +1,7 @@
 from typing import Optional
 
-from services.interfaces import SupabaseServiceInterface, TracingServiceInterface
+from application.ports.supabase_port import SupabasePort
+from application.ports.tracing_port import TracingPort
 
 
 class RunEventEmitter:
@@ -12,7 +13,7 @@ class RunEventEmitter:
         trace_event = emitter.trace_event
     """
 
-    def __init__(self, tracing: TracingServiceInterface, supabase: SupabaseServiceInterface, run_id: str, initial_seq: int = 0):
+    def __init__(self, tracing: TracingPort, supabase: SupabasePort, run_id: str, initial_seq: int = 0):
         self.tracing = tracing
         self.supabase = supabase
         self.run_id = run_id

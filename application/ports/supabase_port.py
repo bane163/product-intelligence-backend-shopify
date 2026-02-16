@@ -1,19 +1,146 @@
-from typing import Any, Protocol, Dict, List, Optional
+from typing import Any, Protocol
 
 
 class SupabasePort(Protocol):
-    def save_file(self, file_id: str, name: str, content: bytes, content_type: str | None = None) -> None: ...
+    def save_file(
+        self, file_id: str, name: str, content: bytes, content_type: str | None = None
+    ) -> None: ...
 
-    def get_file(self, file_id: str) -> Optional[Dict[str, Any]]: ...
+    def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]: ...
+
+    def get_file(self, file_id: str) -> dict[str, Any] | None: ...
 
     def delete_file(self, file_id: str) -> bool: ...
 
     def save_file_thumbnail(self, *, file_id: str, content: bytes) -> str | None: ...
 
-    def create_or_update_run(self, run_id: str, fields: Dict[str, Any]) -> None: ...
+    def get_file_thumbnail(self, file_id: str) -> bytes | None: ...
 
-    def finalize_run(self, run_id: str, *, status: str, duration_ms: int | None = None, error: str | None = None, extra_fields: Dict[str, Any] | None = None) -> None: ...
+    def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None: ...
 
-    def get_product_draft(self, draft_id: str) -> Optional[Dict[str, Any]]: ...
+    def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None: ...
 
-    def save_product_draft(self, *, draft_id: str, run_id: str | None, import_mode: str, draft_name: str | None, input_file_id: str | None = None, input_filename: str | None = None, output_file_id: str | None = None, output_filename: str | None = None, products: List[Dict[str, Any]] = []) -> Dict[str, Any]: ...
+    def append_run_message(
+        self,
+        run_id: str,
+        *,
+        role: str,
+        message: Any,
+        seq: int,
+        meta: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    def finalize_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        duration_ms: int | None = None,
+        error: str | None = None,
+        extra_fields: dict[str, Any] | None = None,
+    ) -> None: ...
+
+    def list_runs(
+        self, limit: int = 50, offset: int = 0, status: str | None = None
+    ) -> list[dict[str, Any]]: ...
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None: ...
+
+    def get_run_history(self, run_id: str) -> dict[str, Any]: ...
+
+    def save_product_draft(
+        self,
+        *,
+        draft_id: str,
+        run_id: str | None,
+        import_mode: str,
+        draft_name: str | None,
+        input_file_id: str | None = None,
+        input_filename: str | None = None,
+        output_file_id: str | None = None,
+        output_filename: str | None = None,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    def list_product_drafts(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
+    ) -> list[dict[str, Any]]: ...
+
+    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None: ...
+
+    def delete_product_draft(self, draft_id: str) -> bool: ...
+
+    def save_submitted_document(
+        self,
+        *,
+        submitted_id: str,
+        run_id: str | None,
+        draft_id: str | None,
+        name: str,
+        import_mode: str,
+        product_count: int,
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
+    def list_submitted_documents(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        sort_by: str = "date",
+        sort_dir: str = "desc",
+    ) -> list[dict[str, Any]]: ...
+
+    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None: ...
+
+    def delete_submitted_document(self, submitted_id: str) -> bool: ...
+
+    def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]: ...
+
+    def create_llm_model_config(
+        self,
+        *,
+        shop_domain: str,
+        name: str,
+        provider: str,
+        base_url: str,
+        model_id: str,
+        api_key: str,
+        version: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
+        is_active: bool = False,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def update_llm_model_config(
+        self,
+        config_id: str,
+        *,
+        name: str | None = None,
+        provider: str | None = None,
+        base_url: str | None = None,
+        model_id: str | None = None,
+        api_key: str | None = None,
+        version: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: int | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    def delete_llm_model_config(self, config_id: str, *, shop_domain: str) -> bool: ...
+
+    def activate_llm_model_config(
+        self, config_id: str, *, shop_domain: str
+    ) -> dict[str, Any] | None: ...
+
+    def get_active_llm_model_config(
+        self, shop_domain: str
+    ) -> dict[str, Any] | None: ...

@@ -2,10 +2,10 @@
 
 from typing import Iterable
 
-from services.interfaces import SupabaseServiceInterface
+from application.ports.supabase_port import SupabasePort
 
 
-def execute(supabase: SupabaseServiceInterface, ids: Iterable[str]) -> dict[str, list[str]]:
+def execute(supabase: SupabasePort, ids: Iterable[str]) -> dict[str, list[str]]:
     deleted_ids = []
     failed_ids = []
     for draft_id in ids:

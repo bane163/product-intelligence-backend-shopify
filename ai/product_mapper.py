@@ -1,5 +1,5 @@
 from typing import Any, Dict, List
-from shopify_supabase_backend.ai.models import ProductInput, ProductOption, ProductsList
+from ai.models import ProductInput, ProductOption, ProductsList
 
 
 def productinput_to_create_args(product: ProductInput) -> Dict[str, Any]:

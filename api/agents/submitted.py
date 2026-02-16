@@ -17,14 +17,14 @@ async def list_submitted_documents(
     sort_dir: str = "desc",
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, list[dict]]:
-    from application.use_cases.list_submitted_documents import execute as list_submitted_execute
+    from application.use_cases.submitted.list_submitted_documents import execute as list_submitted_execute
     documents = list_submitted_execute(supabase=ctx.services.supabase, limit=limit, offset=offset, search=search, sort_by=sort_by, sort_dir=sort_dir)
     return {"submitted_documents": documents}
 
 
 @router.get("/submitted-documents/{submitted_id}", summary="Get submitted document")
 async def get_submitted_document(submitted_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, dict]:
-    from application.use_cases.get_submitted_document import execute as get_submitted_execute
+    from application.use_cases.submitted.get_submitted_document import execute as get_submitted_execute
     document = get_submitted_execute(supabase=ctx.services.supabase, submitted_id=submitted_id)
     if not document:
         raise HTTPException(status_code=404, detail="Submitted document not found")
@@ -35,7 +35,7 @@ async def get_submitted_document(submitted_id: str, ctx: AppContext = Depends(ge
 async def create_submitted_document_resume_file(
     submitted_id: str, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, str]:
-    from application.use_cases.create_submitted_resume_file import execute as create_resume_execute
+    from application.use_cases.submitted.create_submitted_resume_file import execute as create_resume_execute
     try:
         return create_resume_execute(supabase=ctx.services.supabase, submitted_id=submitted_id)
     except LookupError:
@@ -48,7 +48,7 @@ async def create_submitted_document_resume_file(
 async def delete_submitted_document(
     submitted_id: str, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, str]:
-    from application.use_cases.delete_submitted_document import execute as delete_submitted_execute
+    from application.use_cases.submitted.delete_submitted_document import execute as delete_submitted_execute
     if not delete_submitted_execute(supabase=ctx.services.supabase, submitted_id=submitted_id):
         raise HTTPException(status_code=404, detail="Submitted document not found")
     return {"status": "deleted", "submitted_id": submitted_id}
@@ -58,6 +58,6 @@ async def delete_submitted_document(
 async def bulk_delete_submitted_documents(
     payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
 ) -> BulkDeleteResult:
-    from application.use_cases.bulk_delete_submitted_documents import execute as bulk_delete_execute
+    from application.use_cases.submitted.bulk_delete_submitted_documents import execute as bulk_delete_execute
     result = bulk_delete_execute(supabase=ctx.services.supabase, ids=payload.ids)
     return BulkDeleteResult(deleted_ids=result["deleted_ids"], failed_ids=result["failed_ids"])

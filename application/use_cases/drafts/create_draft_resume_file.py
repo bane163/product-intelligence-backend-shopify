@@ -49,7 +49,7 @@ def execute(supabase: SupabasePort, draft_id: str) -> dict[str, str]:
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     # update the draft with output file info
-    from application.use_cases.save_product_draft import (
+    from application.use_cases.drafts.save_product_draft import (
         execute as save_product_draft_execute,
     )
 

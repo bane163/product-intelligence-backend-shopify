@@ -24,7 +24,7 @@ async def submit_products_to_shopify(
     shop_access_token: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
-    from application.use_cases.submit_products import execute as submit_execute
+    from application.use_cases.processing.submit_products import execute as submit_execute
 
     try:
         result = await submit_execute(

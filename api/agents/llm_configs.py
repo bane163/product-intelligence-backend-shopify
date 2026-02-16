@@ -44,12 +44,16 @@ class ActivatePayload(BaseModel):
 
 @router.get("/llm-configs", summary="List llm model configs for shop")
 async def list_llm_configs(shop_domain: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
-    return {"configs": ctx.services.supabase.list_llm_model_configs(shop_domain)}
+    from application.use_cases.list_llm_configs import execute as list_llm_configs_execute
+
+    configs = list_llm_configs_execute(supabase=ctx.services.supabase, shop_domain=shop_domain)
+    return {"configs": configs}
 
 
 @router.get("/llm-configs/active", summary="Get active llm model config for shop")
 async def get_active_llm_config(shop_domain: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
-    config = ctx.services.supabase.get_active_llm_model_config(shop_domain)
+    from application.use_cases.get_active_llm_config import execute as get_active_execute
+    config = get_active_execute(supabase=ctx.services.supabase, shop_domain=shop_domain)
     if not config:
         return {"config": None}
     return {
@@ -75,7 +79,8 @@ async def get_active_llm_config(shop_domain: str, ctx: AppContext = Depends(get_
 @router.post("/llm-configs", summary="Create llm model config")
 async def create_llm_config(payload: LLMConfigCreatePayload, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
     try:
-        created = ctx.services.supabase.create_llm_model_config(**payload.model_dump())
+        from application.use_cases.create_llm_config import execute as create_llm_execute
+        created = create_llm_execute(supabase=ctx.services.supabase, payload=payload.model_dump())
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return {"config": created}
@@ -86,7 +91,8 @@ async def update_llm_config(
     config_id: str, payload: LLMConfigUpdatePayload, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, Any]:
     try:
-        updated = ctx.services.supabase.update_llm_model_config(config_id, **payload.model_dump(exclude_unset=True))
+        from application.use_cases.update_llm_config import execute as update_llm_execute
+        updated = update_llm_execute(supabase=ctx.services.supabase, config_id=config_id, payload=payload.model_dump(exclude_unset=True))
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     if not updated:
@@ -98,9 +104,8 @@ async def update_llm_config(
 async def activate_llm_config(
     config_id: str, payload: ActivatePayload, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, Any]:
-    updated = ctx.services.supabase.activate_llm_model_config(
-        config_id, shop_domain=payload.shop_domain
-    )
+    from application.use_cases.activate_llm_config import execute as activate_llm_execute
+    updated = activate_llm_execute(supabase=ctx.services.supabase, config_id=config_id, shop_domain=payload.shop_domain)
     if not updated:
         raise HTTPException(status_code=404, detail="Config not found")
     return {"config": updated}
@@ -108,6 +113,7 @@ async def activate_llm_config(
 
 @router.delete("/llm-configs/{config_id}", summary="Delete llm model config")
 async def delete_llm_config(config_id: str, shop_domain: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
-    if not ctx.services.supabase.delete_llm_model_config(config_id, shop_domain=shop_domain):
+    from application.use_cases.delete_llm_config import execute as delete_llm_execute
+    if not delete_llm_execute(supabase=ctx.services.supabase, config_id=config_id, shop_domain=shop_domain):
         raise HTTPException(status_code=404, detail="Config not found")
     return {"status": "deleted", "id": config_id}

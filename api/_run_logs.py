@@ -1,5 +1,7 @@
 """Compatibility helpers delegated to tracing service."""
 
+from typing import Any
+
 from app_context import get_ctx
 
 
@@ -11,8 +13,8 @@ def emit_run_event(
     level: str = "info",
     payload_preview=None,
     error: str | None = None,
-    metadata: dict | None = None,
-) -> dict:
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return get_ctx().services.tracing.emit_run_event(
         run_id,
         phase=phase,

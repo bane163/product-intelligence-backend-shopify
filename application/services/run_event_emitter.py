@@ -1,4 +1,6 @@
-from typing import Any, Optional
+from typing import Optional
+
+from services.interfaces import SupabaseServiceInterface, TracingServiceInterface
 
 
 class RunEventEmitter:
@@ -10,7 +12,7 @@ class RunEventEmitter:
         trace_event = emitter.trace_event
     """
 
-    def __init__(self, tracing: Any, supabase: Any, run_id: str, initial_seq: int = 0):
+    def __init__(self, tracing: TracingServiceInterface, supabase: SupabaseServiceInterface, run_id: str, initial_seq: int = 0):
         self.tracing = tracing
         self.supabase = supabase
         self.run_id = run_id
@@ -28,7 +30,7 @@ class RunEventEmitter:
         phase: str,
         message: str,
         level: str = "info",
-        payload_preview: Any = None,
+        payload_preview: Optional[dict] = None,
         error: Optional[str] = None,
         metadata: Optional[dict] = None,
     ):

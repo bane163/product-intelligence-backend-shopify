@@ -25,9 +25,9 @@ async def generate_thumbnail_bytes(
     filename: str,
     content_type: str,
     collabora_url: str,
-    ctx: AppContext,
+    collabora,
 ) -> bytes:
-    png_list = await ctx.services.collabora.convert_document_to_png_collabora(
+    png_list = await collabora.convert_document_to_png_collabora(
         file_bytes,
         filename=filename,
         content_type=content_type,
@@ -46,3 +46,24 @@ async def generate_thumbnail_bytes(
             return png_page
     LOG.warning("All thumbnail pages appeared blank; falling back to first page")
     return png_list[0]
+
+
+async def _generate_thumbnail_bytes(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    content_type: str,
+    collabora_url: str,
+    ctx: AppContext | None = None,
+    collabora=None,
+) -> bytes:
+    target_collabora = collabora or (ctx.services.collabora if ctx is not None else None)
+    if target_collabora is None:
+        raise RuntimeError("Collabora client is required")
+    return await generate_thumbnail_bytes(
+        file_bytes=file_bytes,
+        filename=filename,
+        content_type=content_type,
+        collabora_url=collabora_url,
+        collabora=target_collabora,
+    )

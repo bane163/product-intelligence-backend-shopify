@@ -1,11 +1,6 @@
 """Submitted document routes."""
 
-import uuid
-
 from fastapi import APIRouter, Depends, HTTPException
-
-from ai.excel_writer import create_excel_bytes
-from ai.models import ProductsList
 
 from app_context import AppContext, get_ctx
 from .schemas import BulkDeletePayload, BulkDeleteResult
@@ -22,19 +17,15 @@ async def list_submitted_documents(
     sort_dir: str = "desc",
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, list[dict]]:
-    documents = ctx.services.supabase.list_submitted_documents(
-        limit=limit,
-        offset=offset,
-        search=search,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
-    )
+    from application.use_cases.list_submitted_documents import execute as list_submitted_execute
+    documents = list_submitted_execute(supabase=ctx.services.supabase, limit=limit, offset=offset, search=search, sort_by=sort_by, sort_dir=sort_dir)
     return {"submitted_documents": documents}
 
 
 @router.get("/submitted-documents/{submitted_id}", summary="Get submitted document")
 async def get_submitted_document(submitted_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, dict]:
-    document = ctx.services.supabase.get_submitted_document(submitted_id)
+    from application.use_cases.get_submitted_document import execute as get_submitted_execute
+    document = get_submitted_execute(supabase=ctx.services.supabase, submitted_id=submitted_id)
     if not document:
         raise HTTPException(status_code=404, detail="Submitted document not found")
     return {"submitted_document": document}
@@ -44,31 +35,21 @@ async def get_submitted_document(submitted_id: str, ctx: AppContext = Depends(ge
 async def create_submitted_document_resume_file(
     submitted_id: str, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, str]:
-    document = ctx.services.supabase.get_submitted_document(submitted_id)
-    if not document:
+    from application.use_cases.create_submitted_resume_file import execute as create_resume_execute
+    try:
+        return create_resume_execute(supabase=ctx.services.supabase, submitted_id=submitted_id)
+    except LookupError:
         raise HTTPException(status_code=404, detail="Submitted document not found")
-    products = document.get("products")
-    if not isinstance(products, list) or not products:
+    except ValueError:
         raise HTTPException(status_code=400, detail="Submitted document has no products")
-
-    parsed = ProductsList.model_validate({"products": products})
-    output_bytes = create_excel_bytes(parsed)
-    file_id = str(uuid.uuid4())
-    filename = f"submitted-{submitted_id[:8]}.xlsx"
-    ctx.services.supabase.save_file(
-        file_id=file_id,
-        name=filename,
-        content=output_bytes,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    return {"file_id": file_id, "filename": filename}
 
 
 @router.delete("/submitted-documents/{submitted_id}", summary="Delete submitted document")
 async def delete_submitted_document(
     submitted_id: str, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, str]:
-    if not ctx.services.supabase.delete_submitted_document(submitted_id):
+    from application.use_cases.delete_submitted_document import execute as delete_submitted_execute
+    if not delete_submitted_execute(supabase=ctx.services.supabase, submitted_id=submitted_id):
         raise HTTPException(status_code=404, detail="Submitted document not found")
     return {"status": "deleted", "submitted_id": submitted_id}
 
@@ -77,11 +58,6 @@ async def delete_submitted_document(
 async def bulk_delete_submitted_documents(
     payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
 ) -> BulkDeleteResult:
-    deleted_ids: list[str] = []
-    failed_ids: list[str] = []
-    for submitted_id in payload.ids:
-        if ctx.services.supabase.delete_submitted_document(submitted_id):
-            deleted_ids.append(submitted_id)
-        else:
-            failed_ids.append(submitted_id)
-    return BulkDeleteResult(deleted_ids=deleted_ids, failed_ids=failed_ids)
+    from application.use_cases.bulk_delete_submitted_documents import execute as bulk_delete_execute
+    result = bulk_delete_execute(supabase=ctx.services.supabase, ids=payload.ids)
+    return BulkDeleteResult(deleted_ids=result["deleted_ids"], failed_ids=result["failed_ids"])

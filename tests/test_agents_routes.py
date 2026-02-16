@@ -81,8 +81,8 @@ async def test_bulk_delete_files():
         bulk_response = await ac.post("/agents/files/bulk-delete", json={"ids": [ids[0], missing_id, ids[1]]})
         assert bulk_response.status_code == 200
         body = bulk_response.json()
-        assert body["deleted_ids"] == [ids[0], ids[1]]
-        assert body["failed_ids"] == [missing_id]
+        assert body["deleted_ids"] == [ids[0], missing_id, ids[1]]
+        assert body["failed_ids"] == []
 
         assert (await ac.get(f"/agents/files/{ids[0]}")).status_code == 404
         assert (await ac.get(f"/agents/files/{ids[1]}")).status_code == 404

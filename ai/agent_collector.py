@@ -36,7 +36,7 @@ class AgentCollector(Executor):
 
     @handler
     async def handle(
-        self, message: dict, ctx: WorkflowContext[AgentRunResponse, Never]
+        self, message: dict[str, Any], ctx: WorkflowContext[AgentRunResponse, Never]
     ) -> None:
         # Merge incoming dict into buffer
         self._buffer.update(message)

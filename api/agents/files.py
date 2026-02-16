@@ -9,9 +9,9 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app_context import AppContext, get_ctx
+from typing import Any
 from .files_helper import generate_thumbnail_bytes
 from .schemas import BulkDeletePayload, BulkDeleteResult
-from .run_event_emitter import RunEventEmitter
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -20,22 +20,24 @@ LOG = logging.getLogger(__name__)
 @router.get("/files", summary="List uploaded files")
 async def list_uploaded_files(
     limit: int = 100, offset: int = 0, ctx: AppContext = Depends(get_ctx)
-) -> dict:
+) -> dict[str, Any]:
     """List all uploaded files."""
-    files = ctx.services.supabase.list_files(limit=limit, offset=offset)
+    from application.use_cases.list_files import execute as list_files_execute
+    files = list_files_execute(supabase=ctx.services.supabase, limit=limit, offset=offset)
     return {"files": files}
 
 
 @router.get("/collabora-url", summary="Get current Collabora URL")
-async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict:
+async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
     """Get the current Collabora URL and WOPI base URL for interactive viewer."""
-    return ctx.services.collabora.get_collabora_url_payload()
+    from application.use_cases.get_collabora_url import execute as get_collabora_execute
+    return get_collabora_execute(collabora=ctx.services.collabora)
 
 
 @router.post("/upload", summary="Upload a file for preview and processing")
 async def upload_file(
     file: UploadFile = File(...), ctx: AppContext = Depends(get_ctx)
-) -> dict:
+) -> dict[str, Any]:
     """Upload a file and return a file_id for WOPI preview."""
     file_bytes = await file.read()
     file_id = str(uuid.uuid4())
@@ -54,9 +56,8 @@ async def upload_file(
     if is_csv:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
         try:
-            file_bytes = await ctx.services.collabora.convert_csv_to_excel(
-                file_bytes, collabora_base_url=collabora_url
-            )
+            from application.use_cases.convert_csv_to_excel import execute as convert_csv_execute
+            file_bytes = await convert_csv_execute(collabora=ctx.services.collabora, csv_bytes=file_bytes, collabora_base_url=collabora_url)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"CSV conversion failed: {exc}")
         base, _ = os.path.splitext(original_name)
@@ -65,12 +66,8 @@ async def upload_file(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-    ctx.services.supabase.save_file(
-        file_id,
-        name=stored_name,
-        content=file_bytes,
-        content_type=stored_content_type,
-    )
+    from application.use_cases.save_file import execute as save_file_execute
+    save_file_execute(supabase=ctx.services.supabase, file_id=file_id, name=stored_name, content=file_bytes, content_type=stored_content_type)
     thumbnail_generated = False
     try:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
@@ -79,18 +76,18 @@ async def upload_file(
             filename=stored_name,
             content_type=stored_content_type,
             collabora_url=collabora_url,
-            ctx=ctx,
+            collabora=ctx.services.collabora,
         )
-        thumbnail_path = ctx.services.supabase.save_file_thumbnail(
-            file_id=file_id, content=thumbnail_bytes
-        )
+        from application.use_cases.save_file_thumbnail import execute as save_thumb_execute
+        thumbnail_path = save_thumb_execute(supabase=ctx.services.supabase, file_id=file_id, content=thumbnail_bytes)
         thumbnail_generated = bool(thumbnail_path)
     except Exception as e:
         LOG.warning(
             "Thumbnail generation failed for file_id=%s: %s", file_id, e, exc_info=True
         )
 
-    file_name_dict = ctx.services.supabase.get_file(file_id)
+    from application.use_cases.get_file import execute as get_file_execute
+    file_name_dict = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     file_name = file_name_dict["name"] if file_name_dict else "unknown"
 
     return {
@@ -114,223 +111,56 @@ async def process_excel(
     writer_prompt: str | None = Form(None),
     shop_domain: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
-) -> dict:
-    """Process a document through the AI agent workflow.
+) -> dict[str, Any]:
+    """Thin controller delegating to application.use_cases.process_document.execute.
 
     Accepts either file_id or direct upload.
     """
-    run_id = run_id or str(uuid.uuid4())
-    started_at = datetime.now(timezone.utc)
-    emitter = RunEventEmitter(ctx=ctx, run_id=run_id)
-    emit_and_persist = emitter.emit_and_persist
-    trace_event = emitter.trace_event
+    from application.use_cases.process_document import execute as process_document_execute
 
-    ctx.services.supabase.create_or_update_run(
-        run_id,
-        {
-            "status": "running",
-            "source": "document_import",
-            "started_at": started_at.isoformat(),
-            "prompt": prompt,
-            "writer_prompt": writer_prompt,
-        },
-    )
-    emit_and_persist(
-        phase="request_received",
-        message="Received /agents/import request",
-        payload_preview={"write_to_file": write_to_file, "has_file_id": bool(file_id)},
-    )
-
-    # Get file bytes from either file_id or direct upload
-    input_name: str | None = None
-    input_content_type: str | None = None
+    # Resolve file bytes and metadata
+    file_entry = None
+    file_bytes_data = None
     if file_id:
-        file_entry = ctx.services.supabase.get_file(file_id)
+        from application.use_cases.get_file import execute as get_file_execute
+        file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
-        file_bytes = file_entry["content"]
-        input_name = file_entry.get("name")
-        input_content_type = file_entry.get("content_type")
+        file_bytes_data = file_entry.get("content")
     elif file:
-        file_bytes = await file.read()
-        input_name = file.filename
-        input_content_type = file.content_type
+        file_bytes_data = await file.read()
     else:
         raise HTTPException(
             status_code=400,
             detail="Either file_id (from /agents/upload) or file upload is required",
         )
-    ctx.services.supabase.create_or_update_run(
-        run_id,
-        {
-            "input_file_id": file_id,
-            "input_filename": input_name,
-            "input_content_type": input_content_type,
-            "input_size_bytes": len(file_bytes),
-        },
+
+    result = await process_document_execute(
+        supabase=ctx.services.supabase,
+        llm=ctx.services.llm,
+        tracing=ctx.services.tracing,
+        ctx=ctx,
+        file_bytes=file_bytes_data,
+        input_name=(file.filename if file else None) or (file_entry.get("name") if file_entry else None),
+        input_content_type=(file.content_type if file else None) or (file_entry.get("content_type") if file_entry else None),
+        run_id=run_id,
+        prompt=prompt,
+        collabora_url=collabora_url,
+        write_to_file=write_to_file,
+        output_path=output_path,
+        writer_prompt=writer_prompt,
+        shop_domain=shop_domain,
     )
 
-    model_env: dict[str, str] | None = None
-    if shop_domain:
-        active_model = ctx.services.supabase.get_active_llm_model_config(shop_domain)
-        if active_model:
-            model_env = {
-                "OLLAMA_CLOUD_URL": str(active_model.get("base_url") or ""),
-                "OLLAMA_MODEL_ID": str(active_model.get("model_id") or ""),
-                "OLLAMA_API_KEY": str(active_model.get("api_key") or ""),
-            }
-            ctx.services.supabase.create_or_update_run(
-                run_id,
-                {
-                    "model_name": active_model.get("model_id"),
-                    "provider": active_model.get("provider"),
-                },
-            )
-            emit_and_persist(
-                phase="model_config_selected",
-                message="Resolved active LLM config from database",
-                payload_preview={
-                    "shop_domain": shop_domain,
-                    "model_name": active_model.get("model_id"),
-                    "provider": active_model.get("provider"),
-                    "config_name": active_model.get("name"),
-                },
-            )
+    return result
 
-    try:
-        emit_and_persist(
-            phase="workflow_start",
-            message="Starting document workflow execution",
-            payload_preview={"input_bytes": len(file_bytes)},
-        )
-        # Prefer preserving the original filename when asking the writer to
-        # produce an output file. Use the input filename if available; otherwise
-        # fall back to the provided output_path or a default name.
-        final_output_path = None
-        if write_to_file:
-            try:
-                base_name = os.path.basename(input_name) if input_name else None
-                if base_name:
-                    name, ext = os.path.splitext(base_name)
-                    # Append "-products" before the extension, preserving the original extension.
-                    suffixed = f"{name}-products{ext or ''}"
-                    final_output_path = os.path.abspath(
-                        os.path.join(os.getcwd(), suffixed)
-                    )
-                elif output_path:
-                    final_output_path = os.path.abspath(output_path)
-                else:
-                    final_output_path = os.path.abspath(
-                        os.path.join(os.getcwd(), "import-products.xlsx")
-                    )
-            except Exception:
-                final_output_path = output_path
-
-        result = await ctx.services.llm.run_excel_agent_workflow(
-            file_bytes,
-            collabora_base_url=collabora_url,
-            agent_prompt=prompt,
-            model_env=model_env,
-            write_to_file=write_to_file,
-            output_path=final_output_path,
-            writer_agent_prompt=writer_prompt,
-            trace_event=trace_event,
-        )
-        emit_and_persist(phase="workflow_done", message="Document workflow completed")
-    except RuntimeError as exc:
-        emit_and_persist(
-            phase="workflow_error",
-            message="Document workflow failed",
-            level="error",
-            error=str(exc),
-        )
-        duration_ms = int(
-            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
-        )
-        ctx.services.supabase.finalize_run(
-            run_id, status="error", duration_ms=duration_ms, error=str(exc)
-        )
-        ctx.services.tracing.complete_run(run_id)
-        raise HTTPException(status_code=500, detail=str(exc))
-    except Exception as exc:
-        emit_and_persist(
-            phase="workflow_error",
-            message="Unexpected workflow error",
-            level="error",
-            error=str(exc),
-        )
-        duration_ms = int(
-            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
-        )
-        ctx.services.supabase.finalize_run(
-            run_id, status="error", duration_ms=duration_ms, error=str(exc)
-        )
-        ctx.services.tracing.complete_run(run_id)
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
-
-    # If the writer already uploaded to storage and returned metadata, accept it
-    generated_file_id = None
-    generated_filename = None
-    if write_to_file:
-        if isinstance(result, dict) and result.get("file_id"):
-            pass
-        elif isinstance(result, str):
-            try:
-                if os.path.exists(result):
-                    with open(result, "rb") as fh:
-                        out_bytes = fh.read()
-                    generated_file_id = str(uuid.uuid4())
-                    generated_filename = os.path.basename(result)
-                    ct = (
-                        "text/csv"
-                        if generated_filename.lower().endswith(".csv")
-                        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    ctx.services.supabase.save_file(
-                        generated_file_id,
-                        name=generated_filename,
-                        content=out_bytes,
-                        content_type=ct,
-                    )
-                    try:
-                        os.remove(result)
-                    except Exception:
-                        pass
-                    result = {
-                        "workbook_path": result,
-                        "file_id": generated_file_id,
-                        "filename": generated_filename,
-                    }
-            except Exception as exc:
-                emit_and_persist(
-                    phase="storage_upload_error",
-                    message="Failed to persist generated workbook to storage",
-                    level="error",
-                    error=str(exc),
-                )
-
-    if file_id:
-        ctx.services.supabase.delete_file(file_id)
-    output_meta = {}
-    if isinstance(result, dict):
-        output_meta = {
-            "output_file_id": result.get("file_id"),
-            "output_filename": result.get("filename"),
-        }
-    duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-    ctx.services.supabase.finalize_run(
-        run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta
-    )
-    emit_and_persist(phase="request_done", message="Completed /agents/import request")
-    ctx.services.tracing.complete_run(run_id)
-
-    return {"run_id": run_id, "result": result}
 
 
 @router.get("/files/{file_id}", summary="Get file info")
-async def get_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dict:
+async def get_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
     """Get information about an uploaded file."""
-    file_entry = ctx.services.supabase.get_file(file_id)
+    from application.use_cases.get_file import execute as get_file_execute
+    file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -347,9 +177,10 @@ async def get_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dic
 @router.delete("/files/{file_id}", summary="Delete an uploaded file")
 async def delete_file_route(
     file_id: str, ctx: AppContext = Depends(get_ctx)
-) -> dict:  # rename to avoid shadowing helper
+) -> dict[str, Any]:  # rename to avoid shadowing helper
     """Delete an uploaded file from storage."""
-    if not ctx.services.supabase.delete_file(file_id):
+    from application.use_cases.delete_file import execute as delete_file_execute
+    if not delete_file_execute(supabase=ctx.services.supabase, file_id=file_id):
         raise HTTPException(status_code=404, detail="File not found")
 
     return {"status": "deleted", "file_id": file_id}
@@ -359,14 +190,10 @@ async def delete_file_route(
 async def bulk_delete_files(
     payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
 ) -> BulkDeleteResult:
-    deleted_ids: list[str] = []
-    failed_ids: list[str] = []
-    for file_id in payload.ids:
-        if ctx.services.supabase.delete_file(file_id):
-            deleted_ids.append(file_id)
-        else:
-            failed_ids.append(file_id)
-    return BulkDeleteResult(deleted_ids=deleted_ids, failed_ids=failed_ids)
+    from application.use_cases.bulk_delete_files import execute as bulk_delete_files_execute
+
+    result = bulk_delete_files_execute(supabase=ctx.services.supabase, ids=payload.ids)
+    return BulkDeleteResult(**result)
 
 
 @router.get("/preview/{file_id}", summary="Get PNG preview of file")
@@ -374,11 +201,13 @@ async def get_file_preview(
     file_id: str, ctx: AppContext = Depends(get_ctx)
 ) -> Response:
     """Convert the uploaded file to PNG and return it for preview."""
-    file_entry = ctx.services.supabase.get_file(file_id)
+    from application.use_cases.get_file import execute as get_file_execute
+    from application.use_cases.get_file_thumbnail import execute as get_file_thumb_execute
+    file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
 
-    thumbnail_bytes = ctx.services.supabase.get_file_thumbnail(file_id)
+    thumbnail_bytes = get_file_thumb_execute(supabase=ctx.services.supabase, file_id=file_id)
     if thumbnail_bytes:
         return Response(content=thumbnail_bytes, media_type="image/png")
 
@@ -391,7 +220,8 @@ async def get_file_preview(
             collabora_url=collabora_url,
             ctx=ctx,
         )
-        ctx.services.supabase.save_file_thumbnail(file_id=file_id, content=preview_png)
+        from application.use_cases.save_file_thumbnail import execute as save_thumb_execute
+        save_thumb_execute(supabase=ctx.services.supabase, file_id=file_id, content=preview_png)
 
         return Response(content=preview_png, media_type="image/png")
     except Exception as exc:

@@ -8,7 +8,7 @@ _TOKEN_FILE = os.path.normpath(
 )
 
 
-def _read_tokens() -> dict:
+def _read_tokens() -> dict[str, str]:
     try:
         with open(_TOKEN_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -18,7 +18,7 @@ def _read_tokens() -> dict:
         return {}
 
 
-def _write_tokens(data: dict) -> None:
+def _write_tokens(data: dict[str, str]) -> None:
     with open(_TOKEN_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 

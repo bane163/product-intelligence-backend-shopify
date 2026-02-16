@@ -1,10 +1,14 @@
 import io
 import json
 import os
+from types import SimpleNamespace
+
 import pytest
 from httpx import AsyncClient, ASGITransport
+from PIL import Image
 
 from app_context import get_app_context
+from api.agents.files_helper import _generate_thumbnail_bytes, _is_blank_png
 from main import app
 
 
@@ -425,3 +429,42 @@ async def test_bulk_delete_submitted_documents(monkeypatch):
         assert body["deleted_ids"] == [submitted_id]
         assert body["failed_ids"] == [missing_id]
         assert (await ac.get(f"/agents/submitted-documents/{submitted_id}")).status_code == 404
+
+
+def _make_png_bytes(mode: str, size: tuple[int, int], color) -> bytes:
+    image = Image.new(mode, size, color)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
+def test_is_blank_png_detects_transparent_and_white():
+    transparent_png = _make_png_bytes("RGBA", (8, 8), (0, 0, 0, 0))
+    white_png = _make_png_bytes("RGBA", (8, 8), (255, 255, 255, 255))
+    black_png = _make_png_bytes("RGBA", (8, 8), (0, 0, 0, 255))
+
+    assert _is_blank_png(transparent_png) is True
+    assert _is_blank_png(white_png) is True
+    assert _is_blank_png(black_png) is False
+
+
+@pytest.mark.asyncio
+async def test_generate_thumbnail_bytes_skips_blank_pages():
+    blank_transparent = _make_png_bytes("RGBA", (8, 8), (0, 0, 0, 0))
+    blank_white = _make_png_bytes("RGBA", (8, 8), (255, 255, 255, 255))
+    non_blank = _make_png_bytes("RGBA", (8, 8), (0, 0, 0, 255))
+
+    class _FakeCollabora:
+        async def convert_document_to_png_collabora(self, *args, **kwargs):
+            _ = (args, kwargs)
+            return [blank_transparent, blank_white, non_blank]
+
+    fake_ctx = SimpleNamespace(services=SimpleNamespace(collabora=_FakeCollabora()))
+    selected = await _generate_thumbnail_bytes(
+        file_bytes=b"dummy",
+        filename="doc.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        collabora_url="http://localhost:8080",
+        ctx=fake_ctx,
+    )
+    assert selected == non_blank

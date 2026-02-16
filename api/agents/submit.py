@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException
 from app_context import AppContext, get_ctx
 from shopify import ShopifyClient
 from .utils import parse_products_json
+from .run_event_emitter import RunEventEmitter
 
 router = APIRouter()
 shopify_client = ShopifyClient()
@@ -26,27 +27,8 @@ async def submit_products_to_shopify(
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     current_run_id = run_id or str(uuid.uuid4())
-    event_seq = 0
-
-    def emit_and_persist(
-        *,
-        phase: str,
-        message: str,
-        level: str = "info",
-        payload_preview: Any = None,
-        error: str | None = None,
-    ) -> None:
-        nonlocal event_seq
-        event_seq += 1
-        event = ctx.services.tracing.emit_run_event(
-            current_run_id,
-            phase=phase,
-            message=message,
-            level=level,
-            payload_preview=payload_preview,
-            error=error,
-        )
-        ctx.services.supabase.append_run_event(current_run_id, event, event_seq)
+    emitter = RunEventEmitter(ctx=ctx, run_id=current_run_id)
+    emit_and_persist = emitter.emit_and_persist
 
     ctx.services.supabase.create_or_update_run(
         current_run_id,

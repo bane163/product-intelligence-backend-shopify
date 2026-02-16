@@ -4,35 +4,17 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app_context import AppContext, get_ctx
+from .files_helper import generate_thumbnail_bytes
 from .schemas import BulkDeletePayload, BulkDeleteResult
+from .run_event_emitter import RunEventEmitter
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
-
-
-async def _generate_thumbnail_bytes(
-    *,
-    file_bytes: bytes,
-    filename: str,
-    content_type: str,
-    collabora_url: str,
-    ctx: AppContext,
-) -> bytes:
-    png_list = await ctx.services.collabora.convert_document_to_png_collabora(
-        file_bytes,
-        filename=filename,
-        content_type=content_type,
-        collabora_base_url=collabora_url,
-    )
-    if not png_list:
-        raise RuntimeError("No PNG pages returned by Collabora convert-to")
-    return png_list[0]
 
 
 @router.get("/files", summary="List uploaded files")
@@ -92,7 +74,7 @@ async def upload_file(
     thumbnail_generated = False
     try:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
-        thumbnail_bytes = await _generate_thumbnail_bytes(
+        thumbnail_bytes = await generate_thumbnail_bytes(
             file_bytes=file_bytes,
             filename=stored_name,
             content_type=stored_content_type,
@@ -139,79 +121,9 @@ async def process_excel(
     """
     run_id = run_id or str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
-    event_seq = 0
-    message_seq = 0
-    usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-
-    def emit_and_persist(
-        *,
-        phase: str,
-        message: str,
-        level: str = "info",
-        payload_preview: Any = None,
-        error: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ):
-        nonlocal event_seq
-        event_seq += 1
-        event = ctx.services.tracing.emit_run_event(
-            run_id,
-            phase=phase,
-            message=message,
-            level=level,
-            payload_preview=payload_preview,
-            error=error,
-            metadata=metadata,
-        )
-        ctx.services.supabase.append_run_event(run_id, event, event_seq)
-        return event
-
-    def trace_event(**kwargs):
-        nonlocal message_seq
-        event = emit_and_persist(
-            phase=kwargs.get("phase", "trace"),
-            message=kwargs.get("message", ""),
-            level=kwargs.get("level", "info"),
-            payload_preview=kwargs.get("payload_preview"),
-            error=kwargs.get("error"),
-            metadata=kwargs.get("metadata"),
-        )
-        transcript_text = kwargs.get("transcript_text")
-        transcript_role = kwargs.get("transcript_role")
-        if transcript_text and transcript_role:
-            message_seq += 1
-            ctx.services.supabase.append_run_message(
-                run_id,
-                role=transcript_role,
-                message=transcript_text,
-                seq=message_seq,
-                meta=kwargs.get("transcript_meta"),
-            )
-        metadata = kwargs.get("metadata") or {}
-        usage = metadata.get("usage") if isinstance(metadata, dict) else None
-        if isinstance(usage, dict):
-            usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-            usage_totals["completion_tokens"] += int(
-                usage.get("completion_tokens") or 0
-            )
-            usage_totals["total_tokens"] += int(usage.get("total_tokens") or 0)
-            ctx.services.supabase.create_or_update_run(
-                run_id,
-                {
-                    "prompt_tokens": usage_totals["prompt_tokens"],
-                    "completion_tokens": usage_totals["completion_tokens"],
-                    "total_tokens": usage_totals["total_tokens"],
-                },
-            )
-        if isinstance(metadata, dict) and metadata.get("model_name"):
-            ctx.services.supabase.create_or_update_run(
-                run_id,
-                {
-                    "model_name": metadata.get("model_name"),
-                    "provider": metadata.get("provider"),
-                },
-            )
-        return event
+    emitter = RunEventEmitter(ctx=ctx, run_id=run_id)
+    emit_and_persist = emitter.emit_and_persist
+    trace_event = emitter.trace_event
 
     ctx.services.supabase.create_or_update_run(
         run_id,
@@ -472,7 +384,7 @@ async def get_file_preview(
 
     try:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
-        preview_png = await _generate_thumbnail_bytes(
+        preview_png = await generate_thumbnail_bytes(
             file_bytes=file_entry["content"],
             filename=file_entry["name"],
             content_type=file_entry["content_type"],

@@ -1,7 +1,5 @@
 import io
 import json
-import os
-from types import SimpleNamespace
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -459,12 +457,11 @@ async def test_generate_thumbnail_bytes_skips_blank_pages():
             _ = (args, kwargs)
             return [blank_transparent, blank_white, non_blank]
 
-    fake_ctx = SimpleNamespace(services=SimpleNamespace(collabora=_FakeCollabora()))
     selected = await _generate_thumbnail_bytes(
         file_bytes=b"dummy",
         filename="doc.xlsx",
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         collabora_url="http://localhost:8080",
-        ctx=fake_ctx,
+        collabora=_FakeCollabora(),
     )
     assert selected == non_blank

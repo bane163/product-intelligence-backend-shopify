@@ -1,8 +1,14 @@
 import os
 import re
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
-from agent_framework import AgentRunResponse, Workflow, WorkflowBuilder, WorkflowContext, executor
+from agent_framework import (
+    AgentRunResponse,
+    Workflow,
+    WorkflowBuilder,
+    WorkflowContext,
+    executor,
+)
 from pydantic import ValidationError
 from typing_extensions import Never
 
@@ -11,12 +17,18 @@ from ai.agent_collector import AgentCollector
 from ai.excel_utils import extract_csv_contents, extract_excel_contents
 from ai.models import ProductsList
 from objects.workflow_payload import resolve_payload
-from .interfaces import CollaboraServiceInterface, LLMServiceInterface, SupabaseServiceInterface
+from .interfaces import (
+    CollaboraServiceInterface,
+    LLMServiceInterface,
+    SupabaseServiceInterface,
+)
 
 
 def _strip_markdown_json_fence(text: str) -> str:
     stripped = text.strip()
-    fence_match = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", stripped, flags=re.IGNORECASE)
+    fence_match = re.match(
+        r"^```(?:json)?\s*([\s\S]*?)\s*```$", stripped, flags=re.IGNORECASE
+    )
     if fence_match:
         return fence_match.group(1).strip()
     return stripped
@@ -53,7 +65,14 @@ class LLMService(LLMServiceInterface):
 
         is_csv = not is_excel
 
-        def _trace(phase: str, message: str, *, level: str = "info", payload_preview=None, error=None) -> None:
+        def _trace(
+            phase: str,
+            message: str,
+            *,
+            level: str = "info",
+            payload_preview=None,
+            error=None,
+        ) -> None:
             if trace_event:
                 trace_event(
                     phase=phase,
@@ -64,46 +83,87 @@ class LLMService(LLMServiceInterface):
                 )
 
         @executor(id="file_executor")
-        async def file_executor(data: bytes | str | dict, ctx: WorkflowContext[bytes]) -> None:
+        async def file_executor(
+            data: bytes | str | dict, ctx: WorkflowContext[bytes]
+        ) -> None:
             try:
                 payload = resolve_payload(data)
             except Exception as exc:
-                _trace("file_resolve_error", "Failed to resolve workflow payload", level="error", error=str(exc))
+                _trace(
+                    "file_resolve_error",
+                    "Failed to resolve workflow payload",
+                    level="error",
+                    error=str(exc),
+                )
                 raise
             _trace(
                 "file_resolved",
                 "Workflow payload resolved",
-                payload_preview={"bytes": len(payload) if isinstance(payload, (bytes, bytearray)) else None},
+                payload_preview={
+                    "bytes": (
+                        len(payload)
+                        if isinstance(payload, (bytes, bytearray))
+                        else None
+                    )
+                },
             )
             await ctx.send_message(payload)
 
         @executor(id="extract_executor")
-        async def extract_executor(data: bytes, ctx: WorkflowContext[dict]) -> None:
+        async def extract_executor(
+            data: bytes, ctx: WorkflowContext[dict[str, Any]]
+        ) -> None:
             if is_csv:
                 _trace("extract_start", "Starting CSV extraction")
                 text = extract_csv_contents(data)
-                _trace("extract_done", "CSV extraction completed", payload_preview={"chars": len(text)})
+                _trace(
+                    "extract_done",
+                    "CSV extraction completed",
+                    payload_preview={"chars": len(text)},
+                )
                 await ctx.send_message({"extracted": text, "png_bytes": None})
             else:
                 _trace("extract_start", "Starting document extraction")
                 text = extract_excel_contents(data)
-                _trace("extract_done", "Document extraction completed", payload_preview={"chars": len(text)})
+                _trace(
+                    "extract_done",
+                    "Document extraction completed",
+                    payload_preview={"chars": len(text)},
+                )
                 await ctx.send_message({"extracted": text})
 
         @executor(id="convert_to_pdf_executor")
-        async def convert_to_pdf_executor(data: bytes, ctx: WorkflowContext[bytes]) -> None:
-            collabora = collabora_base_url or os.getenv("COLLABORA_URL", "http://localhost:8080")
-            pdf = await self.collabora.convert_excel_to_pdf_collabora(data, collabora_base_url=collabora)
-            _trace("collabora_pdf_done", "Converted document to PDF", payload_preview={"bytes": len(pdf)})
+        async def convert_to_pdf_executor(
+            data: bytes, ctx: WorkflowContext[bytes]
+        ) -> None:
+            collabora = collabora_base_url or os.getenv(
+                "COLLABORA_URL", "http://localhost:8080"
+            )
+            pdf = await self.collabora.convert_excel_to_pdf_collabora(
+                data, collabora_base_url=collabora
+            )
+            _trace(
+                "collabora_pdf_done",
+                "Converted document to PDF",
+                payload_preview={"bytes": len(pdf)},
+            )
             await ctx.send_message(pdf)
 
         @executor(id="pdf_to_png_executor")
-        async def pdf_to_png_executor(pdf_bytes: bytes, ctx: WorkflowContext[dict]) -> None:
-            collabora = collabora_base_url or os.getenv("COLLABORA_URL", "http://localhost:8080")
+        async def pdf_to_png_executor(
+            pdf_bytes: bytes, ctx: WorkflowContext[dict[str, Any]]
+        ) -> None:
+            collabora = collabora_base_url or os.getenv(
+                "COLLABORA_URL", "http://localhost:8080"
+            )
             pngs = await self.collabora.convert_pdf_to_png_collabora(
                 pdf_bytes, collabora_base_url=collabora
             )
-            _trace("collabora_png_done", "Converted PDF to PNG pages", payload_preview={"pages": len(pngs)})
+            _trace(
+                "collabora_png_done",
+                "Converted PDF to PNG pages",
+                payload_preview={"pages": len(pngs)},
+            )
             await ctx.send_message({"png_bytes": pngs})
 
         @executor(id="handle_products_response")
@@ -119,7 +179,9 @@ class LLMService(LLMServiceInterface):
                 try:
                     products_list = ProductsList.model_validate_json(raw_text)
                 except ValidationError:
-                    products_list = ProductsList.model_validate_json(_strip_markdown_json_fence(raw_text))
+                    products_list = ProductsList.model_validate_json(
+                        _strip_markdown_json_fence(raw_text)
+                    )
 
             _trace(
                 "products_parsed",
@@ -160,14 +222,18 @@ class LLMService(LLMServiceInterface):
                     await ctx.yield_output(
                         {
                             **generated,
-                            "products": products_list.model_dump(mode="json").get("products", []),
+                            "products": products_list.model_dump(mode="json").get(
+                                "products", []
+                            ),
                         }
                     )
                 else:
                     await ctx.yield_output(
                         {
                             "workbook_path": excel_output_path,
-                            "products": products_list.model_dump(mode="json").get("products", []),
+                            "products": products_list.model_dump(mode="json").get(
+                                "products", []
+                            ),
                         }
                     )
 

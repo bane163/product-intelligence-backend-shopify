@@ -3,7 +3,7 @@
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -15,6 +15,20 @@ from .schemas import BulkDeletePayload, BulkDeleteResult
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
+
+
+def _optional_str(entry: dict[str, object] | None, key: str) -> str | None:
+    if not entry:
+        return None
+    value = entry.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _required_str(entry: dict[str, object], key: str) -> str:
+    value = entry.get(key)
+    if not isinstance(value, str):
+        raise HTTPException(status_code=500, detail=f"Stored file {key} is invalid")
+    return value
 
 
 @router.get("/files", summary="List uploaded files")
@@ -88,7 +102,7 @@ async def upload_file(
 
     from application.use_cases.get_file import execute as get_file_execute
     file_name_dict = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
-    file_name = file_name_dict["name"] if file_name_dict else "unknown"
+    file_name = _optional_str(file_name_dict, "name") or "unknown"
 
     return {
         "file_id": file_id,
@@ -102,8 +116,8 @@ async def upload_file(
 @router.post("/import", summary="Process a document through the AI agent workflow")
 async def process_excel(
     run_id: str | None = Form(None),
-    file_id: str = Form(None),
-    file: UploadFile = File(None),
+    file_id: str | None = Form(None),
+    file: UploadFile | None = File(None),
     prompt: str = Form("Please analyze the document and the associated image(s)."),
     collabora_url: str | None = Form(None),
     write_to_file: bool = Form(False),
@@ -119,14 +133,17 @@ async def process_excel(
     from application.use_cases.process_document import execute as process_document_execute
 
     # Resolve file bytes and metadata
-    file_entry = None
-    file_bytes_data = None
+    file_entry: dict[str, object] | None = None
+    file_bytes_data: bytes | None = None
     if file_id:
         from application.use_cases.get_file import execute as get_file_execute
         file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
-        file_bytes_data = file_entry.get("content")
+        file_content = file_entry.get("content")
+        if not isinstance(file_content, (bytes, bytearray)):
+            raise HTTPException(status_code=500, detail="Stored file content is invalid")
+        file_bytes_data = bytes(file_content)
     elif file:
         file_bytes_data = await file.read()
     else:
@@ -135,14 +152,28 @@ async def process_excel(
             detail="Either file_id (from /agents/upload) or file upload is required",
         )
 
+    if file_bytes_data is None:
+        raise HTTPException(status_code=500, detail="File content is missing")
+
+    input_name = (
+        file.filename
+        if file
+        else _optional_str(file_entry, "name")
+    )
+    input_content_type = (
+        file.content_type
+        if file
+        else _optional_str(file_entry, "content_type")
+    )
+
     result = await process_document_execute(
         supabase=ctx.services.supabase,
         llm=ctx.services.llm,
         tracing=ctx.services.tracing,
         ctx=ctx,
         file_bytes=file_bytes_data,
-        input_name=(file.filename if file else None) or (file_entry.get("name") if file_entry else None),
-        input_content_type=(file.content_type if file else None) or (file_entry.get("content_type") if file_entry else None),
+        input_name=input_name,
+        input_content_type=input_content_type,
         run_id=run_id,
         prompt=prompt,
         collabora_url=collabora_url,
@@ -163,13 +194,19 @@ async def get_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dic
     file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
+    file_content = file_entry.get("content")
+    if not isinstance(file_content, (bytes, bytearray)):
+        raise HTTPException(status_code=500, detail="Stored file content is invalid")
+    file_name = _required_str(file_entry, "name")
+    file_content_type = _required_str(file_entry, "content_type")
+    file_storage_path = _required_str(file_entry, "storage_path")
 
     return {
         "file_id": file_id,
-        "filename": file_entry["name"],
-        "size": len(file_entry["content"]),
-        "content_type": file_entry["content_type"],
-        "storage_path": file_entry["storage_path"],
+        "filename": file_name,
+        "size": len(file_content),
+        "content_type": file_content_type,
+        "storage_path": file_storage_path,
         "thumbnail_storage_path": file_entry.get("thumbnail_storage_path"),
     }
 
@@ -206,6 +243,11 @@ async def get_file_preview(
     file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
+    file_content = file_entry.get("content")
+    if not isinstance(file_content, (bytes, bytearray)):
+        raise HTTPException(status_code=500, detail="Stored file content is invalid")
+    file_name = _required_str(file_entry, "name")
+    file_content_type = _required_str(file_entry, "content_type")
 
     thumbnail_bytes = get_file_thumb_execute(supabase=ctx.services.supabase, file_id=file_id)
     if thumbnail_bytes:
@@ -214,11 +256,11 @@ async def get_file_preview(
     try:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
         preview_png = await generate_thumbnail_bytes(
-            file_bytes=file_entry["content"],
-            filename=file_entry["name"],
-            content_type=file_entry["content_type"],
+            file_bytes=bytes(file_content),
+            filename=file_name,
+            content_type=file_content_type,
             collabora_url=collabora_url,
-            ctx=ctx,
+            collabora=ctx.services.collabora,
         )
         from application.use_cases.save_file_thumbnail import execute as save_thumb_execute
         save_thumb_execute(supabase=ctx.services.supabase, file_id=file_id, content=preview_png)

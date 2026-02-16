@@ -1,30 +1,40 @@
 """Use-case: create an excel resume file from a product draft and save via supabase."""
 
 import uuid
+from typing import Any
+
 from ai.excel_writer import create_excel_bytes
 from ai.models import ProductsList
 from services.interfaces import SupabaseServiceInterface
+
+
+def _optional_str(data: dict[str, Any], key: str) -> str | None:
+    value = data.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def execute(supabase: SupabaseServiceInterface, draft_id: str) -> dict[str, str]:
     draft = supabase.get_product_draft(draft_id)
     if not draft:
         raise LookupError("Draft not found")
-    products = draft.get("products")
-    if not isinstance(products, list) or not products:
+    products_raw = draft.get("products")
+    if not isinstance(products_raw, list) or not products_raw:
         raise ValueError("Draft has no products")
+    if not all(isinstance(product, dict) for product in products_raw):
+        raise ValueError("Draft products are invalid")
+    products: list[dict[str, object]] = products_raw
 
     # If there's already an output file recorded, try to reuse it
-    existing_output_file_id = draft.get("output_file_id")
-    existing_output_filename = draft.get("output_filename")
-    if isinstance(existing_output_file_id, str) and existing_output_file_id:
+    existing_output_file_id = _optional_str(draft, "output_file_id")
+    existing_output_filename = _optional_str(draft, "output_filename")
+    if existing_output_file_id:
         existing_file = supabase.get_file(existing_output_file_id)
         if existing_file:
+            existing_name = existing_file.get("name")
             resolved_name = (
                 existing_output_filename
-                if isinstance(existing_output_filename, str)
-                and existing_output_filename
-                else existing_file.get("name") or f"draft-{draft_id[:8]}.xlsx"
+                or (existing_name if isinstance(existing_name, str) and existing_name else None)
+                or f"draft-{draft_id[:8]}.xlsx"
             )
             return {"file_id": existing_output_file_id, "filename": resolved_name}
 
@@ -46,27 +56,11 @@ def execute(supabase: SupabaseServiceInterface, draft_id: str) -> dict[str, str]
     save_product_draft_execute(
         supabase=supabase,
         draft_id=draft_id,
-        run_id=draft.get("run_id") if isinstance(draft.get("run_id"), str) else None,
-        import_mode=(
-            draft.get("import_mode")
-            if isinstance(draft.get("import_mode"), str) and draft.get("import_mode")
-            else "auto"
-        ),
-        draft_name=(
-            draft.get("draft_name")
-            if isinstance(draft.get("draft_name"), str)
-            else None
-        ),
-        input_file_id=(
-            draft.get("input_file_id")
-            if isinstance(draft.get("input_file_id"), str)
-            else None
-        ),
-        input_filename=(
-            draft.get("input_filename")
-            if isinstance(draft.get("input_filename"), str)
-            else None
-        ),
+        run_id=_optional_str(draft, "run_id"),
+        import_mode=_optional_str(draft, "import_mode") or "auto",
+        draft_name=_optional_str(draft, "draft_name"),
+        input_file_id=_optional_str(draft, "input_file_id"),
+        input_filename=_optional_str(draft, "input_filename"),
         output_file_id=file_id,
         output_filename=filename,
         products=products,

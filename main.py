@@ -21,19 +21,19 @@ async def lifespan(app: FastAPI):
     # Startup
     if os.getenv("DEBUG", "").lower() in ("1", "true"):
         from cloudflare_tunnel import start_tunnel
-        logger.info("DEBUG mode enabled, starting cloudflared tunnel for Collabora...")
+        logger.info("DEBUG mode enabled, starting tunnel for Collabora...")
         tunnel_url = await start_tunnel(9980)
         if tunnel_url:
             logger.info(f"Collabora tunnel URL: {tunnel_url}")
         else:
-            logger.warning("Failed to start cloudflared tunnel, falling back to localhost")
+            logger.warning("Failed to start tunnel, falling back to localhost")
     
     yield
     
     # Shutdown
     if os.getenv("DEBUG", "").lower() in ("1", "true"):
         from cloudflare_tunnel import stop_tunnel
-        logger.info("Stopping cloudflared tunnel...")
+        logger.info("Stopping tunnel...")
         stop_tunnel()
 
 

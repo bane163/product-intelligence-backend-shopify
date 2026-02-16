@@ -1,7 +1,7 @@
 """
-Cloudflare Tunnel management for exposing local services via quick tunnels.
+Tunnel management for exposing local services via quick tunnels.
 
-This module provides functions to start/stop a cloudflared quick tunnel
+This module provides functions to start/stop a quick tunnel (Cloudflare or ngrok)
 and retrieve the generated public URL for use in development.
 """
 
@@ -9,49 +9,69 @@ import asyncio
 import logging
 import os
 import re
-import subprocess
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # Global state for the tunnel
-_tunnel_process: Optional[subprocess.Popen] = None
+_tunnel_process: Optional[asyncio.subprocess.Process] = None
 _tunnel_url: Optional[str] = None
+_tunnel_provider: Optional[str] = None
 
 
-async def start_tunnel(target_port: int = 9980, timeout: float = 30.0) -> Optional[str]:
-    """Start a cloudflared quick tunnel pointing to the target port.
+async def start_tunnel(
+    target_port: int = 9980, timeout: float = 30.0, provider: Optional[str] = None
+) -> Optional[str]:
+    """Start a quick tunnel pointing to the target port.
     
     Args:
         target_port: The local port to expose (default: 9980 for Collabora)
         timeout: Maximum seconds to wait for the tunnel URL
+        provider: Tunnel provider ("cloudflare"/"cloudflared" or "ngrok")
     
     Returns:
-        The public tunnel URL (e.g., https://xyz.trycloudflare.com) or None on failure
+        The public tunnel URL or None on failure
     """
-    global _tunnel_process, _tunnel_url
+    global _tunnel_process, _tunnel_url, _tunnel_provider
     
     if _tunnel_process is not None:
         logger.warning("Tunnel already running, stopping existing tunnel first")
         stop_tunnel()
     
+    selected_provider = (provider or os.getenv("TUNNEL_PROVIDER", "cloudflare")).strip().lower()
+    if selected_provider in ("cloudflare", "cloudflared"):
+        selected_provider = "cloudflare"
+    elif selected_provider == "ngrok":
+        selected_provider = "ngrok"
+    else:
+        logger.error(
+            f"Unsupported tunnel provider '{selected_provider}'. Use 'cloudflare' or 'ngrok'."
+        )
+        return None
+
     # Use COLLABORA_HOST env var for Docker environments
     collabora_host = os.getenv("COLLABORA_HOST", "collabora")
     target_url = f"http://{collabora_host}:{target_port}"
-    logger.info(f"Starting cloudflared tunnel for {target_url}")
+    logger.info(f"Starting {selected_provider} tunnel for {target_url}")
     
     try:
-        # Start cloudflared tunnel process using asyncio subprocess
+        if selected_provider == "cloudflare":
+            command = ["cloudflared", "tunnel", "--url", target_url, "--no-autoupdate"]
+            url_pattern = re.compile(r"(https://[a-zA-Z0-9-]+\.trycloudflare\.com)")
+        else:
+            command = ["ngrok", "http", target_url, "--log", "stdout"]
+            url_pattern = re.compile(r"(https://[a-zA-Z0-9.-]+\.ngrok(?:-free)?\.(?:app|io))")
+
+        # Start tunnel process using asyncio subprocess
         process = await asyncio.create_subprocess_exec(
-            "cloudflared", "tunnel", "--url", target_url, "--no-autoupdate",
+            *command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
         _tunnel_process = process
+        _tunnel_provider = selected_provider
         
         # Wait for the tunnel URL to appear in output
-        url_pattern = re.compile(r'(https://[a-zA-Z0-9-]+\.trycloudflare\.com)')
-        
         async def read_until_url():
             """Read output until we find the tunnel URL."""
             global _tunnel_url
@@ -62,7 +82,7 @@ async def start_tunnel(target_port: int = 9980, timeout: float = 30.0) -> Option
                 if not line:
                     return None
                 line_str = line.decode('utf-8', errors='replace')
-                logger.info(f"cloudflared output: {line_str.strip()}")
+                logger.info(f"{selected_provider} output: {line_str.strip()}")
                 match = url_pattern.search(line_str)
                 if match:
                     _tunnel_url = match.group(1)
@@ -72,12 +92,12 @@ async def start_tunnel(target_port: int = 9980, timeout: float = 30.0) -> Option
         try:
             tunnel_url = await asyncio.wait_for(read_until_url(), timeout=timeout)
             if tunnel_url:
-                logger.info(f"Cloudflared tunnel established: {tunnel_url}")
+                logger.info(f"{selected_provider} tunnel established: {tunnel_url}")
                 # Start background task to consume remaining output
                 asyncio.create_task(_consume_output())
                 return tunnel_url
             else:
-                logger.error("Cloudflared process exited without providing URL")
+                logger.error(f"{selected_provider} process exited without providing URL")
                 stop_tunnel()
                 return None
         except asyncio.TimeoutError:
@@ -86,17 +106,18 @@ async def start_tunnel(target_port: int = 9980, timeout: float = 30.0) -> Option
             return None
             
     except FileNotFoundError:
-        logger.error("cloudflared command not found. Please install cloudflared.")
+        command_name = "cloudflared" if selected_provider == "cloudflare" else "ngrok"
+        logger.error(f"{command_name} command not found. Please install {command_name}.")
         return None
     except Exception as e:
-        logger.error(f"Failed to start cloudflared tunnel: {e}")
+        logger.error(f"Failed to start {selected_provider} tunnel: {e}")
         stop_tunnel()
         return None
 
 
 async def _consume_output():
-    """Background task to consume cloudflared output and prevent buffer blocking."""
-    global _tunnel_process
+    """Background task to consume tunnel output and prevent buffer blocking."""
+    global _tunnel_process, _tunnel_provider
     
     if _tunnel_process is None:
         return
@@ -108,17 +129,19 @@ async def _consume_output():
                 line = await process.stdout.readline()
                 if not line:
                     break
-                logger.debug(f"cloudflared: {line.decode('utf-8', errors='replace').strip()}")
+                provider = _tunnel_provider or "tunnel"
+                logger.debug(f"{provider}: {line.decode('utf-8', errors='replace').strip()}")
     except Exception as e:
         logger.debug(f"Output consumer stopped: {e}")
 
 
 def stop_tunnel():
-    """Stop the running cloudflared tunnel."""
-    global _tunnel_process, _tunnel_url
+    """Stop the running tunnel."""
+    global _tunnel_process, _tunnel_url, _tunnel_provider
     
     if _tunnel_process is not None:
-        logger.info("Stopping cloudflared tunnel")
+        provider = _tunnel_provider or "tunnel"
+        logger.info(f"Stopping {provider} tunnel")
         try:
             _tunnel_process.terminate()
         except Exception as e:
@@ -127,6 +150,7 @@ def stop_tunnel():
             _tunnel_process = None
     
     _tunnel_url = None
+    _tunnel_provider = None
 
 
 def get_tunnel_url() -> Optional[str]:

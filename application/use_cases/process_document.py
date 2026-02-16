@@ -1,11 +1,16 @@
 from datetime import datetime, timezone
 import os
+from typing import Any, Callable
 import uuid
 
 from app_context import AppContext
 
 
-from services.interfaces import SupabaseServiceInterface, LLMServiceInterface, TracingServiceInterface
+from services.interfaces import (
+    SupabaseServiceInterface,
+    LLMServiceInterface,
+    TracingServiceInterface,
+)
 
 
 async def execute(
@@ -32,6 +37,8 @@ async def execute(
     run_id = run_id or str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
     emitter = None
+    emit_and_persist: Callable[..., Any]
+    trace_event: Callable[..., Any]
     try:
         from application.services.run_event_emitter import RunEventEmitter
 
@@ -85,7 +92,10 @@ async def execute(
                 }
                 supabase.create_or_update_run(
                     run_id,
-                    {"model_name": active_model.get("model_id"), "provider": active_model.get("provider")},
+                    {
+                        "model_name": active_model.get("model_id"),
+                        "provider": active_model.get("provider"),
+                    },
                 )
                 emit_and_persist(
                     phase="model_config_selected",
@@ -111,11 +121,15 @@ async def execute(
                 if base_name:
                     name, ext = os.path.splitext(base_name)
                     suffixed = f"{name}-products{ext or ''}"
-                    final_output_path = os.path.abspath(os.path.join(os.getcwd(), suffixed))
+                    final_output_path = os.path.abspath(
+                        os.path.join(os.getcwd(), suffixed)
+                    )
                 elif output_path:
                     final_output_path = os.path.abspath(output_path)
                 else:
-                    final_output_path = os.path.abspath(os.path.join(os.getcwd(), "import-products.xlsx"))
+                    final_output_path = os.path.abspath(
+                        os.path.join(os.getcwd(), "import-products.xlsx")
+                    )
             except Exception:
                 final_output_path = output_path
 
@@ -137,9 +151,13 @@ async def execute(
             level="error",
             error=str(exc),
         )
-        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
         try:
-            supabase.finalize_run(run_id, status="error", duration_ms=duration_ms, error=str(exc))
+            supabase.finalize_run(
+                run_id, status="error", duration_ms=duration_ms, error=str(exc)
+            )
         except Exception:
             pass
         try:
@@ -162,14 +180,25 @@ async def execute(
                     generated_file_id = str(uuid.uuid4())
                     generated_filename = os.path.basename(result)
                     ct = (
-                        "text/csv" if generated_filename.lower().endswith(".csv") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        "text/csv"
+                        if generated_filename.lower().endswith(".csv")
+                        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    supabase.save_file(generated_file_id, name=generated_filename, content=out_bytes, content_type=ct)
+                    supabase.save_file(
+                        generated_file_id,
+                        name=generated_filename,
+                        content=out_bytes,
+                        content_type=ct,
+                    )
                     try:
                         os.remove(result)
                     except Exception:
                         pass
-                    result = {"workbook_path": result, "file_id": generated_file_id, "filename": generated_filename}
+                    result = {
+                        "workbook_path": result,
+                        "file_id": generated_file_id,
+                        "filename": generated_filename,
+                    }
             except Exception:
                 emit_and_persist(
                     phase="storage_upload_error",
@@ -193,7 +222,9 @@ async def execute(
         }
     duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
     try:
-        supabase.finalize_run(run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta)
+        supabase.finalize_run(
+            run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta
+        )
     except Exception:
         pass
     try:

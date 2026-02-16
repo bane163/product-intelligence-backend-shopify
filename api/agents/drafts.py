@@ -9,6 +9,7 @@ from ai.excel_writer import create_excel_bytes
 from ai.models import ProductsList
 
 from app_context import AppContext, get_ctx
+from .schemas import BulkDeletePayload, BulkDeleteResult
 from .utils import parse_products_json
 
 router = APIRouter()
@@ -143,3 +144,17 @@ async def delete_product_draft(draft_id: str, ctx: AppContext = Depends(get_ctx)
     if not ctx.services.supabase.delete_product_draft(draft_id):
         raise HTTPException(status_code=404, detail="Draft not found")
     return {"status": "deleted", "draft_id": draft_id}
+
+
+@router.post("/product-drafts/bulk-delete", summary="Bulk delete product drafts")
+async def bulk_delete_product_drafts(
+    payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
+) -> BulkDeleteResult:
+    deleted_ids: list[str] = []
+    failed_ids: list[str] = []
+    for draft_id in payload.ids:
+        if ctx.services.supabase.delete_product_draft(draft_id):
+            deleted_ids.append(draft_id)
+        else:
+            failed_ids.append(draft_id)
+    return BulkDeleteResult(deleted_ids=deleted_ids, failed_ids=failed_ids)

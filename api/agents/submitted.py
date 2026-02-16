@@ -8,6 +8,7 @@ from ai.excel_writer import create_excel_bytes
 from ai.models import ProductsList
 
 from app_context import AppContext, get_ctx
+from .schemas import BulkDeletePayload, BulkDeleteResult
 
 router = APIRouter()
 
@@ -70,3 +71,17 @@ async def delete_submitted_document(
     if not ctx.services.supabase.delete_submitted_document(submitted_id):
         raise HTTPException(status_code=404, detail="Submitted document not found")
     return {"status": "deleted", "submitted_id": submitted_id}
+
+
+@router.post("/submitted-documents/bulk-delete", summary="Bulk delete submitted documents")
+async def bulk_delete_submitted_documents(
+    payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
+) -> BulkDeleteResult:
+    deleted_ids: list[str] = []
+    failed_ids: list[str] = []
+    for submitted_id in payload.ids:
+        if ctx.services.supabase.delete_submitted_document(submitted_id):
+            deleted_ids.append(submitted_id)
+        else:
+            failed_ids.append(submitted_id)
+    return BulkDeleteResult(deleted_ids=deleted_ids, failed_ids=failed_ids)

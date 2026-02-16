@@ -57,6 +57,34 @@ async def test_file_info_and_delete():
 
 
 @pytest.mark.asyncio
+async def test_bulk_delete_files():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        ids: list[str] = []
+        for name in ("doc-a.xlsx", "doc-b.xlsx"):
+            files = {
+                "file": (
+                    name,
+                    io.BytesIO(b"bulk-delete"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            }
+            uploaded = await ac.post("/agents/upload", files=files)
+            assert uploaded.status_code == 200
+            ids.append(uploaded.json()["file_id"])
+
+        missing_id = "missing-file-id"
+        bulk_response = await ac.post("/agents/files/bulk-delete", json={"ids": [ids[0], missing_id, ids[1]]})
+        assert bulk_response.status_code == 200
+        body = bulk_response.json()
+        assert body["deleted_ids"] == [ids[0], ids[1]]
+        assert body["failed_ids"] == [missing_id]
+
+        assert (await ac.get(f"/agents/files/{ids[0]}")).status_code == 404
+        assert (await ac.get(f"/agents/files/{ids[1]}")).status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_upload_csv_converts_to_xlsx(monkeypatch):
     async def fake_convert_csv_to_excel(content, collabora_base_url=None, timeout=60):
         _ = (content, collabora_base_url, timeout)
@@ -274,6 +302,31 @@ async def test_list_and_get_product_draft():
 
 
 @pytest.mark.asyncio
+async def test_bulk_delete_product_drafts():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        create_payload = {
+            "products_json": json.dumps([{"title": "Bulk Draft"}]),
+            "run_id": "run-bulk-drafts",
+            "import_mode": "create",
+        }
+        created = await ac.post("/agents/product-drafts", data=create_payload)
+        assert created.status_code == 200
+        draft_id = created.json()["draft_id"]
+
+        missing_id = "missing-draft-id"
+        bulk_response = await ac.post(
+            "/agents/product-drafts/bulk-delete",
+            json={"ids": [draft_id, missing_id]},
+        )
+        assert bulk_response.status_code == 200
+        body = bulk_response.json()
+        assert body["deleted_ids"] == [draft_id]
+        assert body["failed_ids"] == [missing_id]
+        assert (await ac.get(f"/agents/product-drafts/{draft_id}")).status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
     async def fake_create_product_from_input(self, product):
         return {
@@ -332,3 +385,43 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
         )
         assert submitted_resume.status_code == 200
         assert submitted_resume.json()["filename"].endswith(".xlsx")
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_submitted_documents(monkeypatch):
+    async def fake_create_product_from_input(self, product):
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/3", "title": product.get("title")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        submit_payload = {
+            "products_json": json.dumps([{"title": "Bulk Submitted"}]),
+            "import_mode": "create",
+            "run_id": "run-bulk-submitted",
+            "document_name": "bulk-submitted.xlsx",
+        }
+        created_submitted = await ac.post("/agents/submit-products", data=submit_payload)
+        assert created_submitted.status_code == 200
+        submitted_id = created_submitted.json()["submitted_id"]
+
+        missing_id = "missing-submitted-id"
+        bulk_response = await ac.post(
+            "/agents/submitted-documents/bulk-delete",
+            json={"ids": [submitted_id, missing_id]},
+        )
+        assert bulk_response.status_code == 200
+        body = bulk_response.json()
+        assert body["deleted_ids"] == [submitted_id]
+        assert body["failed_ids"] == [missing_id]
+        assert (await ac.get(f"/agents/submitted-documents/{submitted_id}")).status_code == 404

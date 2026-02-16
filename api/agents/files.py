@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
 from app_context import AppContext, get_ctx
+from .schemas import BulkDeletePayload, BulkDeleteResult
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -440,6 +441,20 @@ async def delete_file_route(
         raise HTTPException(status_code=404, detail="File not found")
 
     return {"status": "deleted", "file_id": file_id}
+
+
+@router.post("/files/bulk-delete", summary="Bulk delete uploaded files")
+async def bulk_delete_files(
+    payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
+) -> BulkDeleteResult:
+    deleted_ids: list[str] = []
+    failed_ids: list[str] = []
+    for file_id in payload.ids:
+        if ctx.services.supabase.delete_file(file_id):
+            deleted_ids.append(file_id)
+        else:
+            failed_ids.append(file_id)
+    return BulkDeleteResult(deleted_ids=deleted_ids, failed_ids=failed_ids)
 
 
 @router.get("/preview/{file_id}", summary="Get PNG preview of file")

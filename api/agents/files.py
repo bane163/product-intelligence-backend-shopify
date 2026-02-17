@@ -37,14 +37,20 @@ async def list_uploaded_files(
 ) -> dict[str, Any]:
     """List all uploaded files."""
     from application.use_cases.files.list_files import execute as list_files_execute
-    files = list_files_execute(supabase=ctx.services.supabase, limit=limit, offset=offset)
+
+    files = list_files_execute(
+        supabase=ctx.services.supabase, limit=limit, offset=offset
+    )
     return {"files": files}
 
 
 @router.get("/collabora-url", summary="Get current Collabora URL")
 async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
     """Get the current Collabora URL and WOPI base URL for interactive viewer."""
-    from application.use_cases.collabora.get_collabora_url import execute as get_collabora_execute
+    from application.use_cases.collabora.get_collabora_url import (
+        execute as get_collabora_execute,
+    )
+
     return get_collabora_execute(collabora=ctx.services.collabora)
 
 
@@ -70,8 +76,15 @@ async def upload_file(
     if is_csv:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
         try:
-            from application.use_cases.collabora.convert_csv_to_excel import execute as convert_csv_execute
-            file_bytes = await convert_csv_execute(collabora=ctx.services.collabora, csv_bytes=file_bytes, collabora_base_url=collabora_url)
+            from application.use_cases.collabora.convert_csv_to_excel import (
+                execute as convert_csv_execute,
+            )
+
+            file_bytes = await convert_csv_execute(
+                collabora=ctx.services.collabora,
+                csv_bytes=file_bytes,
+                collabora_base_url=collabora_url,
+            )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"CSV conversion failed: {exc}")
         base, _ = os.path.splitext(original_name)
@@ -81,7 +94,14 @@ async def upload_file(
         )
 
     from application.use_cases.files.save_file import execute as save_file_execute
-    save_file_execute(supabase=ctx.services.supabase, file_id=file_id, name=stored_name, content=file_bytes, content_type=stored_content_type)
+
+    save_file_execute(
+        supabase=ctx.services.supabase,
+        file_id=file_id,
+        name=stored_name,
+        content=file_bytes,
+        content_type=stored_content_type,
+    )
     thumbnail_generated = False
     try:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
@@ -92,8 +112,13 @@ async def upload_file(
             collabora_url=collabora_url,
             collabora=ctx.services.collabora,
         )
-        from application.use_cases.files.save_file_thumbnail import execute as save_thumb_execute
-        thumbnail_path = save_thumb_execute(supabase=ctx.services.supabase, file_id=file_id, content=thumbnail_bytes)
+        from application.use_cases.files.save_file_thumbnail import (
+            execute as save_thumb_execute,
+        )
+
+        thumbnail_path = save_thumb_execute(
+            supabase=ctx.services.supabase, file_id=file_id, content=thumbnail_bytes
+        )
         thumbnail_generated = bool(thumbnail_path)
     except Exception as e:
         LOG.warning(
@@ -101,6 +126,7 @@ async def upload_file(
         )
 
     from application.use_cases.files.get_file import execute as get_file_execute
+
     file_name_dict = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     file_name = _optional_str(file_name_dict, "name") or "unknown"
 
@@ -130,19 +156,24 @@ async def process_excel(
 
     Accepts either file_id or direct upload.
     """
-    from application.use_cases.processing.process_document import execute as process_document_execute
+    from application.use_cases.processing.process_document import (
+        execute as process_document_execute,
+    )
 
     # Resolve file bytes and metadata
     file_entry: dict[str, object] | None = None
     file_bytes_data: bytes | None = None
     if file_id:
         from application.use_cases.files.get_file import execute as get_file_execute
+
         file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
         file_content = file_entry.get("content")
         if not isinstance(file_content, (bytes, bytearray)):
-            raise HTTPException(status_code=500, detail="Stored file content is invalid")
+            raise HTTPException(
+                status_code=500, detail="Stored file content is invalid"
+            )
         file_bytes_data = bytes(file_content)
     elif file:
         file_bytes_data = await file.read()
@@ -155,15 +186,9 @@ async def process_excel(
     if file_bytes_data is None:
         raise HTTPException(status_code=500, detail="File content is missing")
 
-    input_name = (
-        file.filename
-        if file
-        else _optional_str(file_entry, "name")
-    )
+    input_name = file.filename if file else _optional_str(file_entry, "name")
     input_content_type = (
-        file.content_type
-        if file
-        else _optional_str(file_entry, "content_type")
+        file.content_type if file else _optional_str(file_entry, "content_type")
     )
 
     result = await process_document_execute(
@@ -186,11 +211,13 @@ async def process_excel(
     return result
 
 
-
 @router.get("/files/{file_id}", summary="Get file info")
-async def get_file_info(file_id: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
+async def get_file_info(
+    file_id: str, ctx: AppContext = Depends(get_ctx)
+) -> dict[str, Any]:
     """Get information about an uploaded file."""
     from application.use_cases.files.get_file import execute as get_file_execute
+
     file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
@@ -217,6 +244,7 @@ async def delete_file_route(
 ) -> dict[str, Any]:  # rename to avoid shadowing helper
     """Delete an uploaded file from storage."""
     from application.use_cases.files.delete_file import execute as delete_file_execute
+
     if not delete_file_execute(supabase=ctx.services.supabase, file_id=file_id):
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -227,7 +255,9 @@ async def delete_file_route(
 async def bulk_delete_files(
     payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
 ) -> BulkDeleteResult:
-    from application.use_cases.files.bulk_delete_files import execute as bulk_delete_files_execute
+    from application.use_cases.files.bulk_delete_files import (
+        execute as bulk_delete_files_execute,
+    )
 
     result = bulk_delete_files_execute(supabase=ctx.services.supabase, ids=payload.ids)
     return BulkDeleteResult(**result)
@@ -239,7 +269,10 @@ async def get_file_preview(
 ) -> Response:
     """Convert the uploaded file to PNG and return it for preview."""
     from application.use_cases.files.get_file import execute as get_file_execute
-    from application.use_cases.files.get_file_thumbnail import execute as get_file_thumb_execute
+    from application.use_cases.files.get_file_thumbnail import (
+        execute as get_file_thumb_execute,
+    )
+
     file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
@@ -249,7 +282,9 @@ async def get_file_preview(
     file_name = _required_str(file_entry, "name")
     file_content_type = _required_str(file_entry, "content_type")
 
-    thumbnail_bytes = get_file_thumb_execute(supabase=ctx.services.supabase, file_id=file_id)
+    thumbnail_bytes = get_file_thumb_execute(
+        supabase=ctx.services.supabase, file_id=file_id
+    )
     if thumbnail_bytes:
         return Response(content=thumbnail_bytes, media_type="image/png")
 
@@ -262,8 +297,13 @@ async def get_file_preview(
             collabora_url=collabora_url,
             collabora=ctx.services.collabora,
         )
-        from application.use_cases.files.save_file_thumbnail import execute as save_thumb_execute
-        save_thumb_execute(supabase=ctx.services.supabase, file_id=file_id, content=preview_png)
+        from application.use_cases.files.save_file_thumbnail import (
+            execute as save_thumb_execute,
+        )
+
+        save_thumb_execute(
+            supabase=ctx.services.supabase, file_id=file_id, content=preview_png
+        )
 
         return Response(content=preview_png, media_type="image/png")
     except Exception as exc:

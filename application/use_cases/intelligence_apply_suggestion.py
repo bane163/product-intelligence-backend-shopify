@@ -14,6 +14,43 @@ def _merge_product_patch(product: dict[str, Any], patch: dict[str, Any]) -> dict
     return merged
 
 
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _extract_audited_products(audit: dict[str, Any]) -> list[dict[str, Any]]:
+    totals = audit.get("totals")
+    if not isinstance(totals, dict):
+        return []
+    raw = totals.get("audited_products")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def _resolve_suggestion_product(
+    suggestion: dict[str, Any], audit: dict[str, Any]
+) -> dict[str, Any]:
+    products = _extract_audited_products(audit)
+    if not products:
+        raise ValueError("Audit does not include audited product metadata")
+
+    try:
+        product_index = int(suggestion.get("product_index") or 0)
+    except (TypeError, ValueError):
+        product_index = 0
+    if 0 <= product_index < len(products):
+        return dict(products[product_index])
+
+    target_title = _normalize_text(suggestion.get("product_title"))
+    if target_title:
+        for item in products:
+            if _normalize_text(item.get("title")) == target_title:
+                return dict(item)
+
+    raise ValueError("Unable to resolve suggestion target product from audit metadata")
+
+
 async def _resolve_product_gid(shopify: ShopifyPort, product: dict[str, Any]) -> str | None:
     gid = product.get("id") or product.get("shopify_gid")
     if isinstance(gid, str) and gid:
@@ -59,44 +96,12 @@ async def execute(
     if not audit:
         raise LookupError("Audit not found for suggestion")
 
-    submitted_id = audit.get("submitted_id")
-    if not isinstance(submitted_id, str) or not submitted_id:
-        raise ValueError("Suggestion apply currently supports submitted-document audits only")
-
-    submitted = supabase.get_submitted_document(submitted_id)
-    if not submitted:
-        raise LookupError("Submitted document not found")
-
-    products = submitted.get("products")
-    if not isinstance(products, list):
-        raise ValueError("Submitted document products are invalid")
-
-    product_index = int(suggestion.get("product_index") or 0)
-    if product_index < 0 or product_index >= len(products):
-        raise ValueError("Suggestion product index is out of bounds")
-
-    current_product = products[product_index]
-    if not isinstance(current_product, dict):
-        raise ValueError("Submitted product is invalid")
-
+    current_product = _resolve_suggestion_product(suggestion=suggestion, audit=audit)
     updated_product = _merge_product_patch(current_product, patch_payload)
-    products[product_index] = updated_product
-
-    save_result = supabase.save_submitted_document(
-        submitted_id=submitted_id,
-        run_id=submitted.get("run_id") if isinstance(submitted.get("run_id"), str) else None,
-        draft_id=submitted.get("draft_id") if isinstance(submitted.get("draft_id"), str) else None,
-        name=str(submitted.get("name") or "Submitted document"),
-        import_mode=str(submitted.get("import_mode") or "auto"),
-        product_count=len(products),
-        products=[item for item in products if isinstance(item, dict)],
-    )
-
-    shopify_updated = False
     gid = await _resolve_product_gid(shopify, updated_product)
-    if gid:
-        await shopify.update_product_from_input({**updated_product, "id": gid})
-        shopify_updated = True
+    if not gid:
+        raise ValueError("Unable to resolve Shopify product ID for suggestion target")
+    await shopify.update_product_from_input({**updated_product, "id": gid})
 
     applied = supabase.mark_product_intelligence_suggestion_applied(suggestion_id=suggestion_id)
     if not applied:
@@ -105,6 +110,6 @@ async def execute(
     return {
         "status": "applied",
         "suggestion": applied,
-        "shopify_updated": shopify_updated,
-        "submitted_document": save_result,
+        "shopify_updated": True,
+        "target_product_id": gid,
     }

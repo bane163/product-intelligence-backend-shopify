@@ -221,16 +221,40 @@ async def list_product_intelligence_suggestions(
 )
 async def apply_product_intelligence_suggestion(
     suggestion_id: str,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.intelligence_apply_suggestion import (
         execute as apply_suggestion_execute,
     )
 
+    data: dict[str, Any] = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            raw_json = await request.json()
+            if isinstance(raw_json, dict):
+                data.update(raw_json)
+        except Exception:
+            data = {}
+    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        for key, value in form.items():
+            data[key] = value
+    shop_domain = data.get("shop_domain")
+    shop_access_token = data.get("shop_access_token")
+    shopify_client = _resolve_shopify_client(
+        ctx=ctx,
+        shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
+        shop_access_token=(
+            str(shop_access_token) if isinstance(shop_access_token, str) else None
+        ),
+    )
+
     try:
         return await apply_suggestion_execute(
             supabase=ctx.services.supabase,
-            shopify=ctx.services.shopify,
+            shopify=shopify_client,
             suggestion_id=suggestion_id,
         )
     except LookupError as exc:
@@ -244,19 +268,49 @@ async def apply_product_intelligence_suggestion(
     summary="Apply multiple intelligence suggestions",
 )
 async def apply_product_intelligence_suggestions_bulk(
-    payload: dict[str, Any],
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.intelligence_apply_suggestion import (
         execute as apply_suggestion_execute,
     )
 
-    raw_ids = payload.get("suggestion_ids")
+    payload: dict[str, Any] = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            raw_json = await request.json()
+            if isinstance(raw_json, dict):
+                payload.update(raw_json)
+        except Exception:
+            payload = {}
+    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        for key, value in form.items():
+            payload[key] = value
+    raw_ids: Any = payload.get("suggestion_ids")
+    raw_ids_json = payload.get("suggestion_ids_json")
+    if not isinstance(raw_ids, list) and isinstance(raw_ids_json, str) and raw_ids_json.strip():
+        try:
+            parsed_ids = json.loads(raw_ids_json)
+            if isinstance(parsed_ids, list):
+                raw_ids = parsed_ids
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid suggestion_ids_json: {exc}")
     if not isinstance(raw_ids, list):
         raise HTTPException(status_code=400, detail="suggestion_ids must be a list")
     suggestion_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
     if not suggestion_ids:
         raise HTTPException(status_code=400, detail="No suggestion_ids provided")
+    shop_domain = payload.get("shop_domain")
+    shop_access_token = payload.get("shop_access_token")
+    shopify_client = _resolve_shopify_client(
+        ctx=ctx,
+        shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
+        shop_access_token=(
+            str(shop_access_token) if isinstance(shop_access_token, str) else None
+        ),
+    )
 
     results: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -264,7 +318,7 @@ async def apply_product_intelligence_suggestions_bulk(
         try:
             result = await apply_suggestion_execute(
                 supabase=ctx.services.supabase,
-                shopify=ctx.services.shopify,
+                shopify=shopify_client,
                 suggestion_id=suggestion_id,
             )
             results.append({"suggestion_id": suggestion_id, **result})

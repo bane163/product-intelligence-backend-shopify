@@ -469,33 +469,41 @@ async def test_generate_thumbnail_bytes_skips_blank_pages():
 
 @pytest.mark.asyncio
 async def test_run_and_get_product_intelligence_audit(monkeypatch):
-    async def fake_create_product_from_input(self, product):
+    async def fake_update_product_from_input(self, product):
         return {
             "data": {
-                "productCreate": {
-                    "product": {"id": "gid://shopify/Product/9", "title": product.get("title")},
+                "productUpdate": {
+                    "product": {
+                        "id": product.get("id"),
+                        "title": product.get("title"),
+                    },
                     "userErrors": [],
                 }
             }
         }
 
-    import api.agents.submit as submit_api
+    import shopify as shopify_module
 
-    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "update_product_from_input",
+        fake_update_product_from_input,
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
-        submit_payload = {
-            "products_json": json.dumps([{"title": "Short"}]),
-            "import_mode": "create",
-            "run_id": "run-intelligence",
-            "document_name": "intelligence-source.xlsx",
-        }
-        submitted = await ac.post("/agents/submit-products", data=submit_payload)
-        assert submitted.status_code == 200
-        submitted_id = submitted.json()["submitted_id"]
-
-        audit_run = await ac.post("/agents/intelligence/audit", json={"submitted_id": submitted_id})
+        audit_run = await ac.post(
+            "/agents/intelligence/audit",
+            json={
+                "products": [
+                    {
+                        "id": "gid://shopify/Product/9",
+                        "title": "Short",
+                        "handle": "short",
+                    }
+                ]
+            },
+        )
         assert audit_run.status_code == 200
         audit = audit_run.json()
         assert audit["audit_id"]
@@ -525,6 +533,8 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
         )
         assert apply_single.status_code == 200
         assert apply_single.json()["status"] == "applied"
+        assert apply_single.json()["shopify_updated"] is True
+        assert apply_single.json()["target_product_id"] == "gid://shopify/Product/9"
 
         remaining_ids = [
             row["suggestion_id"]

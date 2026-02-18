@@ -103,6 +103,46 @@ class SupabaseServiceInterface(Protocol):
     
     def delete_submitted_document(self, submitted_id: str) -> bool: ...
 
+    def save_product_intelligence_audit(
+        self,
+        *,
+        audit_id: str,
+        run_id: str | None,
+        submitted_id: str | None,
+        scope: str,
+        status: str,
+        overall_score: int,
+        findings_count: int,
+        component_scores: dict[str, int],
+        totals: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def save_product_intelligence_findings(
+        self, *, audit_id: str, findings: list[dict[str, Any]]
+    ) -> int: ...
+
+    def list_product_intelligence_audits(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]: ...
+
+    def get_product_intelligence_audit(self, audit_id: str) -> dict[str, Any] | None: ...
+
+    def save_product_intelligence_suggestions(
+        self, *, audit_id: str, suggestions: list[dict[str, Any]]
+    ) -> int: ...
+
+    def list_product_intelligence_suggestions(
+        self, *, audit_id: str
+    ) -> list[dict[str, Any]]: ...
+
+    def get_product_intelligence_suggestion(
+        self, suggestion_id: str
+    ) -> dict[str, Any] | None: ...
+
+    def mark_product_intelligence_suggestion_applied(
+        self, *, suggestion_id: str
+    ) -> dict[str, Any] | None: ...
+
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]: ...
 
     def create_llm_model_config(

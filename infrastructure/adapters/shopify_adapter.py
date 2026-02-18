@@ -19,3 +19,8 @@ class ShopifyAdapter:
 
     async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
         return await self._client.update_product_from_input(product)
+
+    async def list_products_for_audit(
+        self, query: str | None = None, limit: int = 50
+    ) -> list[Dict[str, Any]]:
+        return await self._client.list_products_for_audit(query=query, limit=limit)

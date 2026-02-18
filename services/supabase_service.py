@@ -20,6 +20,9 @@ class SupabaseService(SupabaseServiceInterface):
         self.file_storage: dict[str, dict[str, Any]] = {}
         self.product_drafts: dict[str, dict[str, Any]] = {}
         self.submitted_documents: dict[str, dict[str, Any]] = {}
+        self.product_intelligence_audits: dict[str, dict[str, Any]] = {}
+        self.product_intelligence_findings: dict[str, list[dict[str, Any]]] = {}
+        self.product_intelligence_suggestions: dict[str, dict[str, Any]] = {}
         self.llm_model_configs: dict[str, dict[str, Any]] = {}
 
     @staticmethod
@@ -763,6 +766,217 @@ class SupabaseService(SupabaseServiceInterface):
             del self.submitted_documents[submitted_id]
             deleted = True
         return deleted
+
+    def save_product_intelligence_audit(
+        self,
+        *,
+        audit_id: str,
+        run_id: str | None,
+        submitted_id: str | None,
+        scope: str,
+        status: str,
+        overall_score: int,
+        findings_count: int,
+        component_scores: dict[str, int],
+        totals: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = self._utc_now()
+        payload = {
+            "audit_id": audit_id,
+            "run_id": run_id,
+            "submitted_id": submitted_id,
+            "scope": scope,
+            "status": status,
+            "overall_score": overall_score,
+            "findings_count": findings_count,
+            "component_scores": component_scores,
+            "totals": totals,
+            "created_at": now,
+            "updated_at": now,
+        }
+        client = self._get_supabase_client()
+        if client:
+            try:
+                client.table("product_intelligence_audits").upsert(
+                    payload, on_conflict="audit_id"
+                ).execute()
+                return payload
+            except Exception:
+                LOG.exception("Failed saving product intelligence audit %s", audit_id)
+        self.product_intelligence_audits[audit_id] = payload
+        return payload
+
+    def save_product_intelligence_findings(
+        self, *, audit_id: str, findings: list[dict[str, Any]]
+    ) -> int:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                client.table("product_intelligence_findings").delete().eq(
+                    "audit_id", audit_id
+                ).execute()
+                if findings:
+                    payload = [{**finding, "audit_id": audit_id} for finding in findings]
+                    client.table("product_intelligence_findings").insert(payload).execute()
+                return len(findings)
+            except Exception:
+                LOG.exception("Failed saving intelligence findings for audit=%s", audit_id)
+        self.product_intelligence_findings[audit_id] = [dict(item) for item in findings]
+        return len(findings)
+
+    def list_product_intelligence_audits(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_audits")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .range(offset, offset + limit - 1)
+                    .execute()
+                )
+                return res.data or []
+            except Exception:
+                LOG.exception("Failed listing product intelligence audits")
+        audits = list(self.product_intelligence_audits.values())
+        audits.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return audits[offset : offset + limit]
+
+    def get_product_intelligence_audit(self, audit_id: str) -> dict[str, Any] | None:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                audit_res = (
+                    client.table("product_intelligence_audits")
+                    .select("*")
+                    .eq("audit_id", audit_id)
+                    .limit(1)
+                    .execute()
+                )
+                audit_rows = audit_res.data or []
+                if not audit_rows:
+                    return None
+                findings_res = (
+                    client.table("product_intelligence_findings")
+                    .select("*")
+                    .eq("audit_id", audit_id)
+                    .order("created_at", desc=False)
+                    .execute()
+                )
+                audit = dict(audit_rows[0])
+                audit["findings"] = findings_res.data or []
+                return audit
+            except Exception:
+                LOG.exception("Failed fetching product intelligence audit %s", audit_id)
+
+        audit = self.product_intelligence_audits.get(audit_id)
+        if not audit:
+            return None
+        return {**audit, "findings": self.product_intelligence_findings.get(audit_id, [])}
+
+    def save_product_intelligence_suggestions(
+        self, *, audit_id: str, suggestions: list[dict[str, Any]]
+    ) -> int:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                client.table("product_intelligence_suggestions").delete().eq(
+                    "audit_id", audit_id
+                ).execute()
+                if suggestions:
+                    payload = [{**item, "audit_id": audit_id} for item in suggestions]
+                    client.table("product_intelligence_suggestions").insert(payload).execute()
+                return len(suggestions)
+            except Exception:
+                LOG.exception("Failed saving intelligence suggestions for audit=%s", audit_id)
+        for key in [k for k, v in self.product_intelligence_suggestions.items() if v.get("audit_id") == audit_id]:
+            self.product_intelligence_suggestions.pop(key, None)
+        for item in suggestions:
+            suggestion_id = str(item.get("suggestion_id") or uuid.uuid4())
+            self.product_intelligence_suggestions[suggestion_id] = {
+                **item,
+                "suggestion_id": suggestion_id,
+                "audit_id": audit_id,
+            }
+        return len(suggestions)
+
+    def list_product_intelligence_suggestions(
+        self, *, audit_id: str
+    ) -> list[dict[str, Any]]:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_suggestions")
+                    .select("*")
+                    .eq("audit_id", audit_id)
+                    .order("created_at", desc=False)
+                    .execute()
+                )
+                return res.data or []
+            except Exception:
+                LOG.exception("Failed listing intelligence suggestions for audit=%s", audit_id)
+        return [
+            dict(item)
+            for item in self.product_intelligence_suggestions.values()
+            if item.get("audit_id") == audit_id
+        ]
+
+    def get_product_intelligence_suggestion(
+        self, suggestion_id: str
+    ) -> dict[str, Any] | None:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_suggestions")
+                    .select("*")
+                    .eq("suggestion_id", suggestion_id)
+                    .limit(1)
+                    .execute()
+                )
+                rows = res.data or []
+                return rows[0] if rows else None
+            except Exception:
+                LOG.exception(
+                    "Failed fetching intelligence suggestion %s", suggestion_id
+                )
+        return self.product_intelligence_suggestions.get(suggestion_id)
+
+    def mark_product_intelligence_suggestion_applied(
+        self, *, suggestion_id: str
+    ) -> dict[str, Any] | None:
+        now = self._utc_now()
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_suggestions")
+                    .update(
+                        {
+                            "status": "applied",
+                            "applied_at": now,
+                            "updated_at": now,
+                        }
+                    )
+                    .eq("suggestion_id", suggestion_id)
+                    .execute()
+                )
+                rows = res.data or []
+                return rows[0] if rows else None
+            except Exception:
+                LOG.exception(
+                    "Failed marking intelligence suggestion applied %s", suggestion_id
+                )
+        item = self.product_intelligence_suggestions.get(suggestion_id)
+        if not item:
+            return None
+        item["status"] = "applied"
+        item["applied_at"] = now
+        item["updated_at"] = now
+        return dict(item)
 
     # ----- LLM model config -----
     @staticmethod

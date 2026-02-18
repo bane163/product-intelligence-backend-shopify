@@ -161,6 +161,70 @@ class SupabaseAdapter(SupabasePort):
     def delete_submitted_document(self, submitted_id: str) -> bool:
         return self._service.delete_submitted_document(submitted_id)
 
+    def save_product_intelligence_audit(
+        self,
+        *,
+        audit_id: str,
+        run_id: str | None,
+        submitted_id: str | None,
+        scope: str,
+        status: str,
+        overall_score: int,
+        findings_count: int,
+        component_scores: dict[str, int],
+        totals: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._service.save_product_intelligence_audit(
+            audit_id=audit_id,
+            run_id=run_id,
+            submitted_id=submitted_id,
+            scope=scope,
+            status=status,
+            overall_score=overall_score,
+            findings_count=findings_count,
+            component_scores=component_scores,
+            totals=totals,
+        )
+
+    def save_product_intelligence_findings(
+        self, *, audit_id: str, findings: list[dict[str, Any]]
+    ) -> int:
+        return self._service.save_product_intelligence_findings(
+            audit_id=audit_id, findings=findings
+        )
+
+    def list_product_intelligence_audits(
+        self, limit: int = 50, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        return self._service.list_product_intelligence_audits(limit=limit, offset=offset)
+
+    def get_product_intelligence_audit(self, audit_id: str) -> dict[str, Any] | None:
+        return self._service.get_product_intelligence_audit(audit_id)
+
+    def save_product_intelligence_suggestions(
+        self, *, audit_id: str, suggestions: list[dict[str, Any]]
+    ) -> int:
+        return self._service.save_product_intelligence_suggestions(
+            audit_id=audit_id, suggestions=suggestions
+        )
+
+    def list_product_intelligence_suggestions(
+        self, *, audit_id: str
+    ) -> list[dict[str, Any]]:
+        return self._service.list_product_intelligence_suggestions(audit_id=audit_id)
+
+    def get_product_intelligence_suggestion(
+        self, suggestion_id: str
+    ) -> dict[str, Any] | None:
+        return self._service.get_product_intelligence_suggestion(suggestion_id)
+
+    def mark_product_intelligence_suggestion_applied(
+        self, *, suggestion_id: str
+    ) -> dict[str, Any] | None:
+        return self._service.mark_product_intelligence_suggestion_applied(
+            suggestion_id=suggestion_id
+        )
+
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]:
         return self._service.list_llm_model_configs(shop_domain)
 

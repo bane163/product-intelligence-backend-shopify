@@ -1,0 +1,16 @@
+mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields {
+      id
+      namespace
+      key
+      value
+      type
+    }
+    userErrors {
+      field
+      message
+      code
+    }
+  }
+}

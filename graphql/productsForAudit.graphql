@@ -1,0 +1,30 @@
+query productsForAudit($first: Int!, $after: String, $query: String) {
+  products(first: $first, after: $after, query: $query) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    edges {
+      cursor
+      node {
+        id
+        title
+        handle
+        vendor
+        productType
+        status
+        tags
+        descriptionHtml
+        seo {
+          title
+          description
+        }
+        variants(first: 20) {
+          nodes {
+            sku
+          }
+        }
+      }
+    }
+  }
+}

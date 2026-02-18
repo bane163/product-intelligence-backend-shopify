@@ -194,12 +194,62 @@ class ShopifyClient:
         tags = ShopifyClient._normalize_tags(product.get("tags"))
         if tags:
             payload["tags"] = tags
+        if "productType" not in payload:
+            fallback_type = product.get("product_category")
+            if fallback_type not in (None, ""):
+                payload["productType"] = fallback_type
+        seo_title = product.get("seo_title")
+        seo_description = product.get("seo_description")
+        if seo_title not in (None, "") or seo_description not in (None, ""):
+            payload["seo"] = {
+                "title": str(seo_title or ""),
+                "description": str(seo_description or ""),
+            }
         return payload
+
+    @staticmethod
+    def _extract_metafields_inputs(product: Dict[str, Any], owner_id: str) -> list[Dict[str, str]]:
+        raw = product.get("metafields")
+        if not isinstance(raw, list):
+            return []
+        inputs: list[Dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            namespace = item.get("namespace")
+            key = item.get("key")
+            value = item.get("value")
+            mf_type = item.get("type") or "single_line_text_field"
+            if not all(isinstance(v, str) and v.strip() for v in [namespace, key, value, mf_type]):
+                continue
+            inputs.append(
+                {
+                    "ownerId": owner_id,
+                    "namespace": namespace.strip(),
+                    "key": key.strip(),
+                    "value": value.strip(),
+                    "type": mf_type.strip(),
+                }
+            )
+        return inputs
+
+    async def set_product_metafields(self, owner_id: str, metafields: list[Dict[str, str]]) -> Dict[str, Any]:
+        if not metafields:
+            return {"data": {"metafieldsSet": {"metafields": [], "userErrors": []}}}
+        mutation = _load_graphql("metafieldsSet.graphql")
+        return await self.graphql(mutation, {"metafields": metafields})
 
     async def create_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
         mutation = _load_graphql("productCreate.graphql")
         product_payload = self._build_product_payload(product, include_id=False)
-        return await self.graphql(mutation, {"product": product_payload})
+        response = await self.graphql(mutation, {"product": product_payload})
+        created = response.get("data", {}).get("productCreate", {}).get("product", {})
+        owner_id = created.get("id") if isinstance(created, dict) else None
+        if isinstance(owner_id, str) and owner_id:
+            metafields = self._extract_metafields_inputs(product, owner_id)
+            if metafields:
+                await self.set_product_metafields(owner_id, metafields)
+        return response
 
     async def get_product(self, gid: str) -> Dict[str, Any]:
         query = _load_graphql("productQuery.graphql")
@@ -219,7 +269,14 @@ class ShopifyClient:
     async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
         mutation = _load_graphql("productUpdate.graphql")
         product_payload = self._build_product_payload(product, include_id=True)
-        return await self.graphql(mutation, {"product": product_payload})
+        response = await self.graphql(mutation, {"product": product_payload})
+        updated = response.get("data", {}).get("productUpdate", {}).get("product", {})
+        owner_id = updated.get("id") if isinstance(updated, dict) else None
+        if isinstance(owner_id, str) and owner_id:
+            metafields = self._extract_metafields_inputs(product, owner_id)
+            if metafields:
+                await self.set_product_metafields(owner_id, metafields)
+        return response
 
     async def find_product_id_by_handle(self, handle: str) -> str | None:
         query = _load_graphql("productByHandle.graphql")
@@ -244,3 +301,64 @@ class ShopifyClient:
     async def delete_product(self, gid: str) -> Dict[str, Any]:
         mutation = _load_graphql("productDelete.graphql")
         return await self.graphql(mutation, {"input": {"id": gid}})
+
+    async def list_products_for_audit(
+        self, query: Optional[str] = None, limit: int = 50
+    ) -> list[Dict[str, Any]]:
+        gql = _load_graphql("productsForAudit.graphql")
+        remaining = max(1, min(limit, 1000))
+        page_size = 50
+        after: str | None = None
+        collected: list[Dict[str, Any]] = []
+
+        while remaining > 0:
+            batch_size = min(page_size, remaining)
+            resp = await self.graphql(
+                gql,
+                {
+                    "first": batch_size,
+                    "after": after,
+                    "query": query or None,
+                },
+            )
+            products = resp.get("data", {}).get("products", {})
+            edges = products.get("edges", []) if isinstance(products, dict) else []
+            for edge in edges:
+                node = edge.get("node") if isinstance(edge, dict) else None
+                if not isinstance(node, dict):
+                    continue
+                seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
+                variants = node.get("variants") if isinstance(node.get("variants"), dict) else {}
+                variant_nodes = (
+                    variants.get("nodes") if isinstance(variants.get("nodes"), list) else []
+                )
+                collected.append(
+                    {
+                        "id": node.get("id"),
+                        "title": node.get("title"),
+                        "handle": node.get("handle"),
+                        "vendor": node.get("vendor"),
+                        "product_type": node.get("productType"),
+                        "status": node.get("status"),
+                        "tags": node.get("tags"),
+                        "body_html": node.get("descriptionHtml"),
+                        "seo_title": seo.get("title"),
+                        "seo_description": seo.get("description"),
+                        "variants": [
+                            {"sku": item.get("sku")}
+                            for item in variant_nodes
+                            if isinstance(item, dict)
+                        ],
+                    }
+                )
+                remaining -= 1
+                if remaining <= 0:
+                    break
+
+            page_info = products.get("pageInfo", {}) if isinstance(products, dict) else {}
+            has_next = bool(page_info.get("hasNextPage"))
+            after = page_info.get("endCursor") if has_next else None
+            if not has_next or not after:
+                break
+
+        return collected

@@ -465,3 +465,129 @@ async def test_generate_thumbnail_bytes_skips_blank_pages():
         collabora=_FakeCollabora(),
     )
     assert selected == non_blank
+
+
+@pytest.mark.asyncio
+async def test_run_and_get_product_intelligence_audit(monkeypatch):
+    async def fake_create_product_from_input(self, product):
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/9", "title": product.get("title")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        submit_payload = {
+            "products_json": json.dumps([{"title": "Short"}]),
+            "import_mode": "create",
+            "run_id": "run-intelligence",
+            "document_name": "intelligence-source.xlsx",
+        }
+        submitted = await ac.post("/agents/submit-products", data=submit_payload)
+        assert submitted.status_code == 200
+        submitted_id = submitted.json()["submitted_id"]
+
+        audit_run = await ac.post("/agents/intelligence/audit", json={"submitted_id": submitted_id})
+        assert audit_run.status_code == 200
+        audit = audit_run.json()
+        assert audit["audit_id"]
+        assert isinstance(audit.get("overall_score"), int)
+        assert isinstance(audit.get("findings"), list)
+
+        audits = await ac.get("/agents/intelligence/audits")
+        assert audits.status_code == 200
+        listed = audits.json()["audits"]
+        assert any(item.get("audit_id") == audit["audit_id"] for item in listed)
+
+        detail = await ac.get(f"/agents/intelligence/audits/{audit['audit_id']}")
+        assert detail.status_code == 200
+        assert detail.json()["audit"]["audit_id"] == audit["audit_id"]
+
+        suggestions = await ac.get(
+            f"/agents/intelligence/audits/{audit['audit_id']}/suggestions"
+        )
+        assert suggestions.status_code == 200
+        suggestion_rows = suggestions.json()["suggestions"]
+        assert isinstance(suggestion_rows, list)
+        assert suggestion_rows
+
+        suggestion_id = suggestion_rows[0]["suggestion_id"]
+        apply_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion_id}/apply"
+        )
+        assert apply_single.status_code == 200
+        assert apply_single.json()["status"] == "applied"
+
+        remaining_ids = [
+            row["suggestion_id"]
+            for row in suggestion_rows[1:]
+            if row.get("status") != "applied"
+        ]
+        if remaining_ids:
+            apply_bulk = await ac.post(
+                "/agents/intelligence/suggestions/apply-bulk",
+                json={"suggestion_ids": remaining_ids},
+            )
+            assert apply_bulk.status_code == 200
+            assert apply_bulk.json()["failed_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_intelligence_audit_with_existing_products_mode(monkeypatch):
+    async def fake_list_products_for_audit(self, query=None, limit=50):
+        _ = (self, query, limit)
+        return [
+            {
+                "id": "gid://shopify/Product/101",
+                "title": "Catalog Product",
+                "handle": "catalog-product",
+                "vendor": "Brand",
+                "product_type": "General",
+                "status": "active",
+                "tags": ["tag-1"],
+                "body_html": "Catalog description",
+                "seo_title": "Catalog Product",
+                "seo_description": "Catalog description",
+                "variants": [{"sku": "SKU-101"}],
+            }
+        ]
+
+    import infrastructure.adapters.shopify_adapter as shopify_adapter
+
+    monkeypatch.setattr(
+        shopify_adapter.ShopifyAdapter,
+        "list_products_for_audit",
+        fake_list_products_for_audit,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        products_response = await ac.get(
+            "/agents/intelligence/shopify-products?query=catalog&limit=10"
+        )
+        assert products_response.status_code == 200
+        products = products_response.json()["products"]
+        assert len(products) == 1
+        assert products[0]["title"] == "Catalog Product"
+
+        selected_audit = await ac.post(
+            "/agents/intelligence/audit",
+            json={"products": products},
+        )
+        assert selected_audit.status_code == 200
+        assert selected_audit.json()["audit_id"]
+
+        all_audit = await ac.post(
+            "/agents/intelligence/audit",
+            json={"all_products": True, "query": "catalog", "limit": 10},
+        )
+        assert all_audit.status_code == 200
+        assert all_audit.json()["audit_id"]

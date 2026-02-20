@@ -266,48 +266,41 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
     return dimensions, findings
 
 
-def _build_suggestions(
-    audit_id: str,
-    findings: list[dict[str, Any]],
-    shop_domain: str,
-) -> list[dict[str, Any]]:
-    suggestions: list[dict[str, Any]] = []
-    for finding in findings:
-        patch_payload = finding.get("patch_payload")
-        if not isinstance(patch_payload, dict) or not patch_payload:
-            continue
-        suggestions.append(
-            {
-                "suggestion_id": str(uuid.uuid4()),
-                "finding_id": str(finding.get("finding_id") or ""),
-                "product_index": int(finding.get("product_index") or 0),
-                "product_title": str(finding.get("product_title") or ""),
-                "category": str(finding.get("category") or ""),
-                "severity": str(finding.get("severity") or "low"),
-                "message": str(finding.get("message") or ""),
-                "patch_payload": patch_payload,
-                "status": "pending",
-                "shop_domain": shop_domain,
-            }
-        )
-    return suggestions
-
-
-def execute(
+async def execute(
     *,
     supabase: SupabasePort,
     products: list[dict[str, Any]],
     submitted_id: str | None = None,
     run_id: str | None = None,
     shop_domain: str | None = None,
+    trace_event: Any | None = None,
 ) -> dict[str, Any]:
+    from application.use_cases.intelligence_generate_suggestions import (
+        execute as generate_suggestions_execute,
+    )
+
     if not products:
         raise ValueError("No products provided for intelligence audit")
     tenant = str(shop_domain or "").strip().lower()
     if not tenant:
         raise ValueError("Missing shop_domain for intelligence audit")
 
+    if callable(trace_event):
+        trace_event(
+            phase="audit_scoring_start",
+            message="Scoring products for intelligence audit",
+            payload_preview={"products_count": len(products)},
+        )
     component_scores, findings = _score_products(products)
+    if callable(trace_event):
+        trace_event(
+            phase="audit_scoring_done",
+            message="Computed audit findings and component scores",
+            payload_preview={
+                "findings_count": len(findings),
+                "component_scores": component_scores,
+            },
+        )
     weights = {
         "completeness": 25,
         "consistency": 20,
@@ -349,8 +342,31 @@ def execute(
         totals=totals,
         shop_domain=tenant,
     )
+    if callable(trace_event):
+        trace_event(
+            phase="audit_persisted",
+            message="Persisted audit metadata",
+            payload_preview={"audit_id": audit_id, "run_id": run_id},
+        )
     supabase.save_product_intelligence_findings(audit_id=audit_id, findings=findings, shop_domain=tenant)
-    suggestions = _build_suggestions(audit_id=audit_id, findings=findings, shop_domain=tenant)
+    if callable(trace_event):
+        trace_event(
+            phase="findings_persisted",
+            message="Persisted intelligence findings",
+            payload_preview={"findings_count": len(findings)},
+        )
+    suggestions = await generate_suggestions_execute(
+        supabase=supabase,
+        products=products,
+        shop_domain=tenant,
+        trace_event=trace_event if callable(trace_event) else None,
+    )
     supabase.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions, shop_domain=tenant)
+    if callable(trace_event):
+        trace_event(
+            phase="suggestions_persisted",
+            message="Persisted intelligence suggestions",
+            payload_preview={"suggestions_count": len(suggestions)},
+        )
 
     return {**audit, "findings": findings, "suggestions": suggestions}

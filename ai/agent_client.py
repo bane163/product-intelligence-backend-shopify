@@ -1,14 +1,15 @@
 import base64
+import json
 import os
 from typing import Any, Callable, Dict
 
 from agent_framework import AgentRunResponse, ChatMessage, TextContent, DataContent
 from agent_framework.openai import OpenAIChatClient
-from services.interfaces import SupabaseServiceInterface
 
 # Use the ProductsList model as a structured response format so the agent
 # returns a JSON object with a 'products' array matching ProductInput.
-from .models import ProductsList
+from .models import ProductIntelligenceSuggestionsList, ProductsList
+from .prompt_loader import render_prompt
 from .excel_writer import create_excel_workbook
 
 TraceFn = Callable[..., None] | None
@@ -226,13 +227,82 @@ async def run_agent_on_inputs(
     return response
 
 
+async def run_product_intelligence_suggestions(
+    products: list[dict[str, Any]],
+    model_env: Dict[str, str] | None = None,
+    trace_event: TraceFn = None,
+) -> AgentRunResponse:
+    if not products:
+        raise ValueError("No products provided for product intelligence suggestions")
+    _trace(
+        trace_event,
+        phase="llm_prepare",
+        message="Preparing product intelligence suggestion request",
+        payload_preview={"products_count": len(products)},
+        metadata={
+            "model_name": _resolve_model_env(model_env).get(
+                "OLLAMA_MODEL_ID", "deepseek-r1:8b"
+            ),
+            "provider": "ollama/openai-compat",
+        },
+    )
+    client = _create_chat_client(model_env)
+    instructions = render_prompt("product_intelligence_suggester_instructions.txt")
+    product_payload = json.dumps(products, ensure_ascii=False, indent=2)
+    full_prompt = render_prompt(
+        "product_intelligence_suggester_user_prompt.txt",
+        products_json=product_payload,
+    )
+    agent = client.create_agent(
+        name="product_intelligence_suggester",
+        instructions=instructions,
+        response_format=ProductIntelligenceSuggestionsList,
+    )
+    user_message = ChatMessage(role="user", contents=[TextContent(text=full_prompt)])
+    _trace(
+        trace_event,
+        phase="llm_request",
+        message="Calling LLM for product intelligence suggestions",
+        payload_preview={"prompt_preview": full_prompt[:700]},
+        transcript_role="user",
+        transcript_text=full_prompt,
+        transcript_meta={"call": "product-intelligence-suggestions"},
+    )
+    response = await agent.run(user_message)
+    _trace(
+        trace_event,
+        phase="llm_response",
+        message="Received product intelligence suggestion response",
+        payload_preview=(response.text or "")[:700],
+        transcript_role="assistant",
+        transcript_text=(response.text or ""),
+        transcript_meta={"call": "product-intelligence-suggestions"},
+    )
+    usage = _extract_usage(response)
+    if usage:
+        _trace(
+            trace_event,
+            phase="llm_usage",
+            message="Captured suggestion token usage",
+            metadata={
+                "model_name": _resolve_model_env(model_env).get(
+                    "OLLAMA_MODEL_ID", "deepseek-r1:8b"
+                ),
+                "provider": "ollama/openai-compat",
+                "usage": usage,
+            },
+            payload_preview=usage,
+        )
+    return response
+
+
 async def run_excel_writer_agent(
     products_list: ProductsList,
     output_path: str,
     agent_prompt: str = "Create a spreadsheet for the provided products.",
     model_env: Dict[str, str] | None = None,
     trace_event: TraceFn = None,
-    supabase_service: SupabaseServiceInterface | None = None,
+    supabase_service: Any | None = None,
 ) -> AgentRunResponse:
     """Create a tool-enabled agent that writes the ProductsList to a spreadsheet.
 

@@ -1,0 +1,7 @@
+Generate actionable product intelligence suggestions for this product list.
+
+---PRODUCTS_JSON---
+{products_json}
+---END_PRODUCTS_JSON---
+
+Return only JSON matching ProductIntelligenceSuggestionsList.

@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, Field, field_validator
+from typing import Any, Optional, List, Literal
 
 
 class ProductCreate(BaseModel):
@@ -120,6 +120,29 @@ class ProductsList(BaseModel):
     products: List[ProductInput]
 
 
+class ProductIntelligenceSuggestionDraft(BaseModel):
+    product_index: int = Field(ge=0)
+    category: str = Field(min_length=1)
+    severity: Literal["low", "medium", "high"] = "low"
+    message: str = Field(min_length=1)
+    patch_payload: dict[str, Any]
+    product_title: Optional[str] = None
+
+    @field_validator("patch_payload")
+    @classmethod
+    def validate_patch_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, dict) or not value:
+            raise ValueError("patch_payload must be a non-empty object")
+        normalized = {str(key).strip(): item for key, item in value.items() if str(key).strip()}
+        if not normalized:
+            raise ValueError("patch_payload must include at least one non-empty field")
+        return normalized
+
+
+class ProductIntelligenceSuggestionsList(BaseModel):
+    suggestions: List[ProductIntelligenceSuggestionDraft]
+
+
 __all__ = [
     "ProductCreate",
     "ProductUpdate",
@@ -128,4 +151,6 @@ __all__ = [
     "ProductImage",
     "ProductInput",
     "ProductsList",
+    "ProductIntelligenceSuggestionDraft",
+    "ProductIntelligenceSuggestionsList",
 ]

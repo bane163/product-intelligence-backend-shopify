@@ -1,6 +1,8 @@
 """Product intelligence routes."""
 
 import json
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -148,16 +150,90 @@ async def run_product_intelligence_audit(
     if not products:
         raise HTTPException(status_code=400, detail="No products found for audit")
 
+    run_id_value = str(run_id).strip() if isinstance(run_id, str) and run_id.strip() else str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    ctx.services.supabase.create_or_update_run(
+        run_id_value,
+        {
+            "status": "running",
+            "source": "product_intelligence_audit",
+            "started_at": started_at.isoformat(),
+        },
+    )
+    from application.services.run_event_emitter import RunEventEmitter
+
+    emitter = RunEventEmitter(
+        tracing=ctx.services.tracing,
+        supabase=ctx.services.supabase,
+        run_id=run_id_value,
+    )
+    emitter.emit_and_persist(
+        phase="audit_request_received",
+        message="Received product intelligence audit request",
+        payload_preview={
+            "products_count": len(products),
+            "all_products": all_products,
+            "submitted_id": str(submitted_id) if submitted_id else None,
+        },
+    )
+
     try:
-        return run_audit_execute(
+        result = await run_audit_execute(
             supabase=ctx.services.supabase,
             products=products,
             submitted_id=str(submitted_id) if submitted_id else None,
-            run_id=str(run_id) if run_id else None,
+            run_id=run_id_value,
             shop_domain=shop_domain,
+            trace_event=emitter.trace_event,
         )
+        emitter.emit_and_persist(
+            phase="audit_completed",
+            message="Product intelligence audit completed",
+            payload_preview={
+                "audit_id": result.get("audit_id"),
+                "findings_count": result.get("findings_count"),
+            },
+        )
+        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        ctx.services.supabase.finalize_run(
+            run_id_value,
+            status="success",
+            duration_ms=duration_ms,
+        )
+        ctx.services.tracing.complete_run(run_id_value)
+        return result
     except ValueError as exc:
+        emitter.emit_and_persist(
+            phase="audit_error",
+            message="Product intelligence audit failed",
+            level="error",
+            error=str(exc),
+        )
+        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        ctx.services.supabase.finalize_run(
+            run_id_value,
+            status="error",
+            duration_ms=duration_ms,
+            error=str(exc),
+        )
+        ctx.services.tracing.complete_run(run_id_value)
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        emitter.emit_and_persist(
+            phase="audit_error",
+            message="Unexpected product intelligence audit failure",
+            level="error",
+            error=str(exc),
+        )
+        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        ctx.services.supabase.finalize_run(
+            run_id_value,
+            status="error",
+            duration_ms=duration_ms,
+            error=str(exc),
+        )
+        ctx.services.tracing.complete_run(run_id_value)
+        raise
 
 
 @router.get(

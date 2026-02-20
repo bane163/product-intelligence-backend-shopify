@@ -180,6 +180,19 @@ class SupabasePort(Protocol):
         self, *, suggestion_id: str, shop_domain: str | None = None
     ) -> dict[str, Any] | None: ...
 
+    def get_product_intelligence_normalization_settings(
+        self,
+        *,
+        shop_domain: str,
+    ) -> dict[str, Any] | None: ...
+
+    def upsert_product_intelligence_normalization_settings(
+        self,
+        *,
+        shop_domain: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]: ...
 
     def create_llm_model_config(

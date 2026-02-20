@@ -273,6 +273,28 @@ class ShopifyClient:
         query = _load_graphql("productQuery.graphql")
         return await self.graphql(query, {"id": gid})
 
+    async def get_product_metafields(
+        self, gid: str, identifiers: List[Dict[str, str]]
+    ) -> List[Dict[str, Any]]:
+        if not identifiers:
+            return []
+        normalized_identifiers = [
+            {"namespace": str(item.get("namespace") or "").strip(), "key": str(item.get("key") or "").strip()}
+            for item in identifiers
+            if isinstance(item, dict)
+            and str(item.get("namespace") or "").strip()
+            and str(item.get("key") or "").strip()
+        ]
+        if not normalized_identifiers:
+            return []
+        query = _load_graphql("productMetafields.graphql")
+        resp = await self.graphql(query, {"id": gid, "identifiers": normalized_identifiers})
+        node = resp.get("data", {}).get("node", {}) if isinstance(resp, dict) else {}
+        metafields = node.get("metafields") if isinstance(node, dict) else None
+        if not isinstance(metafields, list):
+            return []
+        return [item for item in metafields if isinstance(item, dict)]
+
     async def update_product(
         self, gid: str, title: Optional[str] = None, body_html: Optional[str] = None
     ) -> Dict[str, Any]:

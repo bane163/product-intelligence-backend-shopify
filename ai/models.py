@@ -126,6 +126,7 @@ class ProductIntelligenceSuggestionDraft(BaseModel):
     severity: Literal["low", "medium", "high"] = "low"
     message: str = Field(min_length=1)
     patch_payload: dict[str, Any]
+    details: Optional[dict[str, Any]] = None
     product_title: Optional[str] = None
 
     @field_validator("patch_payload")

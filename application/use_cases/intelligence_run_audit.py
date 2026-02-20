@@ -355,10 +355,14 @@ async def execute(
             message="Persisted intelligence findings",
             payload_preview={"findings_count": len(findings)},
         )
+    normalization_settings = supabase.get_product_intelligence_normalization_settings(
+        shop_domain=tenant,
+    )
     suggestions = await generate_suggestions_execute(
         supabase=supabase,
         products=products,
         shop_domain=tenant,
+        normalization_settings=normalization_settings,
         trace_event=trace_event if callable(trace_event) else None,
     )
     supabase.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions, shop_domain=tenant)

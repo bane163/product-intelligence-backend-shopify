@@ -1,0 +1,12 @@
+query productMetafields($id: ID!, $identifiers: [HasMetafieldsIdentifier!]!) {
+  node(id: $id) {
+    ... on Product {
+      metafields(identifiers: $identifiers) {
+        namespace
+        key
+        value
+        type
+      }
+    }
+  }
+}

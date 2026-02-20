@@ -13,6 +13,17 @@ from .interfaces import SupabaseServiceInterface
 
 LOG = logging.getLogger(__name__)
 
+NORMALIZATION_CATEGORY_KEYS = (
+    "size_alias",
+    "mixed_units",
+    "structured_unstructured_size",
+    "dimensions_format",
+    "supplier_size",
+    "variant_ordering",
+    "description_extraction",
+    "children_size",
+)
+
 
 class SupabaseService(SupabaseServiceInterface):
     def __init__(self, bucket_name: str | None = None):
@@ -23,6 +34,7 @@ class SupabaseService(SupabaseServiceInterface):
         self.product_intelligence_audits: dict[str, dict[str, Any]] = {}
         self.product_intelligence_findings: dict[str, list[dict[str, Any]]] = {}
         self.product_intelligence_suggestions: dict[str, dict[str, Any]] = {}
+        self.product_intelligence_normalization_settings: dict[str, dict[str, Any]] = {}
         self.llm_model_configs: dict[str, dict[str, Any]] = {}
 
     @staticmethod
@@ -1202,6 +1214,174 @@ class SupabaseService(SupabaseServiceInterface):
         cached = dict(item)
         self.product_intelligence_suggestions[suggestion_id] = cached
         return cached
+
+    @staticmethod
+    def _default_product_intelligence_normalization_settings() -> dict[str, Any]:
+        return {
+            "unit_system": "metric",
+            "locale_default_unit_system": None,
+            "confidence_threshold": None,
+            "categories": {key: True for key in NORMALIZATION_CATEGORY_KEYS},
+        }
+
+    @staticmethod
+    def _coerce_product_intelligence_normalization_settings(
+        settings: dict[str, Any],
+        *,
+        fallback: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        base = {
+            **SupabaseService._default_product_intelligence_normalization_settings(),
+            **(fallback or {}),
+        }
+        raw_unit = str(settings.get("unit_system") or base.get("unit_system") or "metric").strip().lower()
+        unit_system = raw_unit if raw_unit in {"metric", "imperial"} else "metric"
+        raw_locale_default = settings.get("locale_default_unit_system", base.get("locale_default_unit_system"))
+        locale_default = str(raw_locale_default).strip().lower() if isinstance(raw_locale_default, str) else None
+        if locale_default not in {"metric", "imperial"}:
+            locale_default = None
+
+        raw_confidence = settings.get("confidence_threshold", base.get("confidence_threshold"))
+        if raw_confidence in (None, ""):
+            confidence_threshold = None
+        elif isinstance(raw_confidence, (int, float)):
+            confidence_threshold = max(0.0, min(1.0, float(raw_confidence)))
+        else:
+            raise ValueError("Invalid confidence_threshold")
+
+        raw_categories = settings.get("categories")
+        base_categories = base.get("categories") if isinstance(base.get("categories"), dict) else {}
+        categories_input = raw_categories if isinstance(raw_categories, dict) else {}
+        categories = {
+            key: (
+                categories_input[key]
+                if key in categories_input and isinstance(categories_input[key], bool)
+                else bool(base_categories.get(key, True))
+            )
+            for key in NORMALIZATION_CATEGORY_KEYS
+        }
+
+        return {
+            "unit_system": unit_system,
+            "locale_default_unit_system": locale_default,
+            "confidence_threshold": confidence_threshold,
+            "categories": categories,
+        }
+
+    def get_product_intelligence_normalization_settings(
+        self,
+        *,
+        shop_domain: str,
+    ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return None
+
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_normalization_settings")
+                    .select("*")
+                    .eq("shop_domain", tenant)
+                    .limit(1)
+                    .execute()
+                )
+                rows = res.data or []
+                if rows:
+                    row = dict(rows[0])
+                    out = {
+                        "shop_domain": tenant,
+                        "unit_system": row.get("unit_system"),
+                        "locale_default_unit_system": row.get("locale_default_unit_system"),
+                        "confidence_threshold": row.get("confidence_threshold"),
+                        "categories": row.get("categories") if isinstance(row.get("categories"), dict) else {},
+                        "updated_at": row.get("updated_at"),
+                    }
+                    out = {
+                        **out,
+                        **self._coerce_product_intelligence_normalization_settings(out, fallback=out),
+                    }
+                    self.product_intelligence_normalization_settings[tenant] = dict(out)
+                    return out
+            except Exception:
+                LOG.exception(
+                    "Failed fetching product intelligence normalization settings for shop=%s",
+                    tenant,
+                )
+
+        cached = self.product_intelligence_normalization_settings.get(tenant)
+        if cached:
+            return dict(cached)
+        return None
+
+    def upsert_product_intelligence_normalization_settings(
+        self,
+        *,
+        shop_domain: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            raise ValueError("Missing shop_domain for normalization settings")
+
+        existing = self.get_product_intelligence_normalization_settings(shop_domain=tenant) or {
+            **self._default_product_intelligence_normalization_settings(),
+            "shop_domain": tenant,
+        }
+        normalized = self._coerce_product_intelligence_normalization_settings(
+            settings,
+            fallback=existing,
+        )
+        now = self._utc_now()
+        payload = {
+            "shop_domain": tenant,
+            "unit_system": normalized["unit_system"],
+            "locale_default_unit_system": normalized["locale_default_unit_system"],
+            "confidence_threshold": normalized["confidence_threshold"],
+            "categories": normalized["categories"],
+            "updated_at": now,
+        }
+
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_normalization_settings")
+                    .upsert(payload, on_conflict="shop_domain")
+                    .execute()
+                )
+                rows = res.data or []
+                if rows:
+                    row = dict(rows[0])
+                    out = {
+                        "shop_domain": tenant,
+                        "unit_system": row.get("unit_system", normalized["unit_system"]),
+                        "locale_default_unit_system": row.get("locale_default_unit_system"),
+                        "confidence_threshold": row.get("confidence_threshold"),
+                        "categories": row.get("categories") if isinstance(row.get("categories"), dict) else normalized["categories"],
+                        "updated_at": row.get("updated_at"),
+                    }
+                    out = {
+                        **out,
+                        **self._coerce_product_intelligence_normalization_settings(out, fallback=out),
+                    }
+                    self.product_intelligence_normalization_settings[tenant] = dict(out)
+                    return out
+            except Exception:
+                LOG.exception(
+                    "Failed upserting product intelligence normalization settings for shop=%s",
+                    tenant,
+                )
+
+        fallback_out = {
+            "shop_domain": tenant,
+            **normalized,
+            "updated_at": now,
+        }
+        self.product_intelligence_normalization_settings[tenant] = dict(fallback_out)
+        return fallback_out
+
     # ----- LLM model config -----
     @staticmethod
     def _mask_api_key(raw_key: str | None) -> str | None:

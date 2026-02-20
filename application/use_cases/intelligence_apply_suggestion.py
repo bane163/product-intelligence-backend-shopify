@@ -118,12 +118,37 @@ def _normalize_shopify_product(payload: dict[str, Any]) -> dict[str, Any]:
         "seo_description": seo.get("description"),
     }
 
+def _normalize_metafields_payload(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        namespace = str(item.get("namespace") or "").strip()
+        key = str(item.get("key") or "").strip()
+        value = item.get("value")
+        if not namespace or not key or value is None:
+            continue
+        normalized_item: dict[str, Any] = {
+            "namespace": namespace,
+            "key": key,
+            "value": str(value),
+        }
+        value_type = item.get("type")
+        if isinstance(value_type, str) and value_type.strip():
+            normalized_item["type"] = value_type.strip()
+        normalized.append(normalized_item)
+    return normalized
+
 
 def _build_previous_payload(
     *,
     patch_payload: dict[str, Any],
     live_product: dict[str, Any],
     fallback_product: dict[str, Any],
+    existing_metafields: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     previous_payload: dict[str, Any] = {REVERT_MODES_KEY: {}}
     unsupported_fields: list[str] = []
@@ -131,6 +156,35 @@ def _build_previous_payload(
     assert isinstance(revert_modes, dict)
 
     for key in patch_payload.keys():
+        if key == "metafields":
+            previous_metafields: list[dict[str, Any]] = []
+            requested_metafields = _normalize_metafields_payload(patch_payload.get(key))
+            missing_metafields: list[str] = []
+            for requested in requested_metafields:
+                identity = (requested["namespace"], requested["key"])
+                existing = (existing_metafields or {}).get(identity)
+                existing_value = existing.get("value") if isinstance(existing, dict) else None
+                if _is_unset_value(existing_value):
+                    missing_metafields.append(f"{requested['namespace']}.{requested['key']}")
+                    continue
+                restore_item: dict[str, Any] = {
+                    "namespace": requested["namespace"],
+                    "key": requested["key"],
+                    "value": str(existing_value),
+                }
+                existing_type = existing.get("type") if isinstance(existing, dict) else None
+                if isinstance(existing_type, str) and existing_type.strip():
+                    restore_item["type"] = existing_type.strip()
+                previous_metafields.append(restore_item)
+
+            previous_payload[key] = previous_metafields
+            if missing_metafields:
+                revert_modes[key] = REVERT_MODE_UNSUPPORTED_CLEAR
+                unsupported_fields.extend(missing_metafields)
+            else:
+                revert_modes[key] = REVERT_MODE_RESTORE
+            continue
+
         source_key = _normalize_revert_field(key)
         source_value = (
             live_product[source_key]
@@ -247,10 +301,31 @@ async def execute(
     if not gid:
         raise ValueError("Unable to resolve Shopify product ID for suggestion target")
     live_product = _normalize_shopify_product(await shopify.get_product(gid))
+    requested_metafields = _normalize_metafields_payload(
+        effective_patch_payload.get("metafields")
+    )
+    existing_metafield_map: dict[tuple[str, str], dict[str, Any]] = {}
+    if requested_metafields:
+        metafield_identifiers = [
+            {"namespace": item["namespace"], "key": item["key"]}
+            for item in requested_metafields
+        ]
+        existing_metafields = await shopify.get_product_metafields(
+            gid, metafield_identifiers
+        )
+        for item in existing_metafields:
+            if not isinstance(item, dict):
+                continue
+            namespace = str(item.get("namespace") or "").strip()
+            key = str(item.get("key") or "").strip()
+            if not namespace or not key:
+                continue
+            existing_metafield_map[(namespace, key)] = item
     previous_payload = _build_previous_payload(
         patch_payload=effective_patch_payload,
         live_product=live_product,
         fallback_product=current_product,
+        existing_metafields=existing_metafield_map,
     )
     await shopify.update_product_from_input({"id": gid, **effective_patch_payload})
 

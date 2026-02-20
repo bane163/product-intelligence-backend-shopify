@@ -81,6 +81,74 @@ def _resolve_shopify_client(
     return ctx.services.shopify
 
 
+NORMALIZATION_CATEGORY_KEYS = (
+    "size_alias",
+    "mixed_units",
+    "structured_unstructured_size",
+    "dimensions_format",
+    "supplier_size",
+    "variant_ordering",
+    "description_extraction",
+    "children_size",
+)
+
+
+def _default_unit_system_from_request(request: Request) -> str:
+    accept_language = str(request.headers.get("accept-language") or "").strip()
+    if "-us" in accept_language.lower():
+        return "imperial"
+    return "metric"
+
+
+def _default_normalization_settings(request: Request) -> dict[str, Any]:
+    return {
+        "unit_system": _default_unit_system_from_request(request),
+        "locale_default_unit_system": _default_unit_system_from_request(request),
+        "confidence_threshold": None,
+        "categories": {key: True for key in NORMALIZATION_CATEGORY_KEYS},
+    }
+
+
+def _coerce_normalization_settings(
+    payload: dict[str, Any],
+    *,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    raw_unit_system = str(payload.get("unit_system") or fallback.get("unit_system") or "metric").strip().lower()
+    unit_system = raw_unit_system if raw_unit_system in {"metric", "imperial"} else str(fallback.get("unit_system") or "metric")
+
+    raw_locale_default = payload.get("locale_default_unit_system", fallback.get("locale_default_unit_system"))
+    locale_default_unit_system = str(raw_locale_default).strip().lower() if isinstance(raw_locale_default, str) else None
+    if locale_default_unit_system not in {"metric", "imperial"}:
+        locale_default_unit_system = str(fallback.get("locale_default_unit_system") or "").strip().lower() or None
+
+    raw_confidence = payload.get("confidence_threshold", fallback.get("confidence_threshold"))
+    if raw_confidence in (None, ""):
+        confidence_threshold = None
+    elif isinstance(raw_confidence, (int, float)):
+        confidence_threshold = max(0.0, min(1.0, float(raw_confidence)))
+    else:
+        raise HTTPException(status_code=400, detail="Invalid confidence_threshold")
+
+    raw_categories = payload.get("categories") if isinstance(payload.get("categories"), dict) else {}
+    fallback_categories = fallback.get("categories") if isinstance(fallback.get("categories"), dict) else {}
+    categories = {
+        key: (
+            raw_categories[key]
+            if key in raw_categories and isinstance(raw_categories[key], bool)
+            else bool(fallback_categories.get(key, True))
+        )
+        for key in NORMALIZATION_CATEGORY_KEYS
+    }
+
+    return {
+        "unit_system": unit_system,
+        "locale_default_unit_system": locale_default_unit_system,
+        "confidence_threshold": confidence_threshold,
+        "categories": categories,
+    }
+
+
 @router.post("/intelligence/audit", summary="Run product data intelligence audit")
 async def run_product_intelligence_audit(
     request: Request,
@@ -491,6 +559,78 @@ async def revert_product_intelligence_suggestion(
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+
+@router.get("/intelligence/normalization-settings", summary="Get normalization settings")
+async def get_product_intelligence_normalization_settings(
+    request: Request,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    tenant = _require_shop_domain(request, shop_domain)
+    stored = ctx.services.supabase.get_product_intelligence_normalization_settings(
+        shop_domain=tenant,
+    )
+    fallback = _default_normalization_settings(request)
+    normalized = _coerce_normalization_settings(stored or {}, fallback=fallback)
+    updated_at = stored.get("updated_at") if isinstance(stored, dict) else None
+    return {
+        "settings": {
+            **normalized,
+            "updated_at": updated_at,
+        }
+    }
+
+
+@router.post("/intelligence/normalization-settings", summary="Upsert normalization settings")
+async def upsert_product_intelligence_normalization_settings(
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            raw_json = await request.json()
+            if isinstance(raw_json, dict):
+                payload.update(raw_json)
+        except Exception:
+            payload = {}
+    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        for key, value in form.items():
+            payload[key] = value
+
+    settings_json = payload.get("settings_json")
+    if isinstance(settings_json, str) and settings_json.strip():
+        try:
+            parsed_settings = json.loads(settings_json)
+            if isinstance(parsed_settings, dict):
+                payload["settings"] = parsed_settings
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid settings_json: {exc}")
+
+    tenant = _require_shop_domain(request, payload.get("shop_domain"))
+    settings_payload = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
+    current = ctx.services.supabase.get_product_intelligence_normalization_settings(
+        shop_domain=tenant,
+    )
+    fallback = _coerce_normalization_settings(
+        current or {},
+        fallback=_default_normalization_settings(request),
+    )
+    normalized = _coerce_normalization_settings(settings_payload, fallback=fallback)
+    saved = ctx.services.supabase.upsert_product_intelligence_normalization_settings(
+        shop_domain=tenant,
+        settings=normalized,
+    )
+    return {
+        "settings": {
+            **normalized,
+            "updated_at": saved.get("updated_at") if isinstance(saved, dict) else None,
+        }
+    }
 
 
 @router.post(

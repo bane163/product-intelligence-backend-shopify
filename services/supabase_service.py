@@ -927,6 +927,7 @@ class SupabaseService(SupabaseServiceInterface):
     def get_product_intelligence_suggestion(
         self, suggestion_id: str
     ) -> dict[str, Any] | None:
+        cached_item = self.product_intelligence_suggestions.get(suggestion_id)
         client = self._get_supabase_client()
         if client:
             try:
@@ -938,14 +939,122 @@ class SupabaseService(SupabaseServiceInterface):
                     .execute()
                 )
                 rows = res.data or []
-                return rows[0] if rows else None
+                if rows:
+                    db_item = rows[0]
+                    if cached_item:
+                        return {**db_item, **cached_item}
+                    return db_item
             except Exception:
                 LOG.exception(
                     "Failed fetching intelligence suggestion %s", suggestion_id
                 )
-        return self.product_intelligence_suggestions.get(suggestion_id)
+        return cached_item
+
+    def create_product_intelligence_suggestion(
+        self, *, suggestion: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if not isinstance(suggestion, dict):
+            return None
+        suggestion_id = str(suggestion.get("suggestion_id") or uuid.uuid4())
+        payload = {**suggestion, "suggestion_id": suggestion_id}
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_suggestions")
+                    .insert(payload)
+                    .execute()
+                )
+                rows = res.data or []
+                if rows:
+                    created = dict(rows[0])
+                    self.product_intelligence_suggestions[suggestion_id] = created
+                    return created
+            except Exception:
+                LOG.exception(
+                    "Failed creating intelligence suggestion %s", suggestion_id
+                )
+        self.product_intelligence_suggestions[suggestion_id] = dict(payload)
+        return dict(payload)
 
     def mark_product_intelligence_suggestion_applied(
+        self,
+        *,
+        suggestion_id: str,
+        previous_payload: dict[str, Any] | None = None,
+        patch_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        now = self._utc_now()
+        update_payload: dict[str, Any] = {
+            "status": "applied",
+            "applied_at": now,
+            "updated_at": now,
+        }
+        if isinstance(previous_payload, dict):
+            update_payload["previous_payload"] = previous_payload
+        if isinstance(patch_payload, dict):
+            update_payload["patch_payload"] = patch_payload
+        client = self._get_supabase_client()
+        if client:
+            try:
+                def _execute_update(payload: dict[str, Any]) -> list[dict[str, Any]]:
+                    response = (
+                        client.table("product_intelligence_suggestions")
+                        .update(payload)
+                        .eq("suggestion_id", suggestion_id)
+                        .execute()
+                    )
+                    return response.data or []
+
+                rows = _execute_update(update_payload)
+                if rows:
+                    cached = dict(rows[0])
+                    if isinstance(previous_payload, dict):
+                        cached["previous_payload"] = previous_payload
+                    self.product_intelligence_suggestions[suggestion_id] = cached
+                    return cached
+                return None
+            except Exception:
+                if "previous_payload" in update_payload:
+                    fallback_payload = dict(update_payload)
+                    fallback_payload.pop("previous_payload", None)
+                    try:
+                        rows = (
+                            client.table("product_intelligence_suggestions")
+                            .update(fallback_payload)
+                            .eq("suggestion_id", suggestion_id)
+                            .execute()
+                            .data
+                            or []
+                        )
+                        if rows:
+                            cached = dict(rows[0])
+                            if isinstance(previous_payload, dict):
+                                cached["previous_payload"] = previous_payload
+                            self.product_intelligence_suggestions[suggestion_id] = cached
+                            return cached
+                        return None
+                    except Exception:
+                        LOG.exception(
+                            "Failed marking intelligence suggestion applied %s", suggestion_id
+                        )
+                else:
+                    LOG.exception(
+                        "Failed marking intelligence suggestion applied %s", suggestion_id
+                    )
+        item = self.product_intelligence_suggestions.get(suggestion_id)
+        if not item:
+            return None
+        item["status"] = "applied"
+        item["applied_at"] = now
+        item["updated_at"] = now
+        if isinstance(previous_payload, dict):
+            item["previous_payload"] = previous_payload
+        if isinstance(patch_payload, dict):
+            item["patch_payload"] = patch_payload
+        return dict(item)
+
+    def mark_product_intelligence_suggestion_pending(
         self, *, suggestion_id: str
     ) -> dict[str, Any] | None:
         now = self._utc_now()
@@ -956,8 +1065,8 @@ class SupabaseService(SupabaseServiceInterface):
                     client.table("product_intelligence_suggestions")
                     .update(
                         {
-                            "status": "applied",
-                            "applied_at": now,
+                            "status": "pending",
+                            "applied_at": None,
                             "updated_at": now,
                         }
                     )
@@ -965,18 +1074,24 @@ class SupabaseService(SupabaseServiceInterface):
                     .execute()
                 )
                 rows = res.data or []
-                return rows[0] if rows else None
+                if rows:
+                    cached = dict(rows[0])
+                    self.product_intelligence_suggestions[suggestion_id] = cached
+                    return cached
+                return None
             except Exception:
                 LOG.exception(
-                    "Failed marking intelligence suggestion applied %s", suggestion_id
+                    "Failed marking intelligence suggestion pending %s", suggestion_id
                 )
         item = self.product_intelligence_suggestions.get(suggestion_id)
         if not item:
             return None
-        item["status"] = "applied"
-        item["applied_at"] = now
+        item["status"] = "pending"
+        item["applied_at"] = None
         item["updated_at"] = now
-        return dict(item)
+        cached = dict(item)
+        self.product_intelligence_suggestions[suggestion_id] = cached
+        return cached
 
     # ----- LLM model config -----
     @staticmethod

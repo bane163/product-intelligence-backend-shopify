@@ -8,6 +8,9 @@ class ShopifyAdapter:
     def __init__(self, shop: str | None = None, token: str | None = None) -> None:
         self._client = _shopify.ShopifyClient(shop=shop, token=token)
 
+    async def get_product(self, gid: str) -> Dict[str, Any]:
+        return await self._client.get_product(gid)
+
     async def find_product_id_by_handle(self, handle: str) -> Optional[str]:
         return await self._client.find_product_id_by_handle(handle)
 

@@ -218,10 +218,28 @@ class SupabaseAdapter(SupabasePort):
     ) -> dict[str, Any] | None:
         return self._service.get_product_intelligence_suggestion(suggestion_id)
 
+    def create_product_intelligence_suggestion(
+        self, *, suggestion: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return self._service.create_product_intelligence_suggestion(suggestion=suggestion)
+
     def mark_product_intelligence_suggestion_applied(
-        self, *, suggestion_id: str
+        self,
+        *,
+        suggestion_id: str,
+        previous_payload: dict[str, Any] | None = None,
+        patch_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         return self._service.mark_product_intelligence_suggestion_applied(
+            suggestion_id=suggestion_id,
+            previous_payload=previous_payload,
+            patch_payload=patch_payload,
+        )
+
+    def mark_product_intelligence_suggestion_pending(
+        self, *, suggestion_id: str
+    ) -> dict[str, Any] | None:
+        return self._service.mark_product_intelligence_suggestion_pending(
             suggestion_id=suggestion_id
         )
 

@@ -139,7 +139,19 @@ class SupabaseServiceInterface(Protocol):
         self, suggestion_id: str
     ) -> dict[str, Any] | None: ...
 
+    def create_product_intelligence_suggestion(
+        self, *, suggestion: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
     def mark_product_intelligence_suggestion_applied(
+        self,
+        *,
+        suggestion_id: str,
+        previous_payload: dict[str, Any] | None = None,
+        patch_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None: ...
+
+    def mark_product_intelligence_suggestion_pending(
         self, *, suggestion_id: str
     ) -> dict[str, Any] | None: ...
 

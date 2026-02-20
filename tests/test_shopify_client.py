@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import respx
 import httpx
@@ -155,3 +157,38 @@ async def test_list_products_for_audit_returns_normalized_rows():
         assert len(rows) == 1
         assert rows[0]["title"] == "Catalog Product"
         assert rows[0]["product_type"] == "General"
+
+
+@pytest.mark.asyncio
+async def test_update_product_from_input_supports_explicit_clear_payloads():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    update_resp = {
+        "data": {
+            "productUpdate": {
+                "product": {"id": "gid://shopify/Product/1"},
+                "userErrors": [],
+            }
+        }
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        route = mock.post("/admin/api/2025-10/graphql.json").respond(200, json=update_resp)
+        await client.update_product_from_input(
+            {
+                "id": "gid://shopify/Product/1",
+                "vendor": "",
+                "body_html": "",
+                "product_type": "",
+                "tags": [],
+                "seo_title": "",
+                "seo_description": "",
+            }
+        )
+        assert route.called
+        request_body = json.loads(route.calls.last.request.content.decode())
+        product = request_body["variables"]["product"]
+        assert product["vendor"] == ""
+        assert product["descriptionHtml"] == ""
+        assert product["productType"] == ""
+        assert product["tags"] == []
+        assert product["seo"] == {"title": "", "description": ""}

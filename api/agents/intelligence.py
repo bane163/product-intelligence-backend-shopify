@@ -20,6 +20,21 @@ def _to_bool(value: Any) -> bool:
     return False
 
 
+def _with_reversibility_flags(suggestion: dict[str, Any]) -> dict[str, Any]:
+    enriched = dict(suggestion)
+    previous_payload = enriched.get("previous_payload")
+    if isinstance(previous_payload, dict):
+        is_reversible = previous_payload.get("__is_reversible")
+        reason = previous_payload.get("__non_reversible_reason")
+        if isinstance(is_reversible, bool):
+            enriched["is_reversible"] = is_reversible
+        if isinstance(reason, str) and reason.strip():
+            enriched["non_reversible_reason"] = reason
+    if "is_reversible" not in enriched:
+        enriched["is_reversible"] = True
+    return enriched
+
+
 def _resolve_shopify_client(
     *,
     ctx: AppContext,
@@ -212,7 +227,12 @@ async def list_product_intelligence_suggestions(
     )
 
     suggestions = list_suggestions_execute(supabase=ctx.services.supabase, audit_id=audit_id)
-    return {"suggestions": suggestions}
+    return {
+        "suggestions": [
+            _with_reversibility_flags(item) if isinstance(item, dict) else item
+            for item in suggestions
+        ]
+    }
 
 
 @router.post(
@@ -241,6 +261,19 @@ async def apply_product_intelligence_suggestion(
         form = await request.form()
         for key, value in form.items():
             data[key] = value
+    patch_payload: dict[str, Any] | None = None
+    raw_patch_payload = data.get("patch_payload")
+    raw_patch_payload_json = data.get("patch_payload_json")
+    if isinstance(raw_patch_payload, dict):
+        patch_payload = raw_patch_payload
+    elif isinstance(raw_patch_payload_json, str) and raw_patch_payload_json.strip():
+        try:
+            parsed_patch_payload = json.loads(raw_patch_payload_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid patch_payload_json: {exc}")
+        if not isinstance(parsed_patch_payload, dict):
+            raise HTTPException(status_code=400, detail="patch_payload_json must decode to an object")
+        patch_payload = parsed_patch_payload
     shop_domain = data.get("shop_domain")
     shop_access_token = data.get("shop_access_token")
     shopify_client = _resolve_shopify_client(
@@ -252,11 +285,68 @@ async def apply_product_intelligence_suggestion(
     )
 
     try:
-        return await apply_suggestion_execute(
+        result = await apply_suggestion_execute(
+            supabase=ctx.services.supabase,
+            shopify=shopify_client,
+            suggestion_id=suggestion_id,
+            patch_payload=patch_payload,
+        )
+        suggestion = result.get("suggestion")
+        if isinstance(suggestion, dict):
+            result["suggestion"] = _with_reversibility_flags(suggestion)
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
+    "/intelligence/suggestions/{suggestion_id}/revert",
+    summary="Revert one applied intelligence suggestion",
+)
+async def revert_product_intelligence_suggestion(
+    suggestion_id: str,
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.intelligence_revert_suggestion import (
+        execute as revert_suggestion_execute,
+    )
+
+    data: dict[str, Any] = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            raw_json = await request.json()
+            if isinstance(raw_json, dict):
+                data.update(raw_json)
+        except Exception:
+            data = {}
+    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+        form = await request.form()
+        for key, value in form.items():
+            data[key] = value
+    shop_domain = data.get("shop_domain")
+    shop_access_token = data.get("shop_access_token")
+    shopify_client = _resolve_shopify_client(
+        ctx=ctx,
+        shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
+        shop_access_token=(
+            str(shop_access_token) if isinstance(shop_access_token, str) else None
+        ),
+    )
+
+    try:
+        result = await revert_suggestion_execute(
             supabase=ctx.services.supabase,
             shopify=shopify_client,
             suggestion_id=suggestion_id,
         )
+        suggestion = result.get("suggestion")
+        if isinstance(suggestion, dict):
+            result["suggestion"] = _with_reversibility_flags(suggestion)
+        return result
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:

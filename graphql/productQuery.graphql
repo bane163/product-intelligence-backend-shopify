@@ -6,6 +6,13 @@ query product($id: ID!) {
       descriptionHtml
       vendor
       handle
+      productType
+      status
+      tags
+      seo {
+        title
+        description
+      }
     }
   }
 }

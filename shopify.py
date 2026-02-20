@@ -162,20 +162,25 @@ class ShopifyClient:
         return await self.graphql(mutation, {"product": product_payload})
 
     @staticmethod
-    def _normalize_tags(tags: Any) -> list[str] | None:
+    def _normalize_tags(tags: Any, *, allow_empty: bool = False) -> list[str] | None:
         if tags is None:
             return None
         if isinstance(tags, list):
             normalized = [str(tag).strip() for tag in tags if str(tag).strip()]
-            return normalized or None
+            if normalized:
+                return normalized
+            return [] if allow_empty else None
         if isinstance(tags, str):
             normalized = [part.strip() for part in tags.split(",") if part.strip()]
-            return normalized or None
+            if normalized:
+                return normalized
+            return [] if allow_empty else None
         return None
 
     @staticmethod
     def _build_product_payload(product: Dict[str, Any], *, include_id: bool) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
+        clearable_string_fields = {"vendor", "body_html", "product_type"}
         mapping = {
             "id": "id",
             "title": "title",
@@ -188,19 +193,32 @@ class ShopifyClient:
         for source_key, target_key in mapping.items():
             if source_key == "id" and not include_id:
                 continue
+            if source_key not in product:
+                continue
             value = product.get(source_key)
-            if value not in (None, ""):
-                payload[target_key] = value
-        tags = ShopifyClient._normalize_tags(product.get("tags"))
-        if tags:
+            if value is None:
+                continue
+            if value == "" and source_key not in clearable_string_fields:
+                continue
+            payload[target_key] = value
+        tags = ShopifyClient._normalize_tags(
+            product.get("tags"),
+            allow_empty="tags" in product,
+        )
+        if tags is not None:
             payload["tags"] = tags
-        if "productType" not in payload:
+        if "productType" not in payload and "product_category" in product:
             fallback_type = product.get("product_category")
-            if fallback_type not in (None, ""):
+            if fallback_type is not None:
                 payload["productType"] = fallback_type
         seo_title = product.get("seo_title")
         seo_description = product.get("seo_description")
-        if seo_title not in (None, "") or seo_description not in (None, ""):
+        if (
+            "seo_title" in product
+            or "seo_description" in product
+            or seo_title not in (None, "")
+            or seo_description not in (None, "")
+        ):
             payload["seo"] = {
                 "title": str(seo_title or ""),
                 "description": str(seo_description or ""),

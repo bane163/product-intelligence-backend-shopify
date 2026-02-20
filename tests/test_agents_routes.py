@@ -1,5 +1,6 @@
 import io
 import json
+import uuid
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -469,6 +470,23 @@ async def test_generate_thumbnail_bytes_skips_blank_pages():
 
 @pytest.mark.asyncio
 async def test_run_and_get_product_intelligence_audit(monkeypatch):
+    async def fake_get_product(self, gid):
+        return {
+            "data": {
+                "node": {
+                    "id": gid,
+                    "title": "Short",
+                    "descriptionHtml": "",
+                    "vendor": "Brand",
+                    "handle": "short",
+                    "productType": "General",
+                    "status": "ACTIVE",
+                    "tags": ["t1"],
+                    "seo": {"title": "Short", "description": "Desc"},
+                }
+            }
+        }
+
     async def fake_update_product_from_input(self, product):
         return {
             "data": {
@@ -489,6 +507,7 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
         "update_product_from_input",
         fake_update_product_from_input,
     )
+    monkeypatch.setattr(shopify_module.ShopifyClient, "get_product", fake_get_product)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -535,6 +554,14 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
         assert apply_single.json()["status"] == "applied"
         assert apply_single.json()["shopify_updated"] is True
         assert apply_single.json()["target_product_id"] == "gid://shopify/Product/9"
+
+        revert_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion_id}/revert"
+        )
+        assert revert_single.status_code == 200
+        assert revert_single.json()["status"] == "pending"
+        assert revert_single.json()["shopify_updated"] is True
+        assert revert_single.json()["target_product_id"] == "gid://shopify/Product/9"
 
         remaining_ids = [
             row["suggestion_id"]
@@ -601,3 +628,291 @@ async def test_intelligence_audit_with_existing_products_mode(monkeypatch):
         )
         assert all_audit.status_code == 200
         assert all_audit.json()["audit_id"]
+
+
+@pytest.mark.asyncio
+async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
+    async def fake_get_product(self, gid):
+        return {
+            "data": {
+                "node": {
+                    "id": gid,
+                    "title": "Catalog Product",
+                    "descriptionHtml": "",
+                    "vendor": None,
+                    "handle": "catalog-product",
+                    "productType": "General",
+                    "status": "ACTIVE",
+                    "tags": ["tag-1"],
+                    "seo": {"title": "Catalog Product", "description": "Catalog description"},
+                }
+            }
+        }
+
+    updates: list[dict[str, object]] = []
+
+    async def fake_update_product_from_input(self, product):
+        updates.append(dict(product))
+        return {
+            "data": {
+                "productUpdate": {
+                    "product": {"id": product.get("id")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import shopify as shopify_module
+
+    monkeypatch.setattr(shopify_module.ShopifyClient, "get_product", fake_get_product)
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "update_product_from_input",
+        fake_update_product_from_input,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        audit_run = await ac.post(
+            "/agents/intelligence/audit",
+            json={
+                "products": [
+                    {
+                        "id": "gid://shopify/Product/201",
+                        "title": "Catalog Product",
+                        "handle": "catalog-product",
+                    }
+                ]
+            },
+        )
+        assert audit_run.status_code == 200
+        audit_id = audit_run.json()["audit_id"]
+
+        suggestions = await ac.get(f"/agents/intelligence/audits/{audit_id}/suggestions")
+        assert suggestions.status_code == 200
+        rows = suggestions.json()["suggestions"]
+        suggestion = next(
+            (row for row in rows if isinstance(row.get("patch_payload"), dict) and "vendor" in row["patch_payload"]),
+            None,
+        )
+        assert suggestion is not None
+
+        apply_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion['suggestion_id']}/apply"
+        )
+        assert apply_single.status_code == 200
+        assert apply_single.json()["status"] == "applied"
+        applied_suggestion = apply_single.json()["suggestion"]
+        assert applied_suggestion["previous_payload"]["vendor"] is None
+        assert applied_suggestion["previous_payload"]["__is_reversible"] is True
+        assert applied_suggestion["previous_payload"]["__revert_modes"]["vendor"] == "clear"
+
+        revert_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion['suggestion_id']}/revert"
+        )
+        assert revert_single.status_code == 200
+        assert revert_single.json()["status"] == "pending"
+        assert len(updates) == 2
+        assert updates[1]["vendor"] == ""
+
+
+@pytest.mark.asyncio
+async def test_apply_partial_field_keeps_remaining_fields_pending(monkeypatch):
+    async def fake_get_product(self, gid):
+        return {
+            "data": {
+                "node": {
+                    "id": gid,
+                    "title": "Catalog Product",
+                    "descriptionHtml": "Catalog description",
+                    "vendor": "Original Vendor",
+                    "handle": "catalog-product",
+                    "productType": "General",
+                    "status": "ACTIVE",
+                    "tags": ["tag-1"],
+                    "seo": {"title": "Original SEO", "description": "Original description"},
+                }
+            }
+        }
+
+    updates: list[dict[str, object]] = []
+
+    async def fake_update_product_from_input(self, product):
+        updates.append(dict(product))
+        return {
+            "data": {
+                "productUpdate": {
+                    "product": {"id": product.get("id")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import shopify as shopify_module
+
+    monkeypatch.setattr(shopify_module.ShopifyClient, "get_product", fake_get_product)
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "update_product_from_input",
+        fake_update_product_from_input,
+    )
+
+    ctx = get_app_context()
+    audit_id = f"audit-partial-{uuid.uuid4()}"
+    suggestion_id = f"suggestion-partial-{uuid.uuid4()}"
+    ctx.services.supabase.save_product_intelligence_audit(
+        audit_id=audit_id,
+        run_id=None,
+        submitted_id=None,
+        scope="adhoc_products",
+        status="success",
+        overall_score=60,
+        findings_count=1,
+        component_scores={},
+        totals={
+            "audited_products": [
+                {
+                    "id": "gid://shopify/Product/401",
+                    "title": "Catalog Product",
+                    "handle": "catalog-product",
+                }
+            ]
+        },
+    )
+    ctx.services.supabase.save_product_intelligence_suggestions(
+        audit_id=audit_id,
+        suggestions=[
+            {
+                "suggestion_id": suggestion_id,
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "product_title": "Catalog Product",
+                "category": "seo_readiness",
+                "severity": "medium",
+                "message": "Apply vendor and SEO title improvements",
+                "patch_payload": {
+                    "vendor": "Updated Vendor",
+                    "seo_title": "Updated SEO Title",
+                },
+                "status": "pending",
+            }
+        ],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        apply_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion_id}/apply",
+            json={"patch_payload": {"vendor": "Updated Vendor"}},
+        )
+        assert apply_single.status_code == 200
+        assert apply_single.json()["status"] == "applied"
+        assert apply_single.json()["suggestion"]["patch_payload"] == {
+            "vendor": "Updated Vendor"
+        }
+        assert len(updates) == 1
+        assert updates[0]["vendor"] == "Updated Vendor"
+        assert "seo_title" not in updates[0]
+
+        suggestions = await ac.get(f"/agents/intelligence/audits/{audit_id}/suggestions")
+        assert suggestions.status_code == 200
+        rows = suggestions.json()["suggestions"]
+        applied = [row for row in rows if row.get("status") == "applied"]
+        pending = [row for row in rows if row.get("status") != "applied"]
+        assert len(applied) == 1
+        assert len(pending) == 1
+        assert pending[0]["patch_payload"] == {"seo_title": "Updated SEO Title"}
+
+
+@pytest.mark.asyncio
+async def test_revert_blocked_for_non_reversible_missing_original_field(monkeypatch):
+    async def fake_get_product(self, gid):
+        return {
+            "data": {
+                "node": {
+                    "id": gid,
+                    "title": "Catalog Product",
+                    "descriptionHtml": "",
+                    "vendor": "Brand",
+                    "handle": "catalog-product",
+                    "productType": "General",
+                    "status": "ACTIVE",
+                    "tags": ["tag-1"],
+                    "seo": {"title": "Catalog Product", "description": "Catalog description"},
+                }
+            }
+        }
+
+    async def fake_update_product_from_input(self, product):
+        _ = product
+        return {
+            "data": {
+                "productUpdate": {
+                    "product": {"id": "gid://shopify/Product/301"},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import shopify as shopify_module
+
+    monkeypatch.setattr(shopify_module.ShopifyClient, "get_product", fake_get_product)
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "update_product_from_input",
+        fake_update_product_from_input,
+    )
+
+    ctx = get_app_context()
+    audit_id = f"audit-nonreversible-{uuid.uuid4()}"
+    suggestion_id = f"suggestion-nonreversible-{uuid.uuid4()}"
+    ctx.services.supabase.save_product_intelligence_audit(
+        audit_id=audit_id,
+        run_id=None,
+        submitted_id=None,
+        scope="adhoc_products",
+        status="success",
+        overall_score=60,
+        findings_count=1,
+        component_scores={},
+        totals={
+            "audited_products": [
+                {
+                    "id": "gid://shopify/Product/301",
+                    "title": "Catalog Product",
+                    "handle": "catalog-product",
+                }
+            ]
+        },
+    )
+    ctx.services.supabase.save_product_intelligence_suggestions(
+        audit_id=audit_id,
+        suggestions=[
+            {
+                "suggestion_id": suggestion_id,
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "product_title": "Catalog Product",
+                "category": "consistency",
+                "severity": "low",
+                "message": "Apply unsupported field fix",
+                "patch_payload": {"nonexistent_field": "value"},
+                "status": "pending",
+            }
+        ],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        apply_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion_id}/apply"
+        )
+        assert apply_single.status_code == 200
+        applied_suggestion = apply_single.json()["suggestion"]
+        assert applied_suggestion["previous_payload"]["__is_reversible"] is False
+
+        revert_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion_id}/revert"
+        )
+        assert revert_single.status_code == 400
+        assert "Auto-revert is unavailable" in revert_single.json()["detail"]

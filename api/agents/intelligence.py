@@ -35,6 +35,37 @@ def _with_reversibility_flags(suggestion: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
+def _normalize_shop_domain(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _resolve_shop_domain(request: Request, candidate: Any = None) -> str | None:
+    header_shop = _normalize_shop_domain(request.headers.get("x-shop-domain"))
+    body_shop = _normalize_shop_domain(candidate)
+    if header_shop and body_shop and header_shop != body_shop:
+        raise HTTPException(status_code=403, detail="shop_domain mismatch")
+    return header_shop or body_shop
+
+
+def _require_shop_domain(request: Request, candidate: Any = None) -> str:
+    shop_domain = _resolve_shop_domain(request, candidate)
+    if not shop_domain:
+        raise HTTPException(status_code=400, detail="Missing shop_domain")
+    return shop_domain
+
+
+def _resolve_shop_access_token(request: Request, candidate: Any = None) -> str | None:
+    header_token = request.headers.get("x-shop-access-token")
+    if isinstance(header_token, str) and header_token.strip():
+        return header_token.strip()
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    return None
+
+
 def _resolve_shopify_client(
     *,
     ctx: AppContext,
@@ -79,8 +110,8 @@ async def run_product_intelligence_audit(
     run_id = payload.get("run_id")
     all_products = _to_bool(payload.get("all_products"))
     query = payload.get("query")
-    shop_domain = payload.get("shop_domain")
-    shop_access_token = payload.get("shop_access_token")
+    shop_domain = _require_shop_domain(request, payload.get("shop_domain"))
+    shop_access_token = _resolve_shop_access_token(request, payload.get("shop_access_token"))
     query_text = str(query).strip() if isinstance(query, str) and query.strip() else None
     raw_limit = payload.get("limit")
     try:
@@ -123,6 +154,7 @@ async def run_product_intelligence_audit(
             products=products,
             submitted_id=str(submitted_id) if submitted_id else None,
             run_id=str(run_id) if run_id else None,
+            shop_domain=shop_domain,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -133,12 +165,20 @@ async def run_product_intelligence_audit(
     summary="Search Shopify products for intelligence audit picker",
 )
 async def search_shopify_products_for_audit(
+    request: Request,
     query: str | None = None,
     limit: int = 25,
+    shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, list[dict[str, Any]]]:
+    tenant = _require_shop_domain(request, shop_domain)
     safe_limit = max(1, min(limit, 100))
-    products = await ctx.services.shopify.list_products_for_audit(
+    shopify_client = _resolve_shopify_client(
+        ctx=ctx,
+        shop_domain=tenant,
+        shop_access_token=_resolve_shop_access_token(request),
+    )
+    products = await shopify_client.list_products_for_audit(
         query=query.strip() if query and query.strip() else None,
         limit=safe_limit,
     )
@@ -167,8 +207,8 @@ async def search_shopify_products_for_audit_post(
         for key, value in form.items():
             data[key] = value
     query = data.get("query")
-    shop_domain = data.get("shop_domain")
-    shop_access_token = data.get("shop_access_token")
+    shop_domain = _require_shop_domain(request, data.get("shop_domain"))
+    shop_access_token = _resolve_shop_access_token(request, data.get("shop_access_token"))
     raw_limit = data.get("limit")
     try:
         safe_limit = int(raw_limit) if raw_limit is not None else 25
@@ -191,24 +231,39 @@ async def search_shopify_products_for_audit_post(
 
 @router.get("/intelligence/audits", summary="List intelligence audits")
 async def list_product_intelligence_audits(
+    request: Request,
     limit: int = 50,
     offset: int = 0,
+    shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, list[dict[str, Any]]]:
     from application.use_cases.intelligence_list_audits import execute as list_audits_execute
 
-    audits = list_audits_execute(supabase=ctx.services.supabase, limit=limit, offset=offset)
+    tenant = _require_shop_domain(request, shop_domain)
+    audits = list_audits_execute(
+        supabase=ctx.services.supabase,
+        shop_domain=tenant,
+        limit=limit,
+        offset=offset,
+    )
     return {"audits": audits}
 
 
 @router.get("/intelligence/audits/{audit_id}", summary="Get intelligence audit")
 async def get_product_intelligence_audit(
+    request: Request,
     audit_id: str,
+    shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.intelligence_get_audit import execute as get_audit_execute
 
-    audit = get_audit_execute(supabase=ctx.services.supabase, audit_id=audit_id)
+    tenant = _require_shop_domain(request, shop_domain)
+    audit = get_audit_execute(
+        supabase=ctx.services.supabase,
+        audit_id=audit_id,
+        shop_domain=tenant,
+    )
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     return {"audit": audit}
@@ -219,14 +274,21 @@ async def get_product_intelligence_audit(
     summary="List intelligence suggestions for an audit",
 )
 async def list_product_intelligence_suggestions(
+    request: Request,
     audit_id: str,
+    shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, list[dict[str, Any]]]:
     from application.use_cases.intelligence_list_suggestions import (
         execute as list_suggestions_execute,
     )
 
-    suggestions = list_suggestions_execute(supabase=ctx.services.supabase, audit_id=audit_id)
+    tenant = _require_shop_domain(request, shop_domain)
+    suggestions = list_suggestions_execute(
+        supabase=ctx.services.supabase,
+        audit_id=audit_id,
+        shop_domain=tenant,
+    )
     return {
         "suggestions": [
             _with_reversibility_flags(item) if isinstance(item, dict) else item
@@ -274,8 +336,8 @@ async def apply_product_intelligence_suggestion(
         if not isinstance(parsed_patch_payload, dict):
             raise HTTPException(status_code=400, detail="patch_payload_json must decode to an object")
         patch_payload = parsed_patch_payload
-    shop_domain = data.get("shop_domain")
-    shop_access_token = data.get("shop_access_token")
+    shop_domain = _require_shop_domain(request, data.get("shop_domain"))
+    shop_access_token = _resolve_shop_access_token(request, data.get("shop_access_token"))
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
@@ -290,6 +352,7 @@ async def apply_product_intelligence_suggestion(
             shopify=shopify_client,
             suggestion_id=suggestion_id,
             patch_payload=patch_payload,
+            shop_domain=shop_domain,
         )
         suggestion = result.get("suggestion")
         if isinstance(suggestion, dict):
@@ -327,8 +390,8 @@ async def revert_product_intelligence_suggestion(
         form = await request.form()
         for key, value in form.items():
             data[key] = value
-    shop_domain = data.get("shop_domain")
-    shop_access_token = data.get("shop_access_token")
+    shop_domain = _require_shop_domain(request, data.get("shop_domain"))
+    shop_access_token = _resolve_shop_access_token(request, data.get("shop_access_token"))
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
@@ -342,6 +405,7 @@ async def revert_product_intelligence_suggestion(
             supabase=ctx.services.supabase,
             shopify=shopify_client,
             suggestion_id=suggestion_id,
+            shop_domain=shop_domain,
         )
         suggestion = result.get("suggestion")
         if isinstance(suggestion, dict):
@@ -392,8 +456,8 @@ async def apply_product_intelligence_suggestions_bulk(
     suggestion_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
     if not suggestion_ids:
         raise HTTPException(status_code=400, detail="No suggestion_ids provided")
-    shop_domain = payload.get("shop_domain")
-    shop_access_token = payload.get("shop_access_token")
+    shop_domain = _require_shop_domain(request, payload.get("shop_domain"))
+    shop_access_token = _resolve_shop_access_token(request, payload.get("shop_access_token"))
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
@@ -410,6 +474,7 @@ async def apply_product_intelligence_suggestions_bulk(
                 supabase=ctx.services.supabase,
                 shopify=shopify_client,
                 suggestion_id=suggestion_id,
+                shop_domain=shop_domain,
             )
             results.append({"suggestion_id": suggestion_id, **result})
         except Exception as exc:

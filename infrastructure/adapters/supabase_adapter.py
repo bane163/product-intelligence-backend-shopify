@@ -173,6 +173,7 @@ class SupabaseAdapter(SupabasePort):
         findings_count: int,
         component_scores: dict[str, int],
         totals: dict[str, Any],
+        shop_domain: str | None = None,
     ) -> dict[str, Any]:
         return self._service.save_product_intelligence_audit(
             audit_id=audit_id,
@@ -184,44 +185,91 @@ class SupabaseAdapter(SupabasePort):
             findings_count=findings_count,
             component_scores=component_scores,
             totals=totals,
+            shop_domain=shop_domain,
         )
 
     def save_product_intelligence_findings(
-        self, *, audit_id: str, findings: list[dict[str, Any]]
+        self,
+        *,
+        audit_id: str,
+        findings: list[dict[str, Any]],
+        shop_domain: str | None = None,
     ) -> int:
         return self._service.save_product_intelligence_findings(
-            audit_id=audit_id, findings=findings
+            audit_id=audit_id,
+            findings=findings,
+            shop_domain=shop_domain,
         )
 
     def list_product_intelligence_audits(
-        self, limit: int = 50, offset: int = 0
+        self,
+        *,
+        shop_domain: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
-        return self._service.list_product_intelligence_audits(limit=limit, offset=offset)
+        return self._service.list_product_intelligence_audits(
+            shop_domain=shop_domain,
+            limit=limit,
+            offset=offset,
+        )
 
-    def get_product_intelligence_audit(self, audit_id: str) -> dict[str, Any] | None:
-        return self._service.get_product_intelligence_audit(audit_id)
+    def get_product_intelligence_audit(
+        self,
+        audit_id: str,
+        *,
+        shop_domain: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self._service.get_product_intelligence_audit(
+            audit_id,
+            shop_domain=shop_domain,
+        )
 
     def save_product_intelligence_suggestions(
-        self, *, audit_id: str, suggestions: list[dict[str, Any]]
+        self,
+        *,
+        audit_id: str,
+        suggestions: list[dict[str, Any]],
+        shop_domain: str | None = None,
     ) -> int:
         return self._service.save_product_intelligence_suggestions(
-            audit_id=audit_id, suggestions=suggestions
+            audit_id=audit_id,
+            suggestions=suggestions,
+            shop_domain=shop_domain,
         )
 
     def list_product_intelligence_suggestions(
-        self, *, audit_id: str
+        self,
+        *,
+        audit_id: str,
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._service.list_product_intelligence_suggestions(audit_id=audit_id)
+        return self._service.list_product_intelligence_suggestions(
+            audit_id=audit_id,
+            shop_domain=shop_domain,
+        )
 
     def get_product_intelligence_suggestion(
-        self, suggestion_id: str
+        self,
+        suggestion_id: str,
+        *,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
-        return self._service.get_product_intelligence_suggestion(suggestion_id)
+        return self._service.get_product_intelligence_suggestion(
+            suggestion_id,
+            shop_domain=shop_domain,
+        )
 
     def create_product_intelligence_suggestion(
-        self, *, suggestion: dict[str, Any]
+        self,
+        *,
+        suggestion: dict[str, Any],
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
-        return self._service.create_product_intelligence_suggestion(suggestion=suggestion)
+        return self._service.create_product_intelligence_suggestion(
+            suggestion=suggestion,
+            shop_domain=shop_domain,
+        )
 
     def mark_product_intelligence_suggestion_applied(
         self,
@@ -229,18 +277,24 @@ class SupabaseAdapter(SupabasePort):
         suggestion_id: str,
         previous_payload: dict[str, Any] | None = None,
         patch_payload: dict[str, Any] | None = None,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
         return self._service.mark_product_intelligence_suggestion_applied(
             suggestion_id=suggestion_id,
             previous_payload=previous_payload,
             patch_payload=patch_payload,
+            shop_domain=shop_domain,
         )
 
     def mark_product_intelligence_suggestion_pending(
-        self, *, suggestion_id: str
+        self,
+        *,
+        suggestion_id: str,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
         return self._service.mark_product_intelligence_suggestion_pending(
-            suggestion_id=suggestion_id
+            suggestion_id=suggestion_id,
+            shop_domain=shop_domain,
         )
 
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]:

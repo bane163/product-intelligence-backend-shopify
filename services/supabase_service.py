@@ -767,6 +767,7 @@ class SupabaseService(SupabaseServiceInterface):
             deleted = True
         return deleted
 
+
     def save_product_intelligence_audit(
         self,
         *,
@@ -779,7 +780,11 @@ class SupabaseService(SupabaseServiceInterface):
         findings_count: int,
         component_scores: dict[str, int],
         totals: dict[str, Any],
+        shop_domain: str | None = None,
     ) -> dict[str, Any]:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            raise ValueError("Missing shop_domain for product intelligence audit")
         now = self._utc_now()
         payload = {
             "audit_id": audit_id,
@@ -791,6 +796,7 @@ class SupabaseService(SupabaseServiceInterface):
             "findings_count": findings_count,
             "component_scores": component_scores,
             "totals": totals,
+            "shop_domain": tenant,
             "created_at": now,
             "updated_at": now,
         }
@@ -806,33 +812,55 @@ class SupabaseService(SupabaseServiceInterface):
         self.product_intelligence_audits[audit_id] = payload
         return payload
 
+
     def save_product_intelligence_findings(
-        self, *, audit_id: str, findings: list[dict[str, Any]]
+        self,
+        *,
+        audit_id: str,
+        findings: list[dict[str, Any]],
+        shop_domain: str | None = None,
     ) -> int:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            raise ValueError("Missing shop_domain for product intelligence findings")
         client = self._get_supabase_client()
         if client:
             try:
                 client.table("product_intelligence_findings").delete().eq(
                     "audit_id", audit_id
-                ).execute()
+                ).eq("shop_domain", tenant).execute()
                 if findings:
-                    payload = [{**finding, "audit_id": audit_id} for finding in findings]
+                    payload = [
+                        {**finding, "audit_id": audit_id, "shop_domain": tenant}
+                        for finding in findings
+                    ]
                     client.table("product_intelligence_findings").insert(payload).execute()
                 return len(findings)
             except Exception:
                 LOG.exception("Failed saving intelligence findings for audit=%s", audit_id)
-        self.product_intelligence_findings[audit_id] = [dict(item) for item in findings]
+        self.product_intelligence_findings[audit_id] = [
+            {**dict(item), "shop_domain": tenant} for item in findings
+        ]
         return len(findings)
 
+
     def list_product_intelligence_audits(
-        self, limit: int = 50, offset: int = 0
+        self,
+        *,
+        shop_domain: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return []
         client = self._get_supabase_client()
         if client:
             try:
                 res = (
                     client.table("product_intelligence_audits")
                     .select("*")
+                    .eq("shop_domain", tenant)
                     .order("created_at", desc=True)
                     .range(offset, offset + limit - 1)
                     .execute()
@@ -840,11 +868,24 @@ class SupabaseService(SupabaseServiceInterface):
                 return res.data or []
             except Exception:
                 LOG.exception("Failed listing product intelligence audits")
-        audits = list(self.product_intelligence_audits.values())
+        audits = [
+            dict(item)
+            for item in self.product_intelligence_audits.values()
+            if str(item.get("shop_domain") or "").strip().lower() == tenant
+        ]
         audits.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return audits[offset : offset + limit]
 
-    def get_product_intelligence_audit(self, audit_id: str) -> dict[str, Any] | None:
+
+    def get_product_intelligence_audit(
+        self,
+        audit_id: str,
+        *,
+        shop_domain: str | None = None,
+    ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return None
         client = self._get_supabase_client()
         if client:
             try:
@@ -852,6 +893,7 @@ class SupabaseService(SupabaseServiceInterface):
                     client.table("product_intelligence_audits")
                     .select("*")
                     .eq("audit_id", audit_id)
+                    .eq("shop_domain", tenant)
                     .limit(1)
                     .execute()
                 )
@@ -862,6 +904,7 @@ class SupabaseService(SupabaseServiceInterface):
                     client.table("product_intelligence_findings")
                     .select("*")
                     .eq("audit_id", audit_id)
+                    .eq("shop_domain", tenant)
                     .order("created_at", desc=False)
                     .execute()
                 )
@@ -874,37 +917,66 @@ class SupabaseService(SupabaseServiceInterface):
         audit = self.product_intelligence_audits.get(audit_id)
         if not audit:
             return None
-        return {**audit, "findings": self.product_intelligence_findings.get(audit_id, [])}
+        if str(audit.get("shop_domain") or "").strip().lower() != tenant:
+            return None
+        findings = [
+            dict(item)
+            for item in self.product_intelligence_findings.get(audit_id, [])
+            if str(item.get("shop_domain") or tenant).strip().lower() == tenant
+        ]
+        return {**audit, "findings": findings}
+
 
     def save_product_intelligence_suggestions(
-        self, *, audit_id: str, suggestions: list[dict[str, Any]]
+        self,
+        *,
+        audit_id: str,
+        suggestions: list[dict[str, Any]],
+        shop_domain: str | None = None,
     ) -> int:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            raise ValueError("Missing shop_domain for product intelligence suggestions")
         client = self._get_supabase_client()
         if client:
             try:
                 client.table("product_intelligence_suggestions").delete().eq(
                     "audit_id", audit_id
-                ).execute()
+                ).eq("shop_domain", tenant).execute()
                 if suggestions:
-                    payload = [{**item, "audit_id": audit_id} for item in suggestions]
+                    payload = [
+                        {**item, "audit_id": audit_id, "shop_domain": tenant}
+                        for item in suggestions
+                    ]
                     client.table("product_intelligence_suggestions").insert(payload).execute()
                 return len(suggestions)
             except Exception:
                 LOG.exception("Failed saving intelligence suggestions for audit=%s", audit_id)
-        for key in [k for k, v in self.product_intelligence_suggestions.items() if v.get("audit_id") == audit_id]:
-            self.product_intelligence_suggestions.pop(key, None)
+        for key, value in list(self.product_intelligence_suggestions.items()):
+            if value.get("audit_id") != audit_id:
+                continue
+            if str(value.get("shop_domain") or "").strip().lower() == tenant:
+                self.product_intelligence_suggestions.pop(key, None)
         for item in suggestions:
             suggestion_id = str(item.get("suggestion_id") or uuid.uuid4())
             self.product_intelligence_suggestions[suggestion_id] = {
                 **item,
                 "suggestion_id": suggestion_id,
                 "audit_id": audit_id,
+                "shop_domain": tenant,
             }
         return len(suggestions)
 
+
     def list_product_intelligence_suggestions(
-        self, *, audit_id: str
+        self,
+        *,
+        audit_id: str,
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return []
         client = self._get_supabase_client()
         if client:
             try:
@@ -912,6 +984,7 @@ class SupabaseService(SupabaseServiceInterface):
                     client.table("product_intelligence_suggestions")
                     .select("*")
                     .eq("audit_id", audit_id)
+                    .eq("shop_domain", tenant)
                     .order("created_at", desc=False)
                     .execute()
                 )
@@ -922,12 +995,22 @@ class SupabaseService(SupabaseServiceInterface):
             dict(item)
             for item in self.product_intelligence_suggestions.values()
             if item.get("audit_id") == audit_id
+            and str(item.get("shop_domain") or "").strip().lower() == tenant
         ]
 
+
     def get_product_intelligence_suggestion(
-        self, suggestion_id: str
+        self,
+        suggestion_id: str,
+        *,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return None
         cached_item = self.product_intelligence_suggestions.get(suggestion_id)
+        if cached_item and str(cached_item.get("shop_domain") or "").strip().lower() != tenant:
+            cached_item = None
         client = self._get_supabase_client()
         if client:
             try:
@@ -935,6 +1018,7 @@ class SupabaseService(SupabaseServiceInterface):
                     client.table("product_intelligence_suggestions")
                     .select("*")
                     .eq("suggestion_id", suggestion_id)
+                    .eq("shop_domain", tenant)
                     .limit(1)
                     .execute()
                 )
@@ -950,13 +1034,20 @@ class SupabaseService(SupabaseServiceInterface):
                 )
         return cached_item
 
+
     def create_product_intelligence_suggestion(
-        self, *, suggestion: dict[str, Any]
+        self,
+        *,
+        suggestion: dict[str, Any],
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
         if not isinstance(suggestion, dict):
             return None
+        tenant = str(shop_domain or suggestion.get("shop_domain") or "").strip().lower()
+        if not tenant:
+            raise ValueError("Missing shop_domain for product intelligence suggestion")
         suggestion_id = str(suggestion.get("suggestion_id") or uuid.uuid4())
-        payload = {**suggestion, "suggestion_id": suggestion_id}
+        payload = {**suggestion, "suggestion_id": suggestion_id, "shop_domain": tenant}
         client = self._get_supabase_client()
         if client:
             try:
@@ -977,13 +1068,18 @@ class SupabaseService(SupabaseServiceInterface):
         self.product_intelligence_suggestions[suggestion_id] = dict(payload)
         return dict(payload)
 
+
     def mark_product_intelligence_suggestion_applied(
         self,
         *,
         suggestion_id: str,
         previous_payload: dict[str, Any] | None = None,
         patch_payload: dict[str, Any] | None = None,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return None
         now = self._utc_now()
         update_payload: dict[str, Any] = {
             "status": "applied",
@@ -1002,6 +1098,7 @@ class SupabaseService(SupabaseServiceInterface):
                         client.table("product_intelligence_suggestions")
                         .update(payload)
                         .eq("suggestion_id", suggestion_id)
+                        .eq("shop_domain", tenant)
                         .execute()
                     )
                     return response.data or []
@@ -1023,6 +1120,7 @@ class SupabaseService(SupabaseServiceInterface):
                             client.table("product_intelligence_suggestions")
                             .update(fallback_payload)
                             .eq("suggestion_id", suggestion_id)
+                            .eq("shop_domain", tenant)
                             .execute()
                             .data
                             or []
@@ -1045,6 +1143,8 @@ class SupabaseService(SupabaseServiceInterface):
         item = self.product_intelligence_suggestions.get(suggestion_id)
         if not item:
             return None
+        if str(item.get("shop_domain") or "").strip().lower() != tenant:
+            return None
         item["status"] = "applied"
         item["applied_at"] = now
         item["updated_at"] = now
@@ -1054,9 +1154,16 @@ class SupabaseService(SupabaseServiceInterface):
             item["patch_payload"] = patch_payload
         return dict(item)
 
+
     def mark_product_intelligence_suggestion_pending(
-        self, *, suggestion_id: str
+        self,
+        *,
+        suggestion_id: str,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return None
         now = self._utc_now()
         client = self._get_supabase_client()
         if client:
@@ -1071,6 +1178,7 @@ class SupabaseService(SupabaseServiceInterface):
                         }
                     )
                     .eq("suggestion_id", suggestion_id)
+                    .eq("shop_domain", tenant)
                     .execute()
                 )
                 rows = res.data or []
@@ -1086,13 +1194,14 @@ class SupabaseService(SupabaseServiceInterface):
         item = self.product_intelligence_suggestions.get(suggestion_id)
         if not item:
             return None
+        if str(item.get("shop_domain") or "").strip().lower() != tenant:
+            return None
         item["status"] = "pending"
         item["applied_at"] = None
         item["updated_at"] = now
         cached = dict(item)
         self.product_intelligence_suggestions[suggestion_id] = cached
         return cached
-
     # ----- LLM model config -----
     @staticmethod
     def _mask_api_key(raw_key: str | None) -> str | None:

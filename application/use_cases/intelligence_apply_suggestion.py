@@ -208,8 +208,12 @@ async def execute(
     shopify: ShopifyPort,
     suggestion_id: str,
     patch_payload: dict[str, Any] | None = None,
+    shop_domain: str | None = None,
 ) -> dict[str, Any]:
-    suggestion = supabase.get_product_intelligence_suggestion(suggestion_id)
+    suggestion = supabase.get_product_intelligence_suggestion(
+        suggestion_id,
+        shop_domain=shop_domain,
+    )
     if not suggestion:
         raise LookupError("Suggestion not found")
 
@@ -234,7 +238,7 @@ async def execute(
     if not isinstance(audit_id, str) or not audit_id:
         raise ValueError("Suggestion is missing audit reference")
 
-    audit = supabase.get_product_intelligence_audit(audit_id)
+    audit = supabase.get_product_intelligence_audit(audit_id, shop_domain=shop_domain)
     if not audit:
         raise LookupError("Audit not found for suggestion")
 
@@ -254,6 +258,7 @@ async def execute(
         suggestion_id=suggestion_id,
         previous_payload=previous_payload,
         patch_payload=effective_patch_payload,
+        shop_domain=shop_domain,
     )
     if not applied:
         raise RuntimeError("Failed to mark suggestion as applied")
@@ -263,7 +268,8 @@ async def execute(
             remaining_patch_payload=remaining_patch_payload,
         )
         created_pending = supabase.create_product_intelligence_suggestion(
-            suggestion=pending_copy
+            suggestion=pending_copy,
+            shop_domain=shop_domain,
         )
         if not created_pending:
             raise RuntimeError("Failed to keep remaining suggestion fields pending")

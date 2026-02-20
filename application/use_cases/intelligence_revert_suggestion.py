@@ -39,8 +39,12 @@ async def execute(
     supabase: SupabasePort,
     shopify: ShopifyPort,
     suggestion_id: str,
+    shop_domain: str | None = None,
 ) -> dict[str, Any]:
-    suggestion = supabase.get_product_intelligence_suggestion(suggestion_id)
+    suggestion = supabase.get_product_intelligence_suggestion(
+        suggestion_id,
+        shop_domain=shop_domain,
+    )
     if not suggestion:
         raise LookupError("Suggestion not found")
 
@@ -66,7 +70,7 @@ async def execute(
     if not isinstance(audit_id, str) or not audit_id:
         raise ValueError("Suggestion is missing audit reference")
 
-    audit = supabase.get_product_intelligence_audit(audit_id)
+    audit = supabase.get_product_intelligence_audit(audit_id, shop_domain=shop_domain)
     if not audit:
         raise LookupError("Audit not found for suggestion")
 
@@ -110,7 +114,8 @@ async def execute(
     await shopify.update_product_from_input({"id": gid, **restore_payload})
 
     reverted = supabase.mark_product_intelligence_suggestion_pending(
-        suggestion_id=suggestion_id
+        suggestion_id=suggestion_id,
+        shop_domain=shop_domain,
     )
     if not reverted:
         raise RuntimeError("Failed to mark suggestion as pending")

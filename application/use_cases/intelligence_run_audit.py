@@ -267,7 +267,9 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
 
 
 def _build_suggestions(
-    audit_id: str, findings: list[dict[str, Any]]
+    audit_id: str,
+    findings: list[dict[str, Any]],
+    shop_domain: str,
 ) -> list[dict[str, Any]]:
     suggestions: list[dict[str, Any]] = []
     for finding in findings:
@@ -285,6 +287,7 @@ def _build_suggestions(
                 "message": str(finding.get("message") or ""),
                 "patch_payload": patch_payload,
                 "status": "pending",
+                "shop_domain": shop_domain,
             }
         )
     return suggestions
@@ -296,9 +299,13 @@ def execute(
     products: list[dict[str, Any]],
     submitted_id: str | None = None,
     run_id: str | None = None,
+    shop_domain: str | None = None,
 ) -> dict[str, Any]:
     if not products:
         raise ValueError("No products provided for intelligence audit")
+    tenant = str(shop_domain or "").strip().lower()
+    if not tenant:
+        raise ValueError("Missing shop_domain for intelligence audit")
 
     component_scores, findings = _score_products(products)
     weights = {
@@ -340,9 +347,10 @@ def execute(
         findings_count=len(findings),
         component_scores=component_scores,
         totals=totals,
+        shop_domain=tenant,
     )
-    supabase.save_product_intelligence_findings(audit_id=audit_id, findings=findings)
-    suggestions = _build_suggestions(audit_id=audit_id, findings=findings)
-    supabase.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions)
+    supabase.save_product_intelligence_findings(audit_id=audit_id, findings=findings, shop_domain=tenant)
+    suggestions = _build_suggestions(audit_id=audit_id, findings=findings, shop_domain=tenant)
+    supabase.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions, shop_domain=tenant)
 
     return {**audit, "findings": findings, "suggestions": suggestions}

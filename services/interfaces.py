@@ -115,32 +115,59 @@ class SupabaseServiceInterface(Protocol):
         findings_count: int,
         component_scores: dict[str, int],
         totals: dict[str, Any],
+        shop_domain: str | None = None,
     ) -> dict[str, Any]: ...
 
     def save_product_intelligence_findings(
-        self, *, audit_id: str, findings: list[dict[str, Any]]
+        self,
+        *,
+        audit_id: str,
+        findings: list[dict[str, Any]],
+        shop_domain: str | None = None,
     ) -> int: ...
 
     def list_product_intelligence_audits(
-        self, limit: int = 50, offset: int = 0
+        self,
+        *,
+        shop_domain: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]: ...
 
-    def get_product_intelligence_audit(self, audit_id: str) -> dict[str, Any] | None: ...
+    def get_product_intelligence_audit(
+        self,
+        audit_id: str,
+        *,
+        shop_domain: str | None = None,
+    ) -> dict[str, Any] | None: ...
 
     def save_product_intelligence_suggestions(
-        self, *, audit_id: str, suggestions: list[dict[str, Any]]
+        self,
+        *,
+        audit_id: str,
+        suggestions: list[dict[str, Any]],
+        shop_domain: str | None = None,
     ) -> int: ...
 
     def list_product_intelligence_suggestions(
-        self, *, audit_id: str
+        self,
+        *,
+        audit_id: str,
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def get_product_intelligence_suggestion(
-        self, suggestion_id: str
+        self,
+        suggestion_id: str,
+        *,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None: ...
 
     def create_product_intelligence_suggestion(
-        self, *, suggestion: dict[str, Any]
+        self,
+        *,
+        suggestion: dict[str, Any],
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None: ...
 
     def mark_product_intelligence_suggestion_applied(
@@ -149,10 +176,11 @@ class SupabaseServiceInterface(Protocol):
         suggestion_id: str,
         previous_payload: dict[str, Any] | None = None,
         patch_payload: dict[str, Any] | None = None,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None: ...
 
     def mark_product_intelligence_suggestion_pending(
-        self, *, suggestion_id: str
+        self, *, suggestion_id: str, shop_domain: str | None = None
     ) -> dict[str, Any] | None: ...
 
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]: ...

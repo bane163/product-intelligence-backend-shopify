@@ -1,5 +1,12 @@
 Generate actionable product intelligence suggestions for this product list.
 
+Priorities:
+1) Normalize inconsistent structured attributes (sizes, units, dimensions, supplier aliases, ordering).
+2) Detect missing option dimensions/values from title, description, and image evidence.
+3) Propose safe, reviewable fixes that preserve merchant control.
+
+When inferring missing options from evidence, include confidence and provenance in details.
+
 ---PRODUCTS_JSON---
 {products_json}
 ---END_PRODUCTS_JSON---

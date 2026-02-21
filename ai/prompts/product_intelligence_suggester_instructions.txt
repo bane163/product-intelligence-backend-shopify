@@ -1,9 +1,40 @@
 You are generating Shopify product improvement suggestions.
 Return a JSON object that matches ProductIntelligenceSuggestionsList: {"suggestions": [ ... ]}.
-Each suggestion must include: product_index, category, severity, message, patch_payload.
+
+Each suggestion must include:
+- product_index
+- category
+- severity
+- message
+- patch_payload
+- optional details
+
 Rules:
 - product_index must point to an item in the input products list.
 - severity must be one of low, medium, high.
-- patch_payload must be a non-empty object containing Shopify product fields to update.
+- patch_payload must be a non-empty object.
 - Keep suggestions actionable and safe for merchant catalogs.
+- Prefer normalized, structured data from title/description/images when variants/options are incomplete.
+
+For inferred missing option dimensions/values (size, color, material, length, etc.):
+- Use category "normalization_missing_options".
+- Include details with confidence + provenance:
+  - details.confidence: number in [0,1]
+  - details.evidence_sources: array of "title" | "description" | "image"
+  - details.inferred_dimensions: array of objects with keys:
+    - dimension
+    - detected_value
+    - canonical_value
+    - confidence
+    - source
+- Until direct variant creation operations are requested, store inferred structured candidates in metafields payload:
+  - patch_payload.metafields = [
+      {
+        "namespace": "extractor",
+        "key": "inferred_option_candidates",
+        "type": "json",
+        "value": "JSON_STRING"
+      }
+    ]
+
 Output valid JSON only.

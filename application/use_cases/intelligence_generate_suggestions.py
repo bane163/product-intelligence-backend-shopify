@@ -49,6 +49,15 @@ _CHILDREN_SIZE_MAP: dict[str, str] = {
 
 _SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "1X", "2X", "3X"]
 
+_COLOR_TOKENS = (
+    "black", "white", "blue", "navy", "red", "green", "yellow", "orange",
+    "purple", "pink", "brown", "beige", "gray", "grey",
+)
+
+_MATERIAL_TOKENS = (
+    "cotton", "polyester", "wool", "linen", "leather", "denim", "silk", "nylon",
+)
+
 _NORMALIZATION_CATEGORIES = {
     "size_alias": "normalization_size_alias",
     "mixed_units": "normalization_mixed_units",
@@ -58,6 +67,7 @@ _NORMALIZATION_CATEGORIES = {
     "variant_ordering": "normalization_variant_ordering",
     "description_extraction": "normalization_description_extraction",
     "children_size": "normalization_children_size",
+    "missing_options": "normalization_missing_options",
 }
 
 
@@ -74,6 +84,7 @@ def _default_normalization_settings() -> dict[str, Any]:
             "variant_ordering": True,
             "description_extraction": True,
             "children_size": True,
+            "missing_options": True,
         },
     }
 
@@ -162,6 +173,161 @@ def _normalize_size_token(token: str) -> str:
     return normalized
 
 
+def _extract_existing_option_names(product: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    options = product.get("options") if isinstance(product.get("options"), list) else []
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        name = _to_text(option.get("name")).lower()
+        if name:
+            names.add(name)
+
+    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        selected_options = variant.get("selectedOptions")
+        if isinstance(selected_options, list):
+            for selected in selected_options:
+                if not isinstance(selected, dict):
+                    continue
+                name = _to_text(selected.get("name")).lower()
+                if name:
+                    names.add(name)
+    return names
+
+
+def _extract_inferred_dimensions(
+    *,
+    title: str,
+    body: str,
+    existing_option_names: set[str],
+) -> list[dict[str, Any]]:
+    title_lower = title.lower()
+    body_lower = body.lower()
+    merged_text = f"{title_lower} {body_lower}".strip()
+    dimensions: list[dict[str, Any]] = []
+
+    size_hits: list[tuple[str, str, str]] = []
+    for raw, canonical in _SIZE_ALIAS_MAP.items():
+        if not raw or len(raw) < 2:
+            continue
+        if re.search(rf"\b{re.escape(raw)}\b", merged_text):
+            source = "title" if re.search(rf"\b{re.escape(raw)}\b", title_lower) else "description"
+            size_hits.append((raw, canonical, source))
+    if size_hits and "size" not in existing_option_names:
+        detected = [item[0] for item in size_hits]
+        canonical_values = sorted({item[1] for item in size_hits}, key=lambda item: _SIZE_ORDER.index(item) if item in _SIZE_ORDER else 999)
+        evidence_sources = sorted({item[2] for item in size_hits})
+        dimensions.append(
+            {
+                "dimension": "Size",
+                "detected_values": detected,
+                "canonical_values": canonical_values,
+                "evidence_sources": evidence_sources,
+                "confidence": 0.9,
+            }
+        )
+
+    color_hits = [token for token in _COLOR_TOKENS if re.search(rf"\b{re.escape(token)}\b", merged_text)]
+    if color_hits and "color" not in existing_option_names:
+        dimensions.append(
+            {
+                "dimension": "Color",
+                "detected_values": color_hits,
+                "canonical_values": [item.title() for item in sorted(set(color_hits))],
+                "evidence_sources": ["title" if any(re.search(rf"\b{re.escape(t)}\b", title_lower) for t in color_hits) else "description"],
+                "confidence": 0.84,
+            }
+        )
+
+    material_hits = [token for token in _MATERIAL_TOKENS if re.search(rf"\b{re.escape(token)}\b", merged_text)]
+    if material_hits and "material" not in existing_option_names:
+        dimensions.append(
+            {
+                "dimension": "Material",
+                "detected_values": material_hits,
+                "canonical_values": [item.title() for item in sorted(set(material_hits))],
+                "evidence_sources": ["title" if any(re.search(rf"\b{re.escape(t)}\b", title_lower) for t in material_hits) else "description"],
+                "confidence": 0.82,
+            }
+        )
+
+    return dimensions
+
+
+def _derive_sku_prefix(product: dict[str, Any], title: str) -> str:
+    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        sku = _to_text(variant.get("sku"))
+        if not sku:
+            continue
+        for sep in ("-", "_", "/"):
+            if sep in sku:
+                prefix = sku.rsplit(sep, 1)[0].strip()
+                if prefix:
+                    return prefix
+        return sku
+    normalized_title = re.sub(r"[^A-Za-z0-9]+", "-", title).strip("-").upper()
+    return normalized_title[:24] if normalized_title else "SKU"
+
+
+def _sanitize_sku_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").upper()
+    return token or "OPT"
+
+
+def _build_variant_operations(
+    *,
+    product: dict[str, Any],
+    title: str,
+    dimensions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    create_options = [
+        {
+            "name": item["dimension"],
+            "values": item["canonical_values"],
+        }
+        for item in dimensions
+        if item.get("canonical_values")
+    ]
+
+    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    baseline = variants[0] if variants and isinstance(variants[0], dict) else {}
+    primary = dimensions[0] if dimensions else {"dimension": "Size", "canonical_values": []}
+    option_name = str(primary.get("dimension") or "Size")
+    sku_prefix = _derive_sku_prefix(product, title)
+
+    create_variants: list[dict[str, Any]] = []
+    for raw_value in primary.get("canonical_values") or []:
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        variant_payload: dict[str, Any] = {
+            "option_values": [{"option_name": option_name, "name": value}],
+            "sku": f"{sku_prefix}-{_sanitize_sku_token(value)}",
+        }
+        price = baseline.get("price") if isinstance(baseline, dict) else None
+        if price not in (None, ""):
+            variant_payload["price"] = str(price)
+        inventory_quantity = baseline.get("inventory_quantity") if isinstance(baseline, dict) else None
+        if isinstance(inventory_quantity, int):
+            variant_payload["inventory_quantity"] = inventory_quantity
+        create_variants.append(variant_payload)
+
+    return {
+        "create_options": create_options,
+        "create_variants": create_variants,
+        "defaults": {
+            "copy_from_first_variant": True,
+            "requires_review": True,
+        },
+    }
+
+
 def _metafield(namespace: str, key: str, value: Any, mf_type: str = "single_line_text_field") -> dict[str, str]:
     return {
         "namespace": namespace,
@@ -179,10 +345,12 @@ def _create_normalization_suggestion(
     message: str,
     severity: str,
     confidence: float,
-    metafields: list[dict[str, str]],
+    metafields: list[dict[str, str]] | None,
     details: dict[str, Any],
     shop_domain: str,
+    patch_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    payload = patch_payload if isinstance(patch_payload, dict) and patch_payload else {"metafields": metafields or []}
     return {
         "suggestion_id": str(uuid.uuid4()),
         "finding_id": str(uuid.uuid4()),
@@ -191,7 +359,7 @@ def _create_normalization_suggestion(
         "category": _NORMALIZATION_CATEGORIES[category_key],
         "severity": severity,
         "message": message,
-        "patch_payload": {"metafields": metafields},
+        "patch_payload": payload,
         "details": {**details, "confidence": confidence, "rule_id": category_key},
         "status": "pending",
         "shop_domain": shop_domain,
@@ -233,6 +401,7 @@ def _build_normalization_suggestions(
         body = _strip_html(_to_text(product.get("body_html") or product.get("descriptionHtml")))
         body_lower = body.lower()
         size_tokens = _collect_variant_size_tokens(product)
+        existing_option_names = _extract_existing_option_names(product)
 
         canonical_sizes: list[str] = []
         alias_pairs: list[tuple[str, str]] = []
@@ -462,6 +631,63 @@ def _build_normalization_suggestions(
                     shop_domain=shop_domain,
                 )
             )
+
+        inferred_dimensions = _extract_inferred_dimensions(
+            title=title,
+            body=body,
+            existing_option_names=existing_option_names,
+        )
+        if inferred_dimensions and allowed("missing_options", 0.86):
+            evidence_sources = sorted(
+                {
+                    source
+                    for item in inferred_dimensions
+                    for source in item.get("evidence_sources", [])
+                    if isinstance(source, str) and source
+                }
+            )
+            variant_operations = _build_variant_operations(
+                product=product,
+                title=title,
+                dimensions=inferred_dimensions,
+            )
+            if variant_operations.get("create_variants"):
+                suggestions.append(
+                    _create_normalization_suggestion(
+                        product_index=index,
+                        product_title=title,
+                        category_key="missing_options",
+                        message="Detected missing option dimensions; suggest creating normalized product options and variants.",
+                        severity="medium",
+                        confidence=0.86,
+                        metafields=[
+                            _metafield(
+                                "extractor",
+                                "inferred_option_candidates",
+                                json.dumps(inferred_dimensions),
+                                "json",
+                            )
+                        ],
+                        patch_payload={
+                            "variant_operations": variant_operations,
+                            "metafields": [
+                                _metafield(
+                                    "extractor",
+                                    "inferred_option_candidates",
+                                    json.dumps(inferred_dimensions),
+                                    "json",
+                                )
+                            ],
+                        },
+                        details={
+                            "detected_value": [item.get("detected_values") for item in inferred_dimensions],
+                            "canonical_value": [item.get("canonical_values") for item in inferred_dimensions],
+                            "evidence_sources": evidence_sources,
+                            "inferred_dimensions": inferred_dimensions,
+                        },
+                        shop_domain=shop_domain,
+                    )
+                )
 
     return suggestions
 

@@ -63,6 +63,39 @@ def _resolve_model_env(model_env: Dict[str, str] | None) -> dict[str, str]:
     return resolved
 
 
+def _collect_product_image_uris(products: list[dict[str, Any]], *, limit: int = 12) -> list[str]:
+    uris: list[str] = []
+    seen: set[str] = set()
+
+    def _add_uri(raw: Any) -> None:
+        if not isinstance(raw, str):
+            return
+        uri = raw.strip()
+        if not uri or uri in seen:
+            return
+        if not (uri.startswith("https://") or uri.startswith("http://") or uri.startswith("data:image/")):
+            return
+        seen.add(uri)
+        uris.append(uri)
+
+    for product in products:
+        if not isinstance(product, dict):
+            continue
+        featured = product.get("featured_image")
+        if isinstance(featured, dict):
+            _add_uri(featured.get("url") or featured.get("src"))
+        images = product.get("images")
+        if isinstance(images, list):
+            for image in images:
+                if not isinstance(image, dict):
+                    continue
+                _add_uri(image.get("url") or image.get("src"))
+        if len(uris) >= limit:
+            break
+
+    return uris[:limit]
+
+
 def _create_chat_client(model_env: Dict[str, str] | None) -> OpenAIChatClient:
     env = _resolve_model_env(model_env)
 
@@ -180,7 +213,7 @@ async def run_agent_on_inputs(
         trace_event,
         phase="llm_request",
         message="Calling LLM for product extraction",
-        payload_preview={"prompt_preview": full_prompt[:700]},
+        payload_preview={"prompt_preview": full_prompt[:700], "image_uris_count": len(image_uris)},
         transcript_role="user",
         transcript_text=full_prompt,
         transcript_meta={"call": "extractor"},
@@ -238,7 +271,7 @@ async def run_product_intelligence_suggestions(
         trace_event,
         phase="llm_prepare",
         message="Preparing product intelligence suggestion request",
-        payload_preview={"products_count": len(products)},
+        payload_preview={"products_count": len(products), "image_uris_count": len(_collect_product_image_uris(products))},
         metadata={
             "model_name": _resolve_model_env(model_env).get(
                 "OLLAMA_MODEL_ID", "deepseek-r1:8b"
@@ -258,12 +291,16 @@ async def run_product_intelligence_suggestions(
         instructions=instructions,
         response_format=ProductIntelligenceSuggestionsList,
     )
-    user_message = ChatMessage(role="user", contents=[TextContent(text=full_prompt)])
+    image_uris = _collect_product_image_uris(products)
+    contents: list[DataContent | TextContent] = [TextContent(text=full_prompt)]
+    if image_uris:
+        contents.extend(DataContent(uri=uri) for uri in image_uris)
+    user_message = ChatMessage(role="user", contents=contents)
     _trace(
         trace_event,
         phase="llm_request",
         message="Calling LLM for product intelligence suggestions",
-        payload_preview={"prompt_preview": full_prompt[:700]},
+        payload_preview={"prompt_preview": full_prompt[:700], "image_uris_count": len(image_uris)},
         transcript_role="user",
         transcript_text=full_prompt,
         transcript_meta={"call": "product-intelligence-suggestions"},

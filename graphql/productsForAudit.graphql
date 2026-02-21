@@ -19,9 +19,36 @@ query productsForAudit($first: Int!, $after: String, $query: String) {
           title
           description
         }
-        variants(first: 20) {
+        options {
+          id
+          name
+          position
+          optionValues {
+            name
+            hasVariants
+          }
+        }
+        featuredImage {
+          url
+          altText
+        }
+        images(first: 10) {
           nodes {
+            url
+            altText
+          }
+        }
+        variants(first: 50) {
+          nodes {
+            id
+            title
             sku
+            price
+            inventoryQuantity
+            selectedOptions {
+              name
+              value
+            }
           }
         }
       }

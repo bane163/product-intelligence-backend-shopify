@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from application.ports.shopify_port import ShopifyPort
@@ -17,6 +18,12 @@ from application.use_cases.intelligence_apply_suggestion import (
     _resolve_product_gid,
     _resolve_suggestion_product,
 )
+
+
+def _normalize_created_variant_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _clear_value_for_field(field: str) -> Any:
@@ -83,8 +90,39 @@ async def execute(
     if not isinstance(patch_payload, dict) or not patch_payload:
         raise ValueError("Suggestion has no patch payload to revert")
     restore_payload: dict[str, Any] = {}
+    variant_reverted = False
     revert_modes = previous_payload.get(REVERT_MODES_KEY)
     for field in patch_payload.keys():
+        if field == "variant_operations":
+            variant_previous = previous_payload.get("variant_operations")
+            created_variant_ids = _normalize_created_variant_ids(
+                variant_previous.get("created_variant_ids")
+                if isinstance(variant_previous, dict)
+                else None
+            )
+            if created_variant_ids:
+                delete_response = await shopify.bulk_delete_product_variants(
+                    gid, created_variant_ids
+                )
+                delete_errors = (
+                    delete_response.get("data", {})
+                    .get("productVariantsBulkDelete", {})
+                    .get("userErrors", [])
+                    if isinstance(delete_response, dict)
+                    else []
+                )
+                error_messages = [
+                    str(item.get("message") or "").strip()
+                    for item in delete_errors
+                    if isinstance(item, dict) and str(item.get("message") or "").strip()
+                ]
+                if error_messages:
+                    raise ValueError(
+                        "Failed reverting created variants: " + ", ".join(error_messages)
+                    )
+                variant_reverted = True
+            continue
+
         update_field = _normalize_revert_field(field)
         mode = revert_modes.get(field) if isinstance(revert_modes, dict) else None
         if mode == REVERT_MODE_CLEAR:
@@ -108,17 +146,31 @@ async def execute(
             restore_payload[update_field] = _clear_value_for_field(field)
         else:
             restore_payload[update_field] = original_value
-    if not restore_payload:
+
+    if restore_payload:
+        await shopify.update_product_from_input({"id": gid, **restore_payload})
+    if not restore_payload and not variant_reverted:
         raise ValueError("Suggestion has no reversible fields")
 
-    await shopify.update_product_from_input({"id": gid, **restore_payload})
+    reverted = None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            reverted = supabase.mark_product_intelligence_suggestion_pending(
+                suggestion_id=suggestion_id,
+                shop_domain=shop_domain,
+            )
+            if reverted:
+                break
+        except Exception as exc:
+            last_error = exc
+        if attempt < 2:
+            await asyncio.sleep(0.25 * (2**attempt))
 
-    reverted = supabase.mark_product_intelligence_suggestion_pending(
-        suggestion_id=suggestion_id,
-        shop_domain=shop_domain,
-    )
     if not reverted:
-        raise RuntimeError("Failed to mark suggestion as pending")
+        if last_error is not None:
+            raise RuntimeError("Failed to mark suggestion as pending after retries") from last_error
+        raise RuntimeError("Failed to mark suggestion as pending after retries")
 
     return {
         "status": "pending",

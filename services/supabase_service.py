@@ -22,6 +22,7 @@ NORMALIZATION_CATEGORY_KEYS = (
     "variant_ordering",
     "description_extraction",
     "children_size",
+    "missing_options",
 )
 
 

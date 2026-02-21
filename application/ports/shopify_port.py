@@ -16,6 +16,18 @@ class ShopifyPort(Protocol):
 
     async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]: ...
 
+    async def create_product_options(
+        self, product_id: str, options: list[Dict[str, Any]]
+    ) -> Dict[str, Any]: ...
+
+    async def bulk_create_product_variants(
+        self, product_id: str, variants: list[Dict[str, Any]]
+    ) -> Dict[str, Any]: ...
+
+    async def bulk_delete_product_variants(
+        self, product_id: str, variant_ids: list[str]
+    ) -> Dict[str, Any]: ...
+
     async def list_products_for_audit(
         self, query: Optional[str] = None, limit: int = 50
     ) -> list[Dict[str, Any]]: ...

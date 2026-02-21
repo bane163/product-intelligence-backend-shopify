@@ -295,6 +295,73 @@ class ShopifyClient:
             return []
         return [item for item in metafields if isinstance(item, dict)]
 
+    async def create_product_options(
+        self, product_id: str, options: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        if not options:
+            return {"data": {"productOptionsCreate": {"product": None, "userErrors": []}}}
+        mutation = _load_graphql("productOptionsCreate.graphql")
+        normalized_options: List[Dict[str, Any]] = []
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            name = str(option.get("name") or "").strip()
+            raw_values = option.get("values")
+            values = [str(item).strip() for item in raw_values if str(item).strip()] if isinstance(raw_values, list) else []
+            if not name or not values:
+                continue
+            normalized_options.append({"name": name, "values": [{"name": value} for value in values]})
+        if not normalized_options:
+            return {"data": {"productOptionsCreate": {"product": None, "userErrors": []}}}
+        return await self.graphql(mutation, {"productId": product_id, "options": normalized_options})
+
+    async def bulk_create_product_variants(
+        self, product_id: str, variants: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        if not variants:
+            return {"data": {"productVariantsBulkCreate": {"productVariants": [], "userErrors": []}}}
+        mutation = _load_graphql("productVariantsBulkCreate.graphql")
+        normalized_variants: List[Dict[str, Any]] = []
+        for item in variants:
+            if not isinstance(item, dict):
+                continue
+            option_values = item.get("option_values")
+            if not isinstance(option_values, list):
+                option_values = []
+            normalized_option_values: List[Dict[str, str]] = []
+            for option in option_values:
+                if not isinstance(option, dict):
+                    continue
+                option_name = str(option.get("option_name") or option.get("optionName") or "").strip()
+                name = str(option.get("name") or option.get("value") or "").strip()
+                if option_name and name:
+                    normalized_option_values.append({"optionName": option_name, "name": name})
+            if not normalized_option_values:
+                continue
+            payload: Dict[str, Any] = {"optionValues": normalized_option_values}
+            sku = str(item.get("sku") or "").strip()
+            if sku:
+                payload["sku"] = sku
+            price = item.get("price")
+            if price not in (None, ""):
+                payload["price"] = str(price)
+            inventory_quantity = item.get("inventory_quantity")
+            if isinstance(inventory_quantity, int):
+                payload["inventoryQuantities"] = [{"availableQuantity": inventory_quantity}]
+            normalized_variants.append(payload)
+        if not normalized_variants:
+            return {"data": {"productVariantsBulkCreate": {"productVariants": [], "userErrors": []}}}
+        return await self.graphql(mutation, {"productId": product_id, "variants": normalized_variants})
+
+    async def bulk_delete_product_variants(
+        self, product_id: str, variant_ids: List[str]
+    ) -> Dict[str, Any]:
+        normalized_ids = [str(item).strip() for item in variant_ids if str(item).strip()]
+        if not normalized_ids:
+            return {"data": {"productVariantsBulkDelete": {"userErrors": []}}}
+        mutation = _load_graphql("productVariantsBulkDelete.graphql")
+        return await self.graphql(mutation, {"productId": product_id, "variantsIds": normalized_ids})
+
     async def update_product(
         self, gid: str, title: Optional[str] = None, body_html: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -368,6 +435,9 @@ class ShopifyClient:
                 if not isinstance(node, dict):
                     continue
                 seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
+                options = node.get("options") if isinstance(node.get("options"), list) else []
+                images = node.get("images") if isinstance(node.get("images"), dict) else {}
+                image_nodes = images.get("nodes") if isinstance(images.get("nodes"), list) else []
                 variants = node.get("variants") if isinstance(node.get("variants"), dict) else {}
                 variant_nodes = (
                     variants.get("nodes") if isinstance(variants.get("nodes"), list) else []
@@ -384,8 +454,45 @@ class ShopifyClient:
                         "body_html": node.get("descriptionHtml"),
                         "seo_title": seo.get("title"),
                         "seo_description": seo.get("description"),
+                        "options": [
+                            {
+                                "id": option.get("id"),
+                                "name": option.get("name"),
+                                "position": option.get("position"),
+                                "values": option.get("optionValues")
+                                if isinstance(option.get("optionValues"), list)
+                                else [],
+                            }
+                            for option in options
+                            if isinstance(option, dict)
+                        ],
+                        "featured_image": (
+                            {
+                                "url": node.get("featuredImage", {}).get("url"),
+                                "altText": node.get("featuredImage", {}).get("altText"),
+                            }
+                            if isinstance(node.get("featuredImage"), dict)
+                            else None
+                        ),
+                        "images": [
+                            {
+                                "url": item.get("url"),
+                                "altText": item.get("altText"),
+                            }
+                            for item in image_nodes
+                            if isinstance(item, dict)
+                        ],
                         "variants": [
-                            {"sku": item.get("sku")}
+                            {
+                                "id": item.get("id"),
+                                "title": item.get("title"),
+                                "sku": item.get("sku"),
+                                "price": item.get("price"),
+                                "inventory_quantity": item.get("inventoryQuantity"),
+                                "selectedOptions": item.get("selectedOptions")
+                                if isinstance(item.get("selectedOptions"), list)
+                                else [],
+                            }
                             for item in variant_nodes
                             if isinstance(item, dict)
                         ],

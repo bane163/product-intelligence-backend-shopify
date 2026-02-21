@@ -28,6 +28,21 @@ class ShopifyAdapter:
     async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
         return await self._client.update_product_from_input(product)
 
+    async def create_product_options(
+        self, product_id: str, options: list[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return await self._client.create_product_options(product_id, options)
+
+    async def bulk_create_product_variants(
+        self, product_id: str, variants: list[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        return await self._client.bulk_create_product_variants(product_id, variants)
+
+    async def bulk_delete_product_variants(
+        self, product_id: str, variant_ids: list[str]
+    ) -> Dict[str, Any]:
+        return await self._client.bulk_delete_product_variants(product_id, variant_ids)
+
     async def list_products_for_audit(
         self, query: str | None = None, limit: int = 50
     ) -> list[Dict[str, Any]]:

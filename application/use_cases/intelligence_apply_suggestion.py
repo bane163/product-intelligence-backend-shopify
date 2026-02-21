@@ -143,6 +143,107 @@ def _normalize_metafields_payload(raw: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_variant_operations(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    create_options_raw = raw.get("create_options")
+    create_options: list[dict[str, Any]] = []
+    if isinstance(create_options_raw, list):
+        for option in create_options_raw:
+            if not isinstance(option, dict):
+                continue
+            name = str(option.get("name") or "").strip()
+            values_raw = option.get("values")
+            values = [str(item).strip() for item in values_raw if str(item).strip()] if isinstance(values_raw, list) else []
+            if name and values:
+                create_options.append({"name": name, "values": values})
+
+    create_variants_raw = raw.get("create_variants")
+    create_variants: list[dict[str, Any]] = []
+    if isinstance(create_variants_raw, list):
+        for variant in create_variants_raw:
+            if not isinstance(variant, dict):
+                continue
+            option_values_raw = variant.get("option_values")
+            option_values = [item for item in option_values_raw if isinstance(item, dict)] if isinstance(option_values_raw, list) else []
+            if not option_values:
+                continue
+            payload: dict[str, Any] = {"option_values": option_values}
+            sku = str(variant.get("sku") or "").strip()
+            if sku:
+                payload["sku"] = sku
+            price = variant.get("price")
+            if price not in (None, ""):
+                payload["price"] = str(price)
+            inventory_quantity = variant.get("inventory_quantity")
+            if isinstance(inventory_quantity, int):
+                payload["inventory_quantity"] = inventory_quantity
+            create_variants.append(payload)
+
+    defaults = raw.get("defaults") if isinstance(raw.get("defaults"), dict) else {}
+    return {
+        "create_options": create_options,
+        "create_variants": create_variants,
+        "defaults": defaults,
+    }
+
+
+def _extract_user_errors(response: dict[str, Any], path: list[str]) -> list[str]:
+    cursor: Any = response
+    for key in path:
+        if not isinstance(cursor, dict):
+            return []
+        cursor = cursor.get(key)
+    if not isinstance(cursor, list):
+        return []
+    messages: list[str] = []
+    for item in cursor:
+        if isinstance(item, dict):
+            message = str(item.get("message") or "").strip()
+            if message:
+                messages.append(message)
+    return messages
+
+
+async def _apply_variant_operations(
+    *,
+    shopify: ShopifyPort,
+    product_id: str,
+    variant_operations: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = _normalize_variant_operations(variant_operations)
+    created_option_names: list[str] = []
+    created_variant_ids: list[str] = []
+
+    create_options = normalized.get("create_options") if isinstance(normalized.get("create_options"), list) else []
+    if create_options:
+        options_resp = await shopify.create_product_options(product_id, create_options)
+        errors = _extract_user_errors(options_resp, ["data", "productOptionsCreate", "userErrors"])
+        if errors:
+            raise ValueError(f"Failed creating product options: {', '.join(errors)}")
+        created_option_names = [str(item.get("name") or "").strip() for item in create_options if isinstance(item, dict) and str(item.get("name") or "").strip()]
+
+    create_variants = normalized.get("create_variants") if isinstance(normalized.get("create_variants"), list) else []
+    if create_variants:
+        variants_resp = await shopify.bulk_create_product_variants(product_id, create_variants)
+        errors = _extract_user_errors(variants_resp, ["data", "productVariantsBulkCreate", "userErrors"])
+        if errors:
+            raise ValueError(f"Failed creating product variants: {', '.join(errors)}")
+        created_variants = variants_resp.get("data", {}).get("productVariantsBulkCreate", {}).get("productVariants", []) if isinstance(variants_resp, dict) else []
+        if isinstance(created_variants, list):
+            for item in created_variants:
+                if not isinstance(item, dict):
+                    continue
+                variant_id = str(item.get("id") or "").strip()
+                if variant_id:
+                    created_variant_ids.append(variant_id)
+
+    return {
+        "created_option_names": created_option_names,
+        "created_variant_ids": created_variant_ids,
+    }
+
+
 def _build_previous_payload(
     *,
     patch_payload: dict[str, Any],
@@ -156,6 +257,10 @@ def _build_previous_payload(
     assert isinstance(revert_modes, dict)
 
     for key in patch_payload.keys():
+        if key == "variant_operations":
+            previous_payload[key] = {}
+            revert_modes[key] = REVERT_MODE_RESTORE
+            continue
         if key == "metafields":
             previous_metafields: list[dict[str, Any]] = []
             requested_metafields = _normalize_metafields_payload(patch_payload.get(key))
@@ -287,6 +392,7 @@ async def execute(
         saved_patch_payload=saved_patch_payload,
         applied_patch_payload=effective_patch_payload,
     )
+    variant_operations = _normalize_variant_operations(effective_patch_payload.get("variant_operations"))
 
     audit_id = suggestion.get("audit_id")
     if not isinstance(audit_id, str) or not audit_id:
@@ -327,7 +433,20 @@ async def execute(
         fallback_product=current_product,
         existing_metafields=existing_metafield_map,
     )
-    await shopify.update_product_from_input({"id": gid, **effective_patch_payload})
+    variant_operation_result = {}
+    if variant_operations.get("create_options") or variant_operations.get("create_variants"):
+        variant_operation_result = await _apply_variant_operations(
+            shopify=shopify,
+            product_id=gid,
+            variant_operations=variant_operations,
+        )
+        previous_payload["variant_operations"] = variant_operation_result
+
+    shopify_patch_payload = {
+        key: value for key, value in effective_patch_payload.items() if key != "variant_operations"
+    }
+    if shopify_patch_payload:
+        await shopify.update_product_from_input({"id": gid, **shopify_patch_payload})
 
     applied = supabase.mark_product_intelligence_suggestion_applied(
         suggestion_id=suggestion_id,

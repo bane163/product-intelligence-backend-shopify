@@ -300,7 +300,7 @@ async def run_product_intelligence_suggestions(
         trace_event,
         phase="llm_request",
         message="Calling LLM for product intelligence suggestions",
-        payload_preview={"prompt_preview": full_prompt[:700], "image_uris_count": len(data_content_list) + len(png_b64s)},
+        payload_preview={"prompt_preview": full_prompt[:700], "image_uris_count": len(image_uris)},
         transcript_role="user",
         transcript_text=full_prompt,
         transcript_meta={"call": "product-intelligence-suggestions"},

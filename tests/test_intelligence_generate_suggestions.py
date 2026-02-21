@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import application.use_cases.intelligence_generate_suggestions as intelligence_generate_suggestions_uc
 from application.use_cases.intelligence_generate_suggestions import execute
 
 
@@ -74,3 +75,42 @@ async def test_generate_suggestions_requires_active_model_config():
             products=[{"id": "gid://shopify/Product/1", "title": "Catalog Product"}],
             shop_domain="store.myshopify.com",
         )
+
+
+@pytest.mark.asyncio
+async def test_product_intelligence_suggestions_trace_payload_uses_image_uris(monkeypatch):
+    traces = []
+    run_product_intelligence_suggestions = (
+        intelligence_generate_suggestions_uc.run_product_intelligence_suggestions
+    )
+
+    class _FakeAgent:
+        async def run(self, user_message):
+            _ = user_message
+            return SimpleNamespace(value={"suggestions": []}, text="", usage=None)
+
+    class _FakeClient:
+        def create_agent(self, **kwargs):
+            _ = kwargs
+            return _FakeAgent()
+
+    monkeypatch.setitem(
+        run_product_intelligence_suggestions.__globals__,
+        "_create_chat_client",
+        lambda model_env: _FakeClient(),
+    )
+    monkeypatch.setitem(
+        run_product_intelligence_suggestions.__globals__,
+        "render_prompt",
+        lambda template, **kwargs: "instructions" if "instructions" in template else "user prompt",
+    )
+
+    response = await run_product_intelligence_suggestions(
+        products=[{"title": "Catalog Product", "images": [{"src": "data:image/png;base64,AAAA"}]}],
+        model_env={"OLLAMA_API_KEY": "secret"},
+        trace_event=lambda **kwargs: traces.append(kwargs),
+    )
+
+    assert response.value == {"suggestions": []}
+    request_trace = next(item for item in traces if item.get("phase") == "llm_request")
+    assert request_trace["payload_preview"]["image_uris_count"] == 1

@@ -1,14 +1,11 @@
 """Shopify submission routes."""
 
-import uuid
-from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException
 
 from app_context import AppContext, get_ctx
-from shopify import ShopifyClient
-from .utils import parse_products_json
+from shopify import ShopifyClient  # kept for route-level monkeypatch compatibility in tests
 
 router = APIRouter()
 
@@ -22,6 +19,7 @@ async def submit_products_to_shopify(
     document_name: str | None = Form(None),
     shop_domain: str | None = Form(None),
     shop_access_token: str | None = Form(None),
+    enable_ai_enhancements: bool = Form(False),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.processing.submit_products import execute as submit_execute
@@ -38,10 +36,10 @@ async def submit_products_to_shopify(
             document_name=document_name,
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
+            enable_ai_enhancements=enable_ai_enhancements,
         )
         return result
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-

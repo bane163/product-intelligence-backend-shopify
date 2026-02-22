@@ -144,11 +144,9 @@ async def process_excel(
     run_id: str | None = Form(None),
     file_id: str | None = Form(None),
     file: UploadFile | None = File(None),
-    prompt: str = Form("Please analyze the document and the associated image(s)."),
     collabora_url: str | None = Form(None),
     write_to_file: bool = Form(False),
     output_path: str | None = Form(None),
-    writer_prompt: str | None = Form(None),
     shop_domain: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
@@ -200,11 +198,9 @@ async def process_excel(
         input_name=input_name,
         input_content_type=input_content_type,
         run_id=run_id,
-        prompt=prompt,
         collabora_url=collabora_url,
         write_to_file=write_to_file,
         output_path=output_path,
-        writer_prompt=writer_prompt,
         shop_domain=shop_domain,
     )
 

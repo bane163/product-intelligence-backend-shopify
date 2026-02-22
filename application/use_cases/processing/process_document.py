@@ -9,6 +9,9 @@ from application.ports.llm_port import LLMPort
 from application.ports.supabase_port import SupabasePort
 from application.ports.tracing_port import TracingPort
 
+DEFAULT_IMPORT_AGENT_PROMPT = "Please analyze the document and the associated image(s)."
+DEFAULT_IMPORT_WRITER_PROMPT: str | None = None
+
 
 async def execute(
     supabase: SupabasePort,
@@ -19,11 +22,9 @@ async def execute(
     input_name: str | None = None,
     input_content_type: str | None = None,
     run_id: str | None = None,
-    prompt: str = "Please analyze the document and the associated image(s).",
     collabora_url: str | None = None,
     write_to_file: bool = False,
     output_path: str | None = None,
-    writer_prompt: str | None = None,
     shop_domain: str | None = None,
 ):
     """Extracted application use-case for processing an uploaded document.
@@ -56,8 +57,8 @@ async def execute(
             "status": "running",
             "source": "document_import",
             "started_at": started_at.isoformat(),
-            "prompt": prompt,
-            "writer_prompt": writer_prompt,
+            "prompt": DEFAULT_IMPORT_AGENT_PROMPT,
+            "writer_prompt": DEFAULT_IMPORT_WRITER_PROMPT,
         },
     )
     try:
@@ -133,11 +134,11 @@ async def execute(
         result = await llm.run_excel_agent_workflow(
             file_bytes,
             collabora_base_url=collabora_url,
-            agent_prompt=prompt,
+            agent_prompt=DEFAULT_IMPORT_AGENT_PROMPT,
             model_env=model_env,
             write_to_file=write_to_file,
             output_path=final_output_path,
-            writer_agent_prompt=writer_prompt,
+            writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,
             trace_event=trace_event,
         )
         emit_and_persist(phase="workflow_done", message="Document workflow completed")

@@ -64,6 +64,13 @@ class ProductImage(BaseModel):
     position: Optional[int] = None
 
 
+class ProductMetafield(BaseModel):
+    namespace: str
+    key: str
+    value: str
+    type: Optional[str] = None
+
+
 class ProductInput(BaseModel):
     """Model aligning with product_template.csv columns.
 
@@ -84,6 +91,7 @@ class ProductInput(BaseModel):
     options: Optional[List[ProductOption]] = None
     variants: Optional[List[ProductVariant]] = None
     images: Optional[List[ProductImage]] = None
+    metafields: Optional[List[ProductMetafield]] = None
 
     # Product-level image and metadata fields
     image_src: Optional[str] = None
@@ -150,6 +158,7 @@ __all__ = [
     "ProductOption",
     "ProductVariant",
     "ProductImage",
+    "ProductMetafield",
     "ProductInput",
     "ProductsList",
     "ProductIntelligenceSuggestionDraft",

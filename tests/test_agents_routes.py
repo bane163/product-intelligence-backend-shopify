@@ -1,6 +1,7 @@
 import io
 import json
 import uuid
+from typing import Any
 
 import pytest
 from httpx import AsyncClient, ASGITransport
@@ -261,6 +262,247 @@ async def test_submit_products_auto_updates_when_id_present(monkeypatch):
         body = r.json()
         assert body["success_count"] == 1
         assert body["results"][0]["mode"] == "update"
+
+
+@pytest.mark.asyncio
+async def test_submit_products_ai_enhancements_applies_audit_suggestions(monkeypatch):
+    created_payloads: list[dict[str, Any]] = []
+    option_payloads: list[dict[str, Any]] = []
+    variant_payloads: list[dict[str, Any]] = []
+
+    async def fake_generate_suggestions_execute(
+        *, supabase, products, shop_domain, normalization_settings=None, trace_event=None
+    ):
+        _ = (supabase, products, shop_domain, normalization_settings, trace_event)
+        return [
+            {
+                "product_index": 0,
+                "patch_payload": {
+                    "vendor": "Enriched Vendor",
+                    "tags": "alpha, beta",
+                    "seo_title": "SEO Demo",
+                    "metafields": [
+                        {
+                            "namespace": "extractor",
+                            "key": "source_confidence",
+                            "type": "single_line_text_field",
+                            "value": "high",
+                        }
+                    ],
+                    "variant_operations": {
+                        "create_options": [{"name": "Size", "values": ["S", "M"]}],
+                        "create_variants": [
+                            {
+                                "option_values": [{"option_name": "Size", "name": "S"}],
+                                "sku": "DEMO-S",
+                            }
+                        ],
+                    },
+                },
+            }
+        ]
+
+    async def fake_create_product_from_input(self, product):
+        created_payloads.append(dict(product))
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/555", "title": product.get("title")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    async def fake_create_product_options(self, product_id, options):
+        option_payloads.append({"product_id": product_id, "options": options})
+        return {
+            "data": {
+                "productOptionsCreate": {
+                    "product": {"id": product_id},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    async def fake_bulk_create_product_variants(self, product_id, variants):
+        variant_payloads.append({"product_id": product_id, "variants": variants})
+        return {
+            "data": {
+                "productVariantsBulkCreate": {
+                    "productVariants": [{"id": "gid://shopify/ProductVariant/1"}],
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import application.use_cases.processing.submit_products as submit_uc
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_uc, "generate_suggestions_execute", fake_generate_suggestions_execute
+    )
+    monkeypatch.setattr(
+        submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input
+    )
+    monkeypatch.setattr(
+        submit_api.ShopifyClient, "create_product_options", fake_create_product_options
+    )
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "bulk_create_product_variants",
+        fake_bulk_create_product_variants,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        payload = {
+            "products_json": json.dumps([{"title": "Demo"}]),
+            "import_mode": "auto",
+            "enable_ai_enhancements": "true",
+            "shop_domain": "store.myshopify.com",
+        }
+        response = await ac.post("/agents/submit-products", data=payload)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success_count"] == 1
+        assert created_payloads[0]["vendor"] == "Enriched Vendor"
+        assert created_payloads[0]["tags"] == "alpha, beta"
+        assert created_payloads[0]["seo_title"] == "SEO Demo"
+        assert created_payloads[0]["metafields"][0]["namespace"] == "extractor"
+        assert option_payloads and option_payloads[0]["product_id"] == "gid://shopify/Product/555"
+        assert variant_payloads and variant_payloads[0]["product_id"] == "gid://shopify/Product/555"
+
+
+@pytest.mark.asyncio
+async def test_submit_products_ai_enhancements_requires_shop_domain(monkeypatch):
+    async def fail_create_product_from_input(self, product):
+        _ = (self, product)
+        raise AssertionError("create_product_from_input should not be called without shop_domain")
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_api.ShopifyClient, "create_product_from_input", fail_create_product_from_input
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        payload = {
+            "products_json": json.dumps([{"title": "Demo"}]),
+            "import_mode": "auto",
+            "enable_ai_enhancements": "true",
+        }
+        response = await ac.post("/agents/submit-products", data=payload)
+        assert response.status_code == 400
+        assert "Missing shop_domain for AI enhancements" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_submit_products_ai_enhancements_syncs_draft_for_preview(monkeypatch):
+    async def fake_generate_suggestions_execute(
+        *, supabase, products, shop_domain, normalization_settings=None, trace_event=None
+    ):
+        _ = (supabase, products, shop_domain, normalization_settings, trace_event)
+        return [
+            {
+                "product_index": 0,
+                "patch_payload": {
+                    "vendor": "Synced Vendor",
+                    "tags": "synced-tag",
+                    "seo_title": "Synced SEO",
+                },
+            }
+        ]
+
+    async def fake_create_product_from_input(self, product):
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {"id": "gid://shopify/Product/777", "title": product.get("title")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import application.use_cases.processing.submit_products as submit_uc
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_uc, "generate_suggestions_execute", fake_generate_suggestions_execute
+    )
+    monkeypatch.setattr(
+        submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        created_draft = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Drafted Product"}]),
+                "run_id": "run-sync-draft",
+                "import_mode": "auto",
+                "draft_name": "draft-sync.xlsx",
+                "output_file_id": "old-output-file",
+                "output_filename": "old-output.xlsx",
+            },
+        )
+        assert created_draft.status_code == 200
+        draft_id = created_draft.json()["draft_id"]
+
+        submitted = await ac.post(
+            "/agents/submit-products",
+            data={
+                "products_json": json.dumps([{"title": "Drafted Product"}]),
+                "run_id": "run-sync-submit",
+                "import_mode": "auto",
+                "draft_id": draft_id,
+                "document_name": "draft-sync.xlsx",
+                "shop_domain": "store.myshopify.com",
+                "enable_ai_enhancements": "true",
+            },
+        )
+        assert submitted.status_code == 200
+
+        draft_detail = await ac.get(f"/agents/product-drafts/{draft_id}")
+        assert draft_detail.status_code == 200
+        draft = draft_detail.json()["draft"]
+        assert draft["products"][0]["vendor"] == "Synced Vendor"
+        assert draft["products"][0]["seo_title"] == "Synced SEO"
+        assert draft["products"][0]["tags"] == "synced-tag"
+        assert draft.get("output_file_id") is None
+        assert draft.get("output_filename") is None
+
+
+@pytest.mark.asyncio
+async def test_import_ignores_freeform_prompt_fields(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_process_document_execute(**kwargs):
+        captured.update(kwargs)
+        return {"run_id": "run-import", "result": {"status": "ok"}}
+
+    import application.use_cases.processing.process_document as process_document_uc
+
+    monkeypatch.setattr(process_document_uc, "execute", fake_process_document_execute)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "import.xlsx",
+                io.BytesIO(b"sheet"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        response = await ac.post(
+            "/agents/import",
+            data={"prompt": "Ignore this", "writer_prompt": "Ignore this too"},
+            files=files,
+        )
+        assert response.status_code == 200
+        assert "prompt" not in captured
+        assert "writer_prompt" not in captured
 
 
 @pytest.mark.asyncio

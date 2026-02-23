@@ -28,7 +28,9 @@ NORMALIZATION_CATEGORY_KEYS = (
 
 class SupabaseService(SupabaseServiceInterface):
     def __init__(self, bucket_name: str | None = None):
-        self.bucket_name = bucket_name or os.environ.get("FILES_BUCKET_NAME", "documents")
+        self.bucket_name = bucket_name or os.environ.get(
+            "FILES_BUCKET_NAME", "documents"
+        )
         self.file_storage: dict[str, dict[str, Any]] = {}
         self.product_drafts: dict[str, dict[str, Any]] = {}
         self.submitted_documents: dict[str, dict[str, Any]] = {}
@@ -106,7 +108,11 @@ class SupabaseService(SupabaseServiceInterface):
                     },
                 )
             except Exception:
-                bucket.upload(file_id, content, {"content-type": safe_content_type, "upsert": "true"})
+                bucket.upload(
+                    file_id,
+                    content,
+                    {"content-type": safe_content_type, "upsert": "true"},
+                )
 
         try:
             client = self._get_supabase_client()
@@ -329,7 +335,9 @@ class SupabaseService(SupabaseServiceInterface):
                 existing_rows = existing.data or []
                 if existing_rows:
                     thumbnail_path = existing_rows[0].get("thumbnail_storage_path")
-                client.table("file_metadata").delete().eq("storage_path", file_id).execute()
+                client.table("file_metadata").delete().eq(
+                    "storage_path", file_id
+                ).execute()
         except Exception:
             LOG.warning("Failed deleting metadata for %s", file_id, exc_info=True)
 
@@ -462,7 +470,13 @@ class SupabaseService(SupabaseServiceInterface):
         if not client:
             return None
         try:
-            res = client.table("llm_runs").select("*").eq("run_id", run_id).limit(1).execute()
+            res = (
+                client.table("llm_runs")
+                .select("*")
+                .eq("run_id", run_id)
+                .limit(1)
+                .execute()
+            )
             rows = res.data or []
             return rows[0] if rows else None
         except Exception:
@@ -539,7 +553,9 @@ class SupabaseService(SupabaseServiceInterface):
         client = self._get_supabase_client()
         if client:
             try:
-                client.table("product_drafts").upsert(payload, on_conflict="draft_id").execute()
+                client.table("product_drafts").upsert(
+                    payload, on_conflict="draft_id"
+                ).execute()
                 return payload
             except Exception:
                 LOG.exception("Failed saving product draft %s", draft_id)
@@ -555,7 +571,9 @@ class SupabaseService(SupabaseServiceInterface):
                         compat_payload, on_conflict="draft_id"
                     ).execute()
                 except Exception:
-                    LOG.exception("Fallback save for product draft %s also failed", draft_id)
+                    LOG.exception(
+                        "Fallback save for product draft %s also failed", draft_id
+                    )
         self.product_drafts[draft_id] = payload
         return payload
 
@@ -584,17 +602,25 @@ class SupabaseService(SupabaseServiceInterface):
                 LOG.exception("Failed listing product drafts")
             try:
                 submitted_res = (
-                    client.table("submitted_documents").select("draft_id").limit(1000).execute()
+                    client.table("submitted_documents")
+                    .select("draft_id")
+                    .limit(1000)
+                    .execute()
                 )
                 for item in submitted_res.data or []:
                     draft_id = item.get("draft_id")
                     if draft_id:
                         submitted_draft_ids.add(str(draft_id))
             except Exception:
-                LOG.debug("Submitted documents table unavailable for draft filtering", exc_info=True)
+                LOG.debug(
+                    "Submitted documents table unavailable for draft filtering",
+                    exc_info=True,
+                )
 
         drafts_map: dict[str, dict[str, Any]] = {
-            str(item.get("draft_id")): item for item in db_drafts if item.get("draft_id")
+            str(item.get("draft_id")): item
+            for item in db_drafts
+            if item.get("draft_id")
         }
         for key, item in self.product_drafts.items():
             drafts_map[str(item.get("draft_id") or key)] = item
@@ -622,7 +648,9 @@ class SupabaseService(SupabaseServiceInterface):
         if sort_by == "name":
             drafts.sort(
                 key=lambda item: (
-                    str(item.get("draft_name") or item.get("first_product_title") or "").lower()
+                    str(
+                        item.get("draft_name") or item.get("first_product_title") or ""
+                    ).lower()
                 ),
                 reverse=reverse,
             )
@@ -651,13 +679,18 @@ class SupabaseService(SupabaseServiceInterface):
                 LOG.exception("Failed fetching product draft %s", draft_id)
 
         return memory_draft
-    
+
     def delete_product_draft(self, draft_id: str) -> bool:
         deleted = False
         client = self._get_supabase_client()
         if client:
             try:
-                res = client.table("product_drafts").delete().eq("draft_id", draft_id).execute()
+                res = (
+                    client.table("product_drafts")
+                    .delete()
+                    .eq("draft_id", draft_id)
+                    .execute()
+                )
                 deleted = bool(res.data)
             except Exception:
                 LOG.exception("Failed deleting product draft %s", draft_id)
@@ -693,7 +726,9 @@ class SupabaseService(SupabaseServiceInterface):
         client = self._get_supabase_client()
         if client:
             try:
-                client.table("submitted_documents").upsert(payload, on_conflict="submitted_id").execute()
+                client.table("submitted_documents").upsert(
+                    payload, on_conflict="submitted_id"
+                ).execute()
                 return payload
             except Exception:
                 LOG.exception("Failed saving submitted document %s", submitted_id)
@@ -704,7 +739,10 @@ class SupabaseService(SupabaseServiceInterface):
                         compat_payload, on_conflict="submitted_id"
                     ).execute()
                 except Exception:
-                    LOG.exception("Fallback save for submitted document %s also failed", submitted_id)
+                    LOG.exception(
+                        "Fallback save for submitted document %s also failed",
+                        submitted_id,
+                    )
         self.submitted_documents[submitted_id] = payload
         return payload
 
@@ -720,27 +758,62 @@ class SupabaseService(SupabaseServiceInterface):
         client = self._get_supabase_client()
         if client:
             try:
-                res = client.table("submitted_documents").select("*").limit(1000).execute()
+                res = (
+                    client.table("submitted_documents")
+                    .select("*")
+                    .limit(1000)
+                    .execute()
+                )
                 db_docs = res.data or []
             except Exception:
                 LOG.exception("Failed listing submitted documents")
 
         docs_map: dict[str, dict[str, Any]] = {
-            str(item.get("submitted_id")): item for item in db_docs if item.get("submitted_id")
+            str(item.get("submitted_id")): item
+            for item in db_docs
+            if item.get("submitted_id")
         }
         for key, item in self.submitted_documents.items():
             docs_map[str(item.get("submitted_id") or key)] = item
 
         docs = list(docs_map.values())
+        for doc in docs:
+            preview_file_id = doc.get("preview_file_id")
+            resolved_preview = (
+                preview_file_id
+                if isinstance(preview_file_id, str) and preview_file_id
+                else None
+            )
+            if not resolved_preview:
+                draft_id = doc.get("draft_id")
+                if isinstance(draft_id, str) and draft_id:
+                    linked_draft = self.get_product_draft(draft_id)
+                    if isinstance(linked_draft, dict):
+                        for key in ("output_file_id", "input_file_id"):
+                            candidate = linked_draft.get(key)
+                            if isinstance(candidate, str) and candidate:
+                                resolved_preview = candidate
+                                break
+            doc["preview_file_id"] = resolved_preview
+
         if search:
             search_lower = search.strip().lower()
-            docs = [doc for doc in docs if search_lower in str(doc.get("name") or "").lower()]
+            docs = [
+                doc
+                for doc in docs
+                if search_lower in str(doc.get("name") or "").lower()
+            ]
 
         reverse = sort_dir.lower() != "asc"
         if sort_by == "name":
-            docs.sort(key=lambda doc: str(doc.get("name") or "").lower(), reverse=reverse)
+            docs.sort(
+                key=lambda doc: str(doc.get("name") or "").lower(), reverse=reverse
+            )
         else:
-            docs.sort(key=lambda doc: doc.get("submitted_at") or doc.get("created_at") or "", reverse=reverse)
+            docs.sort(
+                key=lambda doc: doc.get("submitted_at") or doc.get("created_at") or "",
+                reverse=reverse,
+            )
         return docs[offset : offset + limit]
 
     def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None:
@@ -760,7 +833,7 @@ class SupabaseService(SupabaseServiceInterface):
             except Exception:
                 LOG.exception("Failed fetching submitted document %s", submitted_id)
         return self.submitted_documents.get(submitted_id)
-    
+
     def delete_submitted_document(self, submitted_id: str) -> bool:
         deleted = False
         client = self._get_supabase_client()
@@ -779,7 +852,6 @@ class SupabaseService(SupabaseServiceInterface):
             del self.submitted_documents[submitted_id]
             deleted = True
         return deleted
-
 
     def save_product_intelligence_audit(
         self,
@@ -825,7 +897,6 @@ class SupabaseService(SupabaseServiceInterface):
         self.product_intelligence_audits[audit_id] = payload
         return payload
 
-
     def save_product_intelligence_findings(
         self,
         *,
@@ -847,15 +918,18 @@ class SupabaseService(SupabaseServiceInterface):
                         {**finding, "audit_id": audit_id, "shop_domain": tenant}
                         for finding in findings
                     ]
-                    client.table("product_intelligence_findings").insert(payload).execute()
+                    client.table("product_intelligence_findings").insert(
+                        payload
+                    ).execute()
                 return len(findings)
             except Exception:
-                LOG.exception("Failed saving intelligence findings for audit=%s", audit_id)
+                LOG.exception(
+                    "Failed saving intelligence findings for audit=%s", audit_id
+                )
         self.product_intelligence_findings[audit_id] = [
             {**dict(item), "shop_domain": tenant} for item in findings
         ]
         return len(findings)
-
 
     def list_product_intelligence_audits(
         self,
@@ -888,7 +962,6 @@ class SupabaseService(SupabaseServiceInterface):
         ]
         audits.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return audits[offset : offset + limit]
-
 
     def get_product_intelligence_audit(
         self,
@@ -939,7 +1012,6 @@ class SupabaseService(SupabaseServiceInterface):
         ]
         return {**audit, "findings": findings}
 
-
     def save_product_intelligence_suggestions(
         self,
         *,
@@ -961,10 +1033,14 @@ class SupabaseService(SupabaseServiceInterface):
                         {**item, "audit_id": audit_id, "shop_domain": tenant}
                         for item in suggestions
                     ]
-                    client.table("product_intelligence_suggestions").insert(payload).execute()
+                    client.table("product_intelligence_suggestions").insert(
+                        payload
+                    ).execute()
                 return len(suggestions)
             except Exception:
-                LOG.exception("Failed saving intelligence suggestions for audit=%s", audit_id)
+                LOG.exception(
+                    "Failed saving intelligence suggestions for audit=%s", audit_id
+                )
         for key, value in list(self.product_intelligence_suggestions.items()):
             if value.get("audit_id") != audit_id:
                 continue
@@ -979,7 +1055,6 @@ class SupabaseService(SupabaseServiceInterface):
                 "shop_domain": tenant,
             }
         return len(suggestions)
-
 
     def list_product_intelligence_suggestions(
         self,
@@ -1003,14 +1078,15 @@ class SupabaseService(SupabaseServiceInterface):
                 )
                 return res.data or []
             except Exception:
-                LOG.exception("Failed listing intelligence suggestions for audit=%s", audit_id)
+                LOG.exception(
+                    "Failed listing intelligence suggestions for audit=%s", audit_id
+                )
         return [
             dict(item)
             for item in self.product_intelligence_suggestions.values()
             if item.get("audit_id") == audit_id
             and str(item.get("shop_domain") or "").strip().lower() == tenant
         ]
-
 
     def get_product_intelligence_suggestion(
         self,
@@ -1022,7 +1098,10 @@ class SupabaseService(SupabaseServiceInterface):
         if not tenant:
             return None
         cached_item = self.product_intelligence_suggestions.get(suggestion_id)
-        if cached_item and str(cached_item.get("shop_domain") or "").strip().lower() != tenant:
+        if (
+            cached_item
+            and str(cached_item.get("shop_domain") or "").strip().lower() != tenant
+        ):
             cached_item = None
         client = self._get_supabase_client()
         if client:
@@ -1046,7 +1125,6 @@ class SupabaseService(SupabaseServiceInterface):
                     "Failed fetching intelligence suggestion %s", suggestion_id
                 )
         return cached_item
-
 
     def create_product_intelligence_suggestion(
         self,
@@ -1081,7 +1159,6 @@ class SupabaseService(SupabaseServiceInterface):
         self.product_intelligence_suggestions[suggestion_id] = dict(payload)
         return dict(payload)
 
-
     def mark_product_intelligence_suggestion_applied(
         self,
         *,
@@ -1106,6 +1183,7 @@ class SupabaseService(SupabaseServiceInterface):
         client = self._get_supabase_client()
         if client:
             try:
+
                 def _execute_update(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     response = (
                         client.table("product_intelligence_suggestions")
@@ -1142,16 +1220,20 @@ class SupabaseService(SupabaseServiceInterface):
                             cached = dict(rows[0])
                             if isinstance(previous_payload, dict):
                                 cached["previous_payload"] = previous_payload
-                            self.product_intelligence_suggestions[suggestion_id] = cached
+                            self.product_intelligence_suggestions[suggestion_id] = (
+                                cached
+                            )
                             return cached
                         return None
                     except Exception:
                         LOG.exception(
-                            "Failed marking intelligence suggestion applied %s", suggestion_id
+                            "Failed marking intelligence suggestion applied %s",
+                            suggestion_id,
                         )
                 else:
                     LOG.exception(
-                        "Failed marking intelligence suggestion applied %s", suggestion_id
+                        "Failed marking intelligence suggestion applied %s",
+                        suggestion_id,
                     )
         item = self.product_intelligence_suggestions.get(suggestion_id)
         if not item:
@@ -1166,7 +1248,6 @@ class SupabaseService(SupabaseServiceInterface):
         if isinstance(patch_payload, dict):
             item["patch_payload"] = patch_payload
         return dict(item)
-
 
     def mark_product_intelligence_suggestion_pending(
         self,
@@ -1235,14 +1316,26 @@ class SupabaseService(SupabaseServiceInterface):
             **SupabaseService._default_product_intelligence_normalization_settings(),
             **(fallback or {}),
         }
-        raw_unit = str(settings.get("unit_system") or base.get("unit_system") or "metric").strip().lower()
+        raw_unit = (
+            str(settings.get("unit_system") or base.get("unit_system") or "metric")
+            .strip()
+            .lower()
+        )
         unit_system = raw_unit if raw_unit in {"metric", "imperial"} else "metric"
-        raw_locale_default = settings.get("locale_default_unit_system", base.get("locale_default_unit_system"))
-        locale_default = str(raw_locale_default).strip().lower() if isinstance(raw_locale_default, str) else None
+        raw_locale_default = settings.get(
+            "locale_default_unit_system", base.get("locale_default_unit_system")
+        )
+        locale_default = (
+            str(raw_locale_default).strip().lower()
+            if isinstance(raw_locale_default, str)
+            else None
+        )
         if locale_default not in {"metric", "imperial"}:
             locale_default = None
 
-        raw_confidence = settings.get("confidence_threshold", base.get("confidence_threshold"))
+        raw_confidence = settings.get(
+            "confidence_threshold", base.get("confidence_threshold")
+        )
         if raw_confidence in (None, ""):
             confidence_threshold = None
         elif isinstance(raw_confidence, (int, float)):
@@ -1251,7 +1344,9 @@ class SupabaseService(SupabaseServiceInterface):
             raise ValueError("Invalid confidence_threshold")
 
         raw_categories = settings.get("categories")
-        base_categories = base.get("categories") if isinstance(base.get("categories"), dict) else {}
+        base_categories = (
+            base.get("categories") if isinstance(base.get("categories"), dict) else {}
+        )
         categories_input = raw_categories if isinstance(raw_categories, dict) else {}
         categories = {
             key: (
@@ -1294,14 +1389,22 @@ class SupabaseService(SupabaseServiceInterface):
                     out = {
                         "shop_domain": tenant,
                         "unit_system": row.get("unit_system"),
-                        "locale_default_unit_system": row.get("locale_default_unit_system"),
+                        "locale_default_unit_system": row.get(
+                            "locale_default_unit_system"
+                        ),
                         "confidence_threshold": row.get("confidence_threshold"),
-                        "categories": row.get("categories") if isinstance(row.get("categories"), dict) else {},
+                        "categories": (
+                            row.get("categories")
+                            if isinstance(row.get("categories"), dict)
+                            else {}
+                        ),
                         "updated_at": row.get("updated_at"),
                     }
                     out = {
                         **out,
-                        **self._coerce_product_intelligence_normalization_settings(out, fallback=out),
+                        **self._coerce_product_intelligence_normalization_settings(
+                            out, fallback=out
+                        ),
                     }
                     self.product_intelligence_normalization_settings[tenant] = dict(out)
                     return out
@@ -1326,7 +1429,9 @@ class SupabaseService(SupabaseServiceInterface):
         if not tenant:
             raise ValueError("Missing shop_domain for normalization settings")
 
-        existing = self.get_product_intelligence_normalization_settings(shop_domain=tenant) or {
+        existing = self.get_product_intelligence_normalization_settings(
+            shop_domain=tenant
+        ) or {
             **self._default_product_intelligence_normalization_settings(),
             "shop_domain": tenant,
         }
@@ -1357,15 +1462,25 @@ class SupabaseService(SupabaseServiceInterface):
                     row = dict(rows[0])
                     out = {
                         "shop_domain": tenant,
-                        "unit_system": row.get("unit_system", normalized["unit_system"]),
-                        "locale_default_unit_system": row.get("locale_default_unit_system"),
+                        "unit_system": row.get(
+                            "unit_system", normalized["unit_system"]
+                        ),
+                        "locale_default_unit_system": row.get(
+                            "locale_default_unit_system"
+                        ),
                         "confidence_threshold": row.get("confidence_threshold"),
-                        "categories": row.get("categories") if isinstance(row.get("categories"), dict) else normalized["categories"],
+                        "categories": (
+                            row.get("categories")
+                            if isinstance(row.get("categories"), dict)
+                            else normalized["categories"]
+                        ),
                         "updated_at": row.get("updated_at"),
                     }
                     out = {
                         **out,
-                        **self._coerce_product_intelligence_normalization_settings(out, fallback=out),
+                        **self._coerce_product_intelligence_normalization_settings(
+                            out, fallback=out
+                        ),
                     }
                     self.product_intelligence_normalization_settings[tenant] = dict(out)
                     return out
@@ -1430,7 +1545,9 @@ class SupabaseService(SupabaseServiceInterface):
         masked = dict(row)
         masked.pop("api_key_ciphertext", None)
         masked["api_key_masked"] = self._mask_api_key(masked.pop("api_key", None)) or (
-            f"************{masked.get('api_key_last4')}" if masked.get("api_key_last4") else None
+            f"************{masked.get('api_key_last4')}"
+            if masked.get("api_key_last4")
+            else None
         )
         return masked
 
@@ -1445,9 +1562,13 @@ class SupabaseService(SupabaseServiceInterface):
                     .order("created_at", desc=True)
                     .execute()
                 )
-                return [self._sanitize_llm_model_config(item) for item in (res.data or [])]
+                return [
+                    self._sanitize_llm_model_config(item) for item in (res.data or [])
+                ]
             except Exception:
-                LOG.exception("Failed listing llm_model_configs for shop=%s", shop_domain)
+                LOG.exception(
+                    "Failed listing llm_model_configs for shop=%s", shop_domain
+                )
         return [
             self._sanitize_llm_model_config(item)
             for item in self.llm_model_configs.values()
@@ -1495,12 +1616,16 @@ class SupabaseService(SupabaseServiceInterface):
             try:
                 client.table("llm_model_configs").insert(payload).execute()
                 if is_active:
-                    activated = self.activate_llm_model_config(config_id, shop_domain=shop_domain)
+                    activated = self.activate_llm_model_config(
+                        config_id, shop_domain=shop_domain
+                    )
                     if activated:
                         return activated
                 return self._sanitize_llm_model_config(payload)
             except Exception:
-                LOG.exception("Failed creating llm_model_config for shop=%s", shop_domain)
+                LOG.exception(
+                    "Failed creating llm_model_config for shop=%s", shop_domain
+                )
 
         if is_active:
             for item in self.llm_model_configs.values():
@@ -1588,7 +1713,9 @@ class SupabaseService(SupabaseServiceInterface):
             deleted = True
         return deleted
 
-    def activate_llm_model_config(self, config_id: str, *, shop_domain: str) -> dict[str, Any] | None:
+    def activate_llm_model_config(
+        self, config_id: str, *, shop_domain: str
+    ) -> dict[str, Any] | None:
         client = self._get_supabase_client()
         if client:
             try:
@@ -1635,7 +1762,9 @@ class SupabaseService(SupabaseServiceInterface):
                 rows = res.data or []
                 row = rows[0] if rows else None
             except Exception:
-                LOG.exception("Failed fetching active llm_model_config for shop=%s", shop_domain)
+                LOG.exception(
+                    "Failed fetching active llm_model_config for shop=%s", shop_domain
+                )
         else:
             for item in self.llm_model_configs.values():
                 if item.get("shop_domain") == shop_domain and item.get("is_active"):
@@ -1650,5 +1779,7 @@ class SupabaseService(SupabaseServiceInterface):
                 "api_key": self._decrypt_api_key(row.get("api_key_ciphertext") or ""),
             }
         except Exception:
-            LOG.exception("Failed decrypting llm model config key for shop=%s", shop_domain)
+            LOG.exception(
+                "Failed decrypting llm model config key for shop=%s", shop_domain
+            )
             return None

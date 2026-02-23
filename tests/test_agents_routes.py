@@ -668,6 +668,8 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
             "run_id": "run-submit",
             "import_mode": "create",
             "draft_name": "submitted-draft.xlsx",
+            "input_file_id": "input-file-preview",
+            "input_filename": "submitted-source.xlsx",
         }
         created_draft = await ac.post("/agents/product-drafts", data=draft_payload)
         assert created_draft.status_code == 200
@@ -697,6 +699,12 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
         assert any(
             item.get("submitted_id") == submitted_body["submitted_id"] for item in items
         )
+        matching_item = next(
+            item
+            for item in items
+            if item.get("submitted_id") == submitted_body["submitted_id"]
+        )
+        assert matching_item.get("preview_file_id") == "input-file-preview"
 
         submitted_detail = await ac.get(
             f"/agents/submitted-documents/{submitted_body['submitted_id']}"

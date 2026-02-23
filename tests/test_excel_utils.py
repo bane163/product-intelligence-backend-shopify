@@ -30,6 +30,8 @@ def test_extract_excel_contents_includes_all_sheets():
     assert "=== Sheet: SheetB ===" in extracted
     assert "Alpha\t10" in extracted
     assert "Beta\t20" in extracted
+    assert "[CELL_REFS]\tA2=Alpha\tB2=10" in extracted
+    assert "[CELL_REFS]\tA2=Beta\tB2=20" in extracted
 
 
 def test_extract_excel_contents_can_limit_to_first_sheet():

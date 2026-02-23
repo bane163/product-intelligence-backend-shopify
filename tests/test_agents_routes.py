@@ -3,6 +3,7 @@ import json
 import uuid
 from typing import Any
 
+import openpyxl
 import pytest
 from httpx import AsyncClient, ASGITransport
 from PIL import Image
@@ -195,6 +196,280 @@ async def test_preview_generates_png(monkeypatch):
         r_preview = await ac.get(f"/agents/preview/{file_id}")
         assert r_preview.status_code == 200
         assert r_preview.content == b"PNG_BYTES_PAGE_1"
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_creates_highlighted_copy():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Products"
+    sheet["A1"] = "Title"
+    sheet["B1"] = "Vendor"
+    sheet["A2"] = "Demo product"
+    sheet["B2"] = "Demo vendor"
+    source_buffer = io.BytesIO()
+    workbook.save(source_buffer)
+    workbook.close()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "source.xlsx",
+                io.BytesIO(source_buffer.getvalue()),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={"sheet": "Products", "cell_range": "A2:B2"},
+        )
+        assert highlighted.status_code == 200
+        payload = highlighted.json()
+        highlight_file_id = payload["file_id"]
+        assert highlight_file_id != source_file_id
+        assert payload["sheet"] == "Products"
+        assert payload["cell_range"] == "A2:B2"
+
+        highlighted_contents = await ac.get(
+            f"/agents/wopi/files/{highlight_file_id}/contents"
+        )
+        assert highlighted_contents.status_code == 200
+
+        highlighted_workbook = openpyxl.load_workbook(
+            io.BytesIO(highlighted_contents.content)
+        )
+        highlighted_sheet = highlighted_workbook["Products"]
+        assert highlighted_sheet["A2"].fill.fill_type == "solid"
+        assert highlighted_sheet["B2"].fill.fill_type == "solid"
+        highlighted_workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_reuses_existing_highlight_file():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Products"
+    sheet["A1"] = "Title"
+    sheet["A2"] = "First row"
+    sheet["A3"] = "Second row"
+    source_buffer = io.BytesIO()
+    workbook.save(source_buffer)
+    workbook.close()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "source.xlsx",
+                io.BytesIO(source_buffer.getvalue()),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        first_highlight = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={"sheet": "Products", "cell_range": "A2:A2"},
+        )
+        assert first_highlight.status_code == 200
+        highlight_file_id = first_highlight.json()["file_id"]
+
+        second_highlight = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={
+                "sheet": "Products",
+                "cell_range": "A3:A3",
+                "highlight_file_id": highlight_file_id,
+            },
+        )
+        assert second_highlight.status_code == 200
+        assert second_highlight.json()["file_id"] == highlight_file_id
+
+        highlighted_contents = await ac.get(
+            f"/agents/wopi/files/{highlight_file_id}/contents"
+        )
+        assert highlighted_contents.status_code == 200
+
+        highlighted_workbook = openpyxl.load_workbook(
+            io.BytesIO(highlighted_contents.content)
+        )
+        highlighted_sheet = highlighted_workbook["Products"]
+        assert highlighted_sheet["A3"].fill.fill_type == "solid"
+        assert highlighted_sheet["A2"].fill.fill_type != "solid"
+        highlighted_workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_source_refs_highlights_all_cells_and_prefers_title_sheet():
+    workbook = openpyxl.Workbook()
+    products_sheet = workbook.active
+    products_sheet.title = "Products"
+    products_sheet["A2"] = "Product one"
+    products_sheet["D2"] = "19.99"
+    attributes_sheet = workbook.create_sheet("Attributes")
+    attributes_sheet["B4"] = "Material"
+    attributes_sheet["C4"] = "Cotton"
+    source_buffer = io.BytesIO()
+    workbook.save(source_buffer)
+    workbook.close()
+
+    source_refs = [
+        {"field": "title", "sheet": "Products", "cell": "A2"},
+        {"field": "price", "sheet": "Products", "cell": "D2"},
+        {"field": "material", "sheet": "Attributes", "cell_range": "B4:C4"},
+    ]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "source.xlsx",
+                io.BytesIO(source_buffer.getvalue()),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={"source_refs_json": json.dumps(source_refs)},
+        )
+        assert highlighted.status_code == 200
+        payload = highlighted.json()
+        assert payload["sheet"] == "Products"
+        assert payload["cell_range"] == "A2"
+
+        highlighted_contents = await ac.get(
+            f"/agents/wopi/files/{payload['file_id']}/contents"
+        )
+        highlighted_workbook = openpyxl.load_workbook(
+            io.BytesIO(highlighted_contents.content)
+        )
+        highlighted_products = highlighted_workbook["Products"]
+        highlighted_attributes = highlighted_workbook["Attributes"]
+        assert highlighted_products["A2"].fill.fill_type == "solid"
+        assert highlighted_products["D2"].fill.fill_type == "solid"
+        assert highlighted_attributes["B4"].fill.fill_type == "solid"
+        assert highlighted_attributes["C4"].fill.fill_type == "solid"
+        highlighted_workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_source_refs_prefers_requested_sheet_when_no_title_ref():
+    workbook = openpyxl.Workbook()
+    details_sheet = workbook.active
+    details_sheet.title = "Details"
+    details_sheet["A2"] = "SKU-1"
+    pricing_sheet = workbook.create_sheet("Pricing")
+    pricing_sheet["C3"] = "29.99"
+    source_buffer = io.BytesIO()
+    workbook.save(source_buffer)
+    workbook.close()
+
+    source_refs = [
+        {"field": "sku", "sheet": "Details", "cell": "A2"},
+        {"field": "price", "sheet": "Pricing", "cell": "C3"},
+    ]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "source.xlsx",
+                io.BytesIO(source_buffer.getvalue()),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={
+                "source_refs_json": json.dumps(source_refs),
+                "preferred_sheet": "Pricing",
+            },
+        )
+        assert highlighted.status_code == 200
+        payload = highlighted.json()
+        assert payload["sheet"] == "Pricing"
+        assert payload["cell_range"] == "C3"
+
+        highlighted_contents = await ac.get(
+            f"/agents/wopi/files/{payload['file_id']}/contents"
+        )
+        highlighted_workbook = openpyxl.load_workbook(
+            io.BytesIO(highlighted_contents.content)
+        )
+        highlighted_details = highlighted_workbook["Details"]
+        highlighted_pricing = highlighted_workbook["Pricing"]
+        assert highlighted_details["A2"].fill.fill_type == "solid"
+        assert highlighted_pricing["C3"].fill.fill_type == "solid"
+        highlighted_workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_rejects_invalid_source_refs_json():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Products"
+    sheet["A1"] = "Title"
+    source_buffer = io.BytesIO()
+    workbook.save(source_buffer)
+    workbook.close()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "source.xlsx",
+                io.BytesIO(source_buffer.getvalue()),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={"source_refs_json": "{bad json"},
+        )
+        assert highlighted.status_code == 422
+        assert "source_refs_json" in highlighted.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_rejects_non_spreadsheet_file():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "document.pdf",
+                io.BytesIO(b"%PDF-1.4\nfake\n"),
+                "application/pdf",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={"cell": "A1"},
+        )
+        assert highlighted.status_code == 422
+        assert "spreadsheet" in highlighted.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

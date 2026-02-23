@@ -147,13 +147,16 @@ async def run_agent_on_inputs(
         "which is an array of product objects. Each product should follow the ProductInput shape: "
         "title (string), optional body_html, optional vendor, optional options (list of {name, values}), "
         "optional variants (list of variant objects with option1/2/3, sku, price, inventory_quantity), "
-        "and optional images (list of {src, alt}).\n\n"
+        "optional source_refs (list of {field, document_kind, sheet, cell, cell_range, page, bbox, value}), "
+        "and optional images (list of {src, alt}).\n"
+        "When spreadsheet text includes [CELL_REFS] tokens, map product evidence to sheet/cell entries "
+        "and include source_refs for key fields when confidence is reasonable.\n\n"
         "Only output the JSON object (no additional commentary)."
     )
 
     full_prompt = (
         f"User prompt: {agent_prompt}\n\n"
-        "---EXTRACTED_SPREADSHEET_TEXT---\n"
+        "---EXTRACTED_DOCUMENT_TEXT---\n"
         f"{extracted_text}\n\n"
         "---END---\n"
         'Return only JSON that matches the ProductsList schema: {"products": [ ... ]}.'

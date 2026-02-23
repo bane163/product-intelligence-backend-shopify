@@ -13,6 +13,7 @@ def extract_excel_contents(
 
     Kept intentionally small and deterministic so it's suitable for sending to
     an LLM. Converts None to empty strings and joins columns with tabs.
+    For source linking, non-empty cells are also emitted with coordinate tags.
     """
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
     rows: List[str] = []
@@ -24,11 +25,20 @@ def extract_excel_contents(
 
         rows.append(f"=== Sheet: {sheet_name} ===")
         sheet = wb[sheet_name]
-        for row_index, row in enumerate(sheet.iter_rows(values_only=True)):
-            if row_index >= max_rows_per_sheet:
+        for row_index, row in enumerate(sheet.iter_rows(values_only=False), start=1):
+            if row_index > max_rows_per_sheet:
                 rows.append("(...truncated...)")
                 break
-            rows.append("\t".join(["" if c is None else str(c) for c in row]))
+            plain_row_values: List[str] = []
+            coordinate_values: List[str] = []
+            for cell in row:
+                cell_value = "" if cell.value is None else str(cell.value)
+                plain_row_values.append(cell_value)
+                if cell_value.strip():
+                    coordinate_values.append(f"{cell.coordinate}={cell_value}")
+            rows.append("\t".join(plain_row_values))
+            if coordinate_values:
+                rows.append("[CELL_REFS]\t" + "\t".join(coordinate_values))
         rows.append("")
 
     wb.close()

@@ -71,6 +71,17 @@ class ProductMetafield(BaseModel):
     type: Optional[str] = None
 
 
+class ProductSourceRef(BaseModel):
+    field: Optional[str] = None
+    document_kind: Optional[str] = None
+    sheet: Optional[str] = None
+    cell: Optional[str] = None
+    cell_range: Optional[str] = None
+    page: Optional[int] = None
+    bbox: Optional[List[float]] = None
+    value: Optional[str] = None
+
+
 class ProductInput(BaseModel):
     """Model aligning with product_template.csv columns.
 
@@ -92,6 +103,7 @@ class ProductInput(BaseModel):
     variants: Optional[List[ProductVariant]] = None
     images: Optional[List[ProductImage]] = None
     metafields: Optional[List[ProductMetafield]] = None
+    source_refs: Optional[List[ProductSourceRef]] = None
 
     # Product-level image and metadata fields
     image_src: Optional[str] = None
@@ -277,6 +289,7 @@ __all__ = [
     "ProductVariant",
     "ProductImage",
     "ProductMetafield",
+    "ProductSourceRef",
     "ProductInput",
     "ProductsList",
     "ProductIntelligenceSuggestionDraft",

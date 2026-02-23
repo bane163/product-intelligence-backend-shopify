@@ -1,5 +1,6 @@
 """Agent file upload and processing routes (under `/agents/*`)."""
 
+import json
 import logging
 import os
 import uuid
@@ -280,6 +281,64 @@ async def get_file_info(
         "storage_path": file_storage_path,
         "thumbnail_storage_path": file_entry.get("thumbnail_storage_path"),
     }
+
+
+@router.post(
+    "/files/{file_id}/source-highlight",
+    summary="Create highlighted spreadsheet preview for source coordinates",
+)
+async def create_source_highlight(
+    file_id: str,
+    sheet: str | None = Form(None),
+    cell: str | None = Form(None),
+    cell_range: str | None = Form(None),
+    source_refs_json: str | None = Form(None),
+    preferred_sheet: str | None = Form(None),
+    highlight_file_id: str | None = Form(None),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.files.create_source_highlight_file import (
+        execute as create_source_highlight_execute,
+    )
+
+    parsed_source_refs: list[dict[str, Any]] | None = None
+    if source_refs_json and source_refs_json.strip():
+        try:
+            decoded_source_refs = json.loads(source_refs_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"Invalid source_refs_json payload: {exc}"
+            )
+        if not isinstance(decoded_source_refs, list):
+            raise HTTPException(
+                status_code=422, detail="source_refs_json must be a JSON array"
+            )
+        if any(not isinstance(item, dict) for item in decoded_source_refs):
+            raise HTTPException(
+                status_code=422,
+                detail="source_refs_json entries must be JSON objects",
+            )
+        parsed_source_refs = decoded_source_refs
+
+    try:
+        return create_source_highlight_execute(
+            supabase=ctx.services.supabase,
+            source_file_id=file_id,
+            sheet=sheet,
+            cell=cell,
+            cell_range=cell_range,
+            source_refs=parsed_source_refs,
+            preferred_sheet=preferred_sheet,
+            highlight_file_id=highlight_file_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Source highlight generation failed: {exc}"
+        )
 
 
 @router.delete("/files/{file_id}", summary="Delete an uploaded file")

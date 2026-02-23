@@ -29,7 +29,9 @@ async def _post_convert_to(
                 )
                 resp.raise_for_status()
                 return resp.content
-            except Exception as exc:  # pragma: no cover - exercised by fallback behavior
+            except (
+                Exception
+            ) as exc:  # pragma: no cover - exercised by fallback behavior
                 last_exc = exc
     if last_exc:
         raise last_exc
@@ -58,12 +60,30 @@ async def convert_csv_to_excel(
     timeout: int = 60,
 ) -> bytes:
     """Post a CSV file to Collabora's convert-to/xlsx endpoint and return XLSX bytes."""
+    return await convert_document_to_xlsx_collabora(
+        file_bytes,
+        filename="file.csv",
+        content_type="text/csv",
+        collabora_base_url=collabora_base_url,
+        timeout=timeout,
+    )
+
+
+async def convert_document_to_xlsx_collabora(
+    file_bytes: bytes,
+    *,
+    filename: str,
+    content_type: str,
+    collabora_base_url: str = "http://localhost:8080",
+    timeout: int = 60,
+) -> bytes:
+    """Post a document to Collabora's convert-to/xlsx endpoint and return XLSX bytes."""
     return await _post_convert_to(
         collabora_base_url=collabora_base_url,
         target="xlsx",
-        filename="file.csv",
+        filename=filename or "document.bin",
         file_bytes=file_bytes,
-        content_type="text/csv",
+        content_type=content_type or "application/octet-stream",
         timeout=timeout,
     )
 
@@ -115,11 +135,15 @@ async def convert_document_to_png_collabora(
 ) -> list[bytes]:
     """Convert an arbitrary supported document to PNG(s), preferring direct conversion."""
     lower_name = filename.lower()
-    normalized_content_type = (content_type or "application/octet-stream").lower()
-    spreadsheet_exts = (".xlsx", ".xls", ".ods", ".csv")
+    normalized_content_type = (
+        (content_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    )
+    spreadsheet_exts = (".xlsx", ".xlsm", ".xls", ".ods", ".csv")
     spreadsheet_types = {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel.sheet.macroenabled.12",
         "application/vnd.ms-excel",
+        "application/vnd.oasis.opendocument.spreadsheet",
         "text/csv",
     }
     if lower_name.endswith(".pdf") or normalized_content_type == "application/pdf":
@@ -128,10 +152,17 @@ async def convert_document_to_png_collabora(
             collabora_base_url=collabora_base_url,
             timeout=timeout,
         )
-    if lower_name.endswith(spreadsheet_exts) or normalized_content_type in spreadsheet_types:
-        pdf_bytes = await convert_excel_to_pdf_collabora(
-            file_bytes,
+    if (
+        lower_name.endswith(spreadsheet_exts)
+        or normalized_content_type in spreadsheet_types
+    ):
+        pdf_bytes = await _post_convert_to(
             collabora_base_url=collabora_base_url,
+            target="pdf",
+            filename=filename or "document.bin",
+            file_bytes=file_bytes,
+            content_type=content_type or "application/octet-stream",
+            timeout=timeout,
         )
         return await convert_pdf_to_png_collabora(
             pdf_bytes,

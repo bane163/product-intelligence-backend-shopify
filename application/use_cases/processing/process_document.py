@@ -23,6 +23,7 @@ async def execute(
     input_content_type: str | None = None,
     run_id: str | None = None,
     collabora_url: str | None = None,
+    extraction_mode: str = "per_sheet",
     write_to_file: bool = False,
     output_path: str | None = None,
     shop_domain: str | None = None,
@@ -65,7 +66,11 @@ async def execute(
         emit_and_persist(
             phase="request_received",
             message="Received /agents/import request",
-            payload_preview={"write_to_file": write_to_file, "has_file_id": False},
+            payload_preview={
+                "write_to_file": write_to_file,
+                "has_file_id": False,
+                "extraction_mode": extraction_mode,
+            },
         )
 
         # Persist input metadata
@@ -136,6 +141,9 @@ async def execute(
             collabora_base_url=collabora_url,
             agent_prompt=DEFAULT_IMPORT_AGENT_PROMPT,
             model_env=model_env,
+            input_name=input_name,
+            input_content_type=input_content_type,
+            extraction_mode=extraction_mode,
             write_to_file=write_to_file,
             output_path=final_output_path,
             writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,

@@ -10,6 +10,10 @@ from fastapi.responses import Response
 
 from app_context import AppContext, get_ctx
 from typing import Any
+from application.services.document_formats import (
+    classify_document,
+    supported_extensions_display,
+)
 from .files_helper import generate_thumbnail_bytes
 from .schemas import BulkDeletePayload, BulkDeleteResult
 
@@ -63,17 +67,26 @@ async def upload_file(
     file_id = str(uuid.uuid4())
     original_name = file.filename or "document.xlsx"
     original_content_type = file.content_type or ""
-    is_csv = (
-        original_name.lower().endswith(".csv")
-        or original_content_type.lower() == "text/csv"
+    document_format = classify_document(
+        filename=original_name,
+        content_type=original_content_type,
+        file_bytes=file_bytes,
     )
+    if not document_format.is_supported:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "Unsupported file type. Supported extensions: "
+                f"{supported_extensions_display()}"
+            ),
+        )
 
     stored_name = original_name
     stored_content_type = (
         file.content_type
         or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    if is_csv:
+    if document_format.kind == "csv":
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
         try:
             from application.use_cases.collabora.convert_csv_to_excel import (
@@ -87,6 +100,26 @@ async def upload_file(
             )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"CSV conversion failed: {exc}")
+        base, _ = os.path.splitext(original_name)
+        stored_name = f"{base or 'document'}.xlsx"
+        stored_content_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    elif document_format.kind == "spreadsheet_legacy":
+        collabora_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
+        try:
+            file_bytes = (
+                await ctx.services.collabora.convert_document_to_xlsx_collabora(
+                    file_bytes,
+                    filename=original_name,
+                    content_type=original_content_type or "application/octet-stream",
+                    collabora_base_url=collabora_url,
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Spreadsheet conversion failed: {exc}"
+            )
         base, _ = os.path.splitext(original_name)
         stored_name = f"{base or 'document'}.xlsx"
         stored_content_type = (
@@ -145,6 +178,7 @@ async def process_excel(
     file_id: str | None = Form(None),
     file: UploadFile | None = File(None),
     collabora_url: str | None = Form(None),
+    extraction_mode: str = Form("per_sheet"),
     write_to_file: bool = Form(False),
     output_path: str | None = Form(None),
     shop_domain: str | None = Form(None),
@@ -188,6 +222,19 @@ async def process_excel(
     input_content_type = (
         file.content_type if file else _optional_str(file_entry, "content_type")
     )
+    import_format = classify_document(
+        filename=input_name,
+        content_type=input_content_type,
+        file_bytes=file_bytes_data,
+    )
+    if not import_format.is_supported:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "Unsupported file type. Supported extensions: "
+                f"{supported_extensions_display()}"
+            ),
+        )
 
     result = await process_document_execute(
         supabase=ctx.services.supabase,
@@ -199,6 +246,7 @@ async def process_excel(
         input_content_type=input_content_type,
         run_id=run_id,
         collabora_url=collabora_url,
+        extraction_mode=extraction_mode,
         write_to_file=write_to_file,
         output_path=output_path,
         shop_domain=shop_domain,

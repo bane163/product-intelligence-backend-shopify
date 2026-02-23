@@ -21,7 +21,9 @@ class SupabaseServiceInterface(Protocol):
 
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None: ...
 
-    def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None: ...
+    def append_run_event(
+        self, run_id: str, event: dict[str, Any], seq: int
+    ) -> None: ...
 
     def append_run_message(
         self,
@@ -75,7 +77,7 @@ class SupabaseServiceInterface(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def get_product_draft(self, draft_id: str) -> dict[str, Any] | None: ...
-    
+
     def delete_product_draft(self, draft_id: str) -> bool: ...
 
     def save_submitted_document(
@@ -100,7 +102,7 @@ class SupabaseServiceInterface(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None: ...
-    
+
     def delete_submitted_document(self, submitted_id: str) -> bool: ...
 
     def save_product_intelligence_audit(
@@ -233,15 +235,29 @@ class SupabaseServiceInterface(Protocol):
 
     def delete_llm_model_config(self, config_id: str, *, shop_domain: str) -> bool: ...
 
-    def activate_llm_model_config(self, config_id: str, *, shop_domain: str) -> dict[str, Any] | None: ...
+    def activate_llm_model_config(
+        self, config_id: str, *, shop_domain: str
+    ) -> dict[str, Any] | None: ...
 
-    def get_active_llm_model_config(self, shop_domain: str) -> dict[str, Any] | None: ...
+    def get_active_llm_model_config(
+        self, shop_domain: str
+    ) -> dict[str, Any] | None: ...
 
 
 class CollaboraServiceInterface(Protocol):
     async def convert_csv_to_excel(
         self,
         file_bytes: bytes,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> bytes: ...
+
+    async def convert_document_to_xlsx_collabora(
+        self,
+        file_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str,
         collabora_base_url: str = "http://localhost:8080",
         timeout: int = 60,
     ) -> bytes: ...
@@ -301,6 +317,9 @@ class LLMServiceInterface(Protocol):
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Dict[str, str] | None = None,
         *,
+        input_name: str | None = None,
+        input_content_type: str | None = None,
+        extraction_mode: str = "per_sheet",
         write_to_file: bool = False,
         output_path: str | None = None,
         writer_agent_prompt: str | None = None,
@@ -314,6 +333,9 @@ class LLMServiceInterface(Protocol):
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Dict[str, str] | None = None,
         *,
+        input_name: str | None = None,
+        input_content_type: str | None = None,
+        extraction_mode: str = "per_sheet",
         write_to_file: bool = False,
         output_path: str | None = None,
         writer_agent_prompt: str | None = None,

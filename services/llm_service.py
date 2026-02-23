@@ -14,8 +14,10 @@ from typing_extensions import Never
 
 from ai.agent_client import run_excel_writer_agent
 from ai.agent_collector import AgentCollector
+from ai.document_text_utils import extract_document_contents
 from ai.excel_utils import extract_csv_contents, extract_excel_contents
 from ai.models import ProductsList
+from application.services.document_formats import classify_document
 from objects.workflow_payload import resolve_payload
 from .interfaces import (
     CollaboraServiceInterface,
@@ -51,19 +53,36 @@ class LLMService(LLMServiceInterface):
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
         *,
+        input_name: Optional[str] = None,
+        input_content_type: Optional[str] = None,
+        extraction_mode: str = "per_sheet",
         write_to_file: bool = False,
         output_path: Optional[str] = None,
         writer_agent_prompt: Optional[str] = None,
         trace_event=None,
     ) -> Workflow:
-        if isinstance(excel_input, (bytes, bytearray)):
-            excel_bytes = bytes(excel_input)
-            is_excel = excel_bytes[:2] == b"PK" or excel_bytes[:4] == b"PK\x03\x04"
-        else:
-            path_lower = str(excel_input).lower()
-            is_excel = not path_lower.endswith(".csv")
+        effective_input_name = input_name
+        if not effective_input_name and isinstance(excel_input, str):
+            effective_input_name = str(excel_input)
 
-        is_csv = not is_excel
+        file_bytes_hint: bytes | None = None
+        if isinstance(excel_input, (bytes, bytearray)):
+            file_bytes_hint = bytes(excel_input)
+
+        document_format = classify_document(
+            filename=effective_input_name,
+            content_type=input_content_type,
+            file_bytes=file_bytes_hint,
+        )
+        if not document_format.is_supported:
+            raise ValueError(
+                "Unsupported document type for extraction workflow; provide a supported file format."
+            )
+
+        is_csv = document_format.kind == "csv"
+        requires_visual_context = not is_csv
+        normalized_extraction_mode = extraction_mode.strip().lower() or "per_sheet"
+        max_sheets = 1 if normalized_extraction_mode == "first_sheet" else 20
 
         def _trace(
             phase: str,
@@ -113,55 +132,63 @@ class LLMService(LLMServiceInterface):
         async def extract_executor(
             data: bytes, ctx: WorkflowContext[dict[str, Any]]
         ) -> None:
-            if is_csv:
-                _trace("extract_start", "Starting CSV extraction")
+            _trace("extract_start", "Starting document extraction")
+            if document_format.kind == "csv":
                 text = extract_csv_contents(data)
-                _trace(
-                    "extract_done",
-                    "CSV extraction completed",
-                    payload_preview={"chars": len(text)},
+            elif document_format.kind == "spreadsheet":
+                text = extract_excel_contents(
+                    data,
+                    max_rows_per_sheet=200,
+                    max_sheets=max_sheets,
                 )
-                await ctx.send_message({"extracted": text, "png_bytes": None})
+            elif document_format.kind == "spreadsheet_legacy":
+                collabora = collabora_base_url or os.getenv(
+                    "COLLABORA_URL", "http://localhost:8080"
+                )
+                converted = await self.collabora.convert_document_to_xlsx_collabora(
+                    data,
+                    filename=effective_input_name or "document.xls",
+                    content_type=input_content_type or "application/octet-stream",
+                    collabora_base_url=collabora,
+                )
+                text = extract_excel_contents(
+                    converted,
+                    max_rows_per_sheet=200,
+                    max_sheets=max_sheets,
+                )
             else:
-                _trace("extract_start", "Starting document extraction")
-                text = extract_excel_contents(data)
-                _trace(
-                    "extract_done",
-                    "Document extraction completed",
-                    payload_preview={"chars": len(text)},
+                text = extract_document_contents(
+                    data, document_kind=document_format.kind
                 )
-                await ctx.send_message({"extracted": text})
+                if not text.strip():
+                    text = (
+                        f"No plain text content could be extracted from the {document_format.kind} "
+                        "source. Use visual pages as primary context."
+                    )
 
-        @executor(id="convert_to_pdf_executor")
-        async def convert_to_pdf_executor(
-            data: bytes, ctx: WorkflowContext[bytes]
-        ) -> None:
-            collabora = collabora_base_url or os.getenv(
-                "COLLABORA_URL", "http://localhost:8080"
-            )
-            pdf = await self.collabora.convert_excel_to_pdf_collabora(
-                data, collabora_base_url=collabora
-            )
             _trace(
-                "collabora_pdf_done",
-                "Converted document to PDF",
-                payload_preview={"bytes": len(pdf)},
+                "extract_done",
+                "Document extraction completed",
+                payload_preview={"chars": len(text), "kind": document_format.kind},
             )
-            await ctx.send_message(pdf)
+            await ctx.send_message({"extracted": text})
 
-        @executor(id="pdf_to_png_executor")
-        async def pdf_to_png_executor(
-            pdf_bytes: bytes, ctx: WorkflowContext[dict[str, Any]]
+        @executor(id="document_to_png_executor")
+        async def document_to_png_executor(
+            data: bytes, ctx: WorkflowContext[dict[str, Any]]
         ) -> None:
             collabora = collabora_base_url or os.getenv(
                 "COLLABORA_URL", "http://localhost:8080"
             )
-            pngs = await self.collabora.convert_pdf_to_png_collabora(
-                pdf_bytes, collabora_base_url=collabora
+            pngs = await self.collabora.convert_document_to_png_collabora(
+                data,
+                filename=effective_input_name or "document.bin",
+                content_type=input_content_type or "application/octet-stream",
+                collabora_base_url=collabora,
             )
             _trace(
                 "collabora_png_done",
-                "Converted PDF to PNG pages",
+                "Converted document to PNG pages",
                 payload_preview={"pages": len(pngs)},
             )
             await ctx.send_message({"png_bytes": pngs})
@@ -247,10 +274,9 @@ class LLMService(LLMServiceInterface):
 
         builder = WorkflowBuilder().set_start_executor(file_executor)
         builder.add_edge(file_executor, extract_executor)
-        if not is_csv:
-            builder.add_edge(file_executor, convert_to_pdf_executor)
-            builder.add_edge(convert_to_pdf_executor, pdf_to_png_executor)
-            builder.add_edge(pdf_to_png_executor, agent_collector)
+        if requires_visual_context:
+            builder.add_edge(file_executor, document_to_png_executor)
+            builder.add_edge(document_to_png_executor, agent_collector)
         builder.add_edge(extract_executor, agent_collector)
         builder.add_edge(agent_collector, handle_products_response)
         if write_to_file and excel_output_path is not None:
@@ -264,6 +290,9 @@ class LLMService(LLMServiceInterface):
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
         *,
+        input_name: Optional[str] = None,
+        input_content_type: Optional[str] = None,
+        extraction_mode: str = "per_sheet",
         write_to_file: bool = False,
         output_path: Optional[str] = None,
         writer_agent_prompt: Optional[str] = None,
@@ -274,6 +303,9 @@ class LLMService(LLMServiceInterface):
             collabora_base_url=collabora_base_url,
             agent_prompt=agent_prompt,
             model_env=model_env,
+            input_name=input_name,
+            input_content_type=input_content_type,
+            extraction_mode=extraction_mode,
             write_to_file=write_to_file,
             output_path=output_path,
             writer_agent_prompt=writer_agent_prompt,

@@ -15,6 +15,23 @@ class CollaboraService(CollaboraServiceInterface):
             file_bytes, collabora_base_url=collabora_base_url, timeout=timeout
         )
 
+    async def convert_document_to_xlsx_collabora(
+        self,
+        file_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> bytes:
+        return await collabora_utils.convert_document_to_xlsx_collabora(
+            file_bytes,
+            filename=filename,
+            content_type=content_type,
+            collabora_base_url=collabora_base_url,
+            timeout=timeout,
+        )
+
     async def convert_excel_to_pdf_collabora(
         self,
         file_bytes: bytes,

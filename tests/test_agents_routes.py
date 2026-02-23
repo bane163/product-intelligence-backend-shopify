@@ -78,7 +78,9 @@ async def test_bulk_delete_files():
             ids.append(uploaded.json()["file_id"])
 
         missing_id = "missing-file-id"
-        bulk_response = await ac.post("/agents/files/bulk-delete", json={"ids": [ids[0], missing_id, ids[1]]})
+        bulk_response = await ac.post(
+            "/agents/files/bulk-delete", json={"ids": [ids[0], missing_id, ids[1]]}
+        )
         assert bulk_response.status_code == 200
         body = bulk_response.json()
         assert body["deleted_ids"] == [ids[0], missing_id, ids[1]]
@@ -109,8 +111,23 @@ async def test_upload_csv_converts_to_xlsx(monkeypatch):
         assert r_info.status_code == 200
         info = r_info.json()
         assert info["filename"] == "products.xlsx"
-        assert info["content_type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert (
+            info["content_type"]
+            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
         assert info["size"] == len(b"XLSX_BYTES")
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_unsupported_file_type():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": ("unsupported.zip", io.BytesIO(b"zip-data"), "application/zip")
+        }
+        response = await ac.post("/agents/upload", files=files)
+        assert response.status_code == 415
+        assert "Unsupported file type" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -209,7 +226,10 @@ async def test_submit_products_auto_mode(monkeypatch):
         return {
             "data": {
                 "productCreate": {
-                    "product": {"id": "gid://shopify/Product/2", "title": product.get("title")},
+                    "product": {
+                        "id": "gid://shopify/Product/2",
+                        "title": product.get("title"),
+                    },
                     "userErrors": [],
                 }
             }
@@ -217,7 +237,11 @@ async def test_submit_products_auto_mode(monkeypatch):
 
     import api.agents.submit as submit_api
 
-    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fake_create_product_from_input,
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -244,17 +268,29 @@ async def test_submit_products_auto_updates_when_id_present(monkeypatch):
 
     async def fail_create_product_from_input(self, product):
         _ = (self, product)
-        raise AssertionError("create_product_from_input should not be called when id is present")
+        raise AssertionError(
+            "create_product_from_input should not be called when id is present"
+        )
 
     import api.agents.submit as submit_api
 
-    monkeypatch.setattr(submit_api.ShopifyClient, "update_product_from_input", fake_update_product_from_input)
-    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fail_create_product_from_input)
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "update_product_from_input",
+        fake_update_product_from_input,
+    )
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fail_create_product_from_input,
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         payload = {
-            "products_json": json.dumps([{"id": "gid://shopify/Product/99", "title": "Existing Demo"}]),
+            "products_json": json.dumps(
+                [{"id": "gid://shopify/Product/99", "title": "Existing Demo"}]
+            ),
             "import_mode": "auto",
         }
         r = await ac.post("/agents/submit-products", data=payload)
@@ -271,7 +307,12 @@ async def test_submit_products_ai_enhancements_applies_audit_suggestions(monkeyp
     variant_payloads: list[dict[str, Any]] = []
 
     async def fake_generate_suggestions_execute(
-        *, supabase, products, shop_domain, normalization_settings=None, trace_event=None
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
     ):
         _ = (supabase, products, shop_domain, normalization_settings, trace_event)
         return [
@@ -307,7 +348,10 @@ async def test_submit_products_ai_enhancements_applies_audit_suggestions(monkeyp
         return {
             "data": {
                 "productCreate": {
-                    "product": {"id": "gid://shopify/Product/555", "title": product.get("title")},
+                    "product": {
+                        "id": "gid://shopify/Product/555",
+                        "title": product.get("title"),
+                    },
                     "userErrors": [],
                 }
             }
@@ -342,7 +386,9 @@ async def test_submit_products_ai_enhancements_applies_audit_suggestions(monkeyp
         submit_uc, "generate_suggestions_execute", fake_generate_suggestions_execute
     )
     monkeypatch.setattr(
-        submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fake_create_product_from_input,
     )
     monkeypatch.setattr(
         submit_api.ShopifyClient, "create_product_options", fake_create_product_options
@@ -369,20 +415,30 @@ async def test_submit_products_ai_enhancements_applies_audit_suggestions(monkeyp
         assert created_payloads[0]["tags"] == "alpha, beta"
         assert created_payloads[0]["seo_title"] == "SEO Demo"
         assert created_payloads[0]["metafields"][0]["namespace"] == "extractor"
-        assert option_payloads and option_payloads[0]["product_id"] == "gid://shopify/Product/555"
-        assert variant_payloads and variant_payloads[0]["product_id"] == "gid://shopify/Product/555"
+        assert (
+            option_payloads
+            and option_payloads[0]["product_id"] == "gid://shopify/Product/555"
+        )
+        assert (
+            variant_payloads
+            and variant_payloads[0]["product_id"] == "gid://shopify/Product/555"
+        )
 
 
 @pytest.mark.asyncio
 async def test_submit_products_ai_enhancements_requires_shop_domain(monkeypatch):
     async def fail_create_product_from_input(self, product):
         _ = (self, product)
-        raise AssertionError("create_product_from_input should not be called without shop_domain")
+        raise AssertionError(
+            "create_product_from_input should not be called without shop_domain"
+        )
 
     import api.agents.submit as submit_api
 
     monkeypatch.setattr(
-        submit_api.ShopifyClient, "create_product_from_input", fail_create_product_from_input
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fail_create_product_from_input,
     )
 
     transport = ASGITransport(app=app)
@@ -400,7 +456,12 @@ async def test_submit_products_ai_enhancements_requires_shop_domain(monkeypatch)
 @pytest.mark.asyncio
 async def test_submit_products_ai_enhancements_syncs_draft_for_preview(monkeypatch):
     async def fake_generate_suggestions_execute(
-        *, supabase, products, shop_domain, normalization_settings=None, trace_event=None
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
     ):
         _ = (supabase, products, shop_domain, normalization_settings, trace_event)
         return [
@@ -418,7 +479,10 @@ async def test_submit_products_ai_enhancements_syncs_draft_for_preview(monkeypat
         return {
             "data": {
                 "productCreate": {
-                    "product": {"id": "gid://shopify/Product/777", "title": product.get("title")},
+                    "product": {
+                        "id": "gid://shopify/Product/777",
+                        "title": product.get("title"),
+                    },
                     "userErrors": [],
                 }
             }
@@ -431,7 +495,9 @@ async def test_submit_products_ai_enhancements_syncs_draft_for_preview(monkeypat
         submit_uc, "generate_suggestions_execute", fake_generate_suggestions_execute
     )
     monkeypatch.setattr(
-        submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fake_create_product_from_input,
     )
 
     transport = ASGITransport(app=app)
@@ -503,6 +569,7 @@ async def test_import_ignores_freeform_prompt_fields(monkeypatch):
         assert response.status_code == 200
         assert "prompt" not in captured
         assert "writer_prompt" not in captured
+        assert captured.get("extraction_mode") == "per_sheet"
 
 
 @pytest.mark.asyncio
@@ -577,7 +644,10 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
         return {
             "data": {
                 "productCreate": {
-                    "product": {"id": "gid://shopify/Product/1", "title": product.get("title")},
+                    "product": {
+                        "id": "gid://shopify/Product/1",
+                        "title": product.get("title"),
+                    },
                     "userErrors": [],
                 }
             }
@@ -585,7 +655,11 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
 
     import api.agents.submit as submit_api
 
-    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fake_create_product_from_input,
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -620,9 +694,13 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
         submitted_list = await ac.get("/agents/submitted-documents")
         assert submitted_list.status_code == 200
         items = submitted_list.json()["submitted_documents"]
-        assert any(item.get("submitted_id") == submitted_body["submitted_id"] for item in items)
+        assert any(
+            item.get("submitted_id") == submitted_body["submitted_id"] for item in items
+        )
 
-        submitted_detail = await ac.get(f"/agents/submitted-documents/{submitted_body['submitted_id']}")
+        submitted_detail = await ac.get(
+            f"/agents/submitted-documents/{submitted_body['submitted_id']}"
+        )
         assert submitted_detail.status_code == 200
 
         submitted_resume = await ac.post(
@@ -638,7 +716,10 @@ async def test_bulk_delete_submitted_documents(monkeypatch):
         return {
             "data": {
                 "productCreate": {
-                    "product": {"id": "gid://shopify/Product/3", "title": product.get("title")},
+                    "product": {
+                        "id": "gid://shopify/Product/3",
+                        "title": product.get("title"),
+                    },
                     "userErrors": [],
                 }
             }
@@ -646,7 +727,11 @@ async def test_bulk_delete_submitted_documents(monkeypatch):
 
     import api.agents.submit as submit_api
 
-    monkeypatch.setattr(submit_api.ShopifyClient, "create_product_from_input", fake_create_product_from_input)
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fake_create_product_from_input,
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -656,7 +741,9 @@ async def test_bulk_delete_submitted_documents(monkeypatch):
             "run_id": "run-bulk-submitted",
             "document_name": "bulk-submitted.xlsx",
         }
-        created_submitted = await ac.post("/agents/submit-products", data=submit_payload)
+        created_submitted = await ac.post(
+            "/agents/submit-products", data=submit_payload
+        )
         assert created_submitted.status_code == 200
         submitted_id = created_submitted.json()["submitted_id"]
 
@@ -669,7 +756,9 @@ async def test_bulk_delete_submitted_documents(monkeypatch):
         body = bulk_response.json()
         assert body["deleted_ids"] == [submitted_id]
         assert body["failed_ids"] == [missing_id]
-        assert (await ac.get(f"/agents/submitted-documents/{submitted_id}")).status_code == 404
+        assert (
+            await ac.get(f"/agents/submitted-documents/{submitted_id}")
+        ).status_code == 404
 
 
 def _make_png_bytes(mode: str, size: tuple[int, int], color) -> bytes:
@@ -886,7 +975,10 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
                     "productType": "General",
                     "status": "ACTIVE",
                     "tags": ["tag-1"],
-                    "seo": {"title": "Catalog Product", "description": "Catalog description"},
+                    "seo": {
+                        "title": "Catalog Product",
+                        "description": "Catalog description",
+                    },
                 }
             }
         }
@@ -930,11 +1022,18 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
         assert audit_run.status_code == 200
         audit_id = audit_run.json()["audit_id"]
 
-        suggestions = await ac.get(f"/agents/intelligence/audits/{audit_id}/suggestions")
+        suggestions = await ac.get(
+            f"/agents/intelligence/audits/{audit_id}/suggestions"
+        )
         assert suggestions.status_code == 200
         rows = suggestions.json()["suggestions"]
         suggestion = next(
-            (row for row in rows if isinstance(row.get("patch_payload"), dict) and "vendor" in row["patch_payload"]),
+            (
+                row
+                for row in rows
+                if isinstance(row.get("patch_payload"), dict)
+                and "vendor" in row["patch_payload"]
+            ),
             None,
         )
         assert suggestion is not None
@@ -947,7 +1046,10 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
         applied_suggestion = apply_single.json()["suggestion"]
         assert applied_suggestion["previous_payload"]["vendor"] is None
         assert applied_suggestion["previous_payload"]["__is_reversible"] is True
-        assert applied_suggestion["previous_payload"]["__revert_modes"]["vendor"] == "clear"
+        assert (
+            applied_suggestion["previous_payload"]["__revert_modes"]["vendor"]
+            == "clear"
+        )
 
         revert_single = await ac.post(
             f"/agents/intelligence/suggestions/{suggestion['suggestion_id']}/revert"
@@ -972,7 +1074,10 @@ async def test_apply_partial_field_keeps_remaining_fields_pending(monkeypatch):
                     "productType": "General",
                     "status": "ACTIVE",
                     "tags": ["tag-1"],
-                    "seo": {"title": "Original SEO", "description": "Original description"},
+                    "seo": {
+                        "title": "Original SEO",
+                        "description": "Original description",
+                    },
                 }
             }
         }
@@ -1056,7 +1161,9 @@ async def test_apply_partial_field_keeps_remaining_fields_pending(monkeypatch):
         assert updates[0]["vendor"] == "Updated Vendor"
         assert "seo_title" not in updates[0]
 
-        suggestions = await ac.get(f"/agents/intelligence/audits/{audit_id}/suggestions")
+        suggestions = await ac.get(
+            f"/agents/intelligence/audits/{audit_id}/suggestions"
+        )
         assert suggestions.status_code == 200
         rows = suggestions.json()["suggestions"]
         applied = [row for row in rows if row.get("status") == "applied"]
@@ -1080,7 +1187,10 @@ async def test_revert_blocked_for_non_reversible_missing_original_field(monkeypa
                     "productType": "General",
                     "status": "ACTIVE",
                     "tags": ["tag-1"],
-                    "seo": {"title": "Catalog Product", "description": "Catalog description"},
+                    "seo": {
+                        "title": "Catalog Product",
+                        "description": "Catalog description",
+                    },
                 }
             }
         }

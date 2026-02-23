@@ -1,4 +1,4 @@
-"""Use-case: create a highlighted spreadsheet copy for source verification."""
+"""Use-case: create highlighted source artifacts for source verification."""
 
 from __future__ import annotations
 
@@ -12,11 +12,13 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter, range_boundaries
 
+from application.ports.collabora_port import CollaboraPort
 from application.ports.supabase_port import SupabasePort
 from application.services.document_formats import classify_document
 
 _XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _XLSM_CONTENT_TYPE = "application/vnd.ms-excel.sheet.macroenabled.12"
+_PDF_CONTENT_TYPE = "application/pdf"
 _HIGHLIGHT_FILL = PatternFill(
     fill_type="solid",
     start_color="FFF59D",
@@ -127,9 +129,222 @@ def _build_target(
     return target
 
 
-def execute(
+def _optional_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, float) and value.is_integer():
+        int_value = int(value)
+        return int_value if int_value > 0 else None
+    if isinstance(value, str):
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        if trimmed.isdigit():
+            int_value = int(trimmed)
+            return int_value if int_value > 0 else None
+    return None
+
+
+def _optional_trimmed_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _normalize_bbox(value: Any) -> tuple[float, float, float, float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        x0, y0, x1, y1 = (float(value[0]), float(value[1]), float(value[2]), float(value[3]))
+    except (TypeError, ValueError):
+        return None
+    left, right = sorted((x0, x1))
+    top, bottom = sorted((y0, y1))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+_TEXT_FIRST_SOURCE_FIELDS = {
+    "title",
+    "handle",
+    "body_html",
+    "vendor",
+    "product_type",
+    "tags",
+    "sku",
+    "price",
+}
+_MEDIA_LAST_SOURCE_FIELDS = {"image_src", "image_alt_text", "image_position"}
+
+
+def _source_ref_field_priority(field_value: Any) -> int:
+    field = _optional_trimmed_str(field_value)
+    if not field:
+        return 50
+    normalized = field.lower()
+    if normalized == "title":
+        return 0
+    if normalized in _TEXT_FIRST_SOURCE_FIELDS:
+        return 10
+    if (
+        normalized.startswith("variant")
+        or normalized.startswith("option")
+        or "sku" in normalized
+        or "price" in normalized
+    ):
+        return 20
+    if normalized in _MEDIA_LAST_SOURCE_FIELDS or "image" in normalized:
+        return 90
+    return 40
+
+
+def _select_highlight_page_candidate(
+    current: tuple[int, int, int] | None,
+    *,
+    field: Any,
+    target_index: int,
+    page: int,
+) -> tuple[int, int, int]:
+    priority = _source_ref_field_priority(field)
+    candidate = (priority, target_index, page)
+    if current is None:
+        return candidate
+    current_priority, current_target_index, _ = current
+    if priority < current_priority:
+        return candidate
+    if priority == current_priority and target_index < current_target_index:
+        return candidate
+    return current
+
+
+def _collect_pdf_targets(
+    source_refs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for source_ref in source_refs:
+        if not isinstance(source_ref, dict):
+            continue
+        page = _optional_positive_int(source_ref.get("page"))
+        field = _optional_trimmed_str(source_ref.get("field"))
+        bbox = _normalize_bbox(source_ref.get("bbox"))
+        value = _optional_trimmed_str(source_ref.get("value"))
+        if bbox is not None and page is not None:
+            targets.append(
+                {
+                    "kind": "bbox",
+                    "page": page,
+                    "bbox": bbox,
+                    "field": field.lower() if field else None,
+                }
+            )
+        if value is not None:
+            targets.append(
+                {
+                    "kind": "text",
+                    "page": page,
+                    "value": value,
+                    "field": field.lower() if field else None,
+                }
+            )
+    if not targets:
+        raise ValueError(
+            "Missing non-spreadsheet source highlight target (expected page+bbox, page+value, or value)"
+        )
+    return targets
+
+
+def _highlight_pdf_bytes(
+    *,
+    pdf_bytes: bytes,
+    targets: list[dict[str, Any]],
+) -> tuple[bytes, int]:
+    try:
+        import fitz  # type: ignore
+    except Exception as exc:  # pragma: no cover - dependency/runtime guarded
+        raise RuntimeError(
+            "PyMuPDF dependency is required for non-spreadsheet source highlighting"
+        ) from exc
+
+    document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        did_highlight = False
+        selected_page_candidate: tuple[int, int, int] | None = None
+        for target_index, target in enumerate(targets):
+            if target["kind"] == "bbox":
+                page_number = _optional_positive_int(target.get("page"))
+                if page_number is None:
+                    continue
+                page_index = page_number - 1
+                if page_index < 0 or page_index >= document.page_count:
+                    continue
+                page = document[page_index]
+                x0, y0, x1, y1 = target["bbox"]
+                if (
+                    0 <= x0 <= 1
+                    and 0 <= y0 <= 1
+                    and 0 <= x1 <= 1
+                    and 0 <= y1 <= 1
+                ):
+                    page_rect = page.rect
+                    x0, x1 = x0 * page_rect.width, x1 * page_rect.width
+                    y0, y1 = y0 * page_rect.height, y1 * page_rect.height
+                rect = fitz.Rect(x0, y0, x1, y1)
+                if rect.width <= 0 or rect.height <= 0:
+                    continue
+                annotation = page.add_highlight_annot(rect)
+                if annotation is not None:
+                    annotation.update()
+                did_highlight = True
+                selected_page_candidate = _select_highlight_page_candidate(
+                    selected_page_candidate,
+                    field=target.get("field"),
+                    target_index=target_index,
+                    page=page_number,
+                )
+                continue
+
+            search_value = target.get("value")
+            if not isinstance(search_value, str) or not search_value.strip():
+                continue
+            page_number = _optional_positive_int(target.get("page"))
+            if page_number is not None:
+                page_indexes = [page_number - 1]
+            else:
+                page_indexes = list(range(document.page_count))
+            for page_index in page_indexes:
+                if page_index < 0 or page_index >= document.page_count:
+                    continue
+                page = document[page_index]
+                matches = page.search_for(search_value.strip())
+                for match in matches:
+                    annotation = page.add_highlight_annot(match)
+                    if annotation is not None:
+                        annotation.update()
+                if matches:
+                    selected_page_candidate = _select_highlight_page_candidate(
+                        selected_page_candidate,
+                        field=target.get("field"),
+                        target_index=target_index,
+                        page=page_number or (page_index + 1),
+                    )
+                    did_highlight = True
+
+        if not did_highlight:
+            raise ValueError("Unable to locate requested source content in PDF")
+        selected_page = selected_page_candidate[2] if selected_page_candidate else 1
+        return document.tobytes(garbage=3, deflate=True), selected_page
+    finally:
+        document.close()
+
+
+async def execute(
     *,
     supabase: SupabasePort,
+    collabora: CollaboraPort,
     source_file_id: str,
     sheet: str | None = None,
     cell: str | None = None,
@@ -137,7 +352,7 @@ def execute(
     source_refs: list[dict[str, Any]] | None = None,
     preferred_sheet: str | None = None,
     highlight_file_id: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     file_entry = supabase.get_file(source_file_id)
     if not file_entry:
         raise LookupError("Source file not found")
@@ -155,7 +370,38 @@ def execute(
         file_bytes=source_bytes,
     )
     if not source_format.is_spreadsheet:
-        raise ValueError("Source highlighting is only available for spreadsheet files")
+        if not source_refs:
+            raise ValueError(
+                "Missing non-spreadsheet source references (expected page+bbox, page+value, or value)"
+            )
+        pdf_targets = _collect_pdf_targets(source_refs)
+        if source_format.kind == "pdf":
+            source_pdf_bytes = source_bytes
+        else:
+            source_pdf_bytes = await collabora.convert_document_to_pdf_collabora(
+                source_bytes,
+                filename=source_filename,
+                content_type=source_content_type or "application/octet-stream",
+                collabora_base_url=os.getenv("COLLABORA_URL", "http://localhost:8080"),
+            )
+        highlighted_pdf_bytes, highlighted_page = _highlight_pdf_bytes(
+            pdf_bytes=source_pdf_bytes,
+            targets=pdf_targets,
+        )
+        output_file_id = (highlight_file_id or "").strip() or str(uuid.uuid4())
+        base_name, _ = os.path.splitext(source_filename)
+        output_filename = f"{base_name or 'document'}-source-highlight.pdf"
+        supabase.save_file(
+            file_id=output_file_id,
+            name=output_filename,
+            content=highlighted_pdf_bytes,
+            content_type=_PDF_CONTENT_TYPE,
+        )
+        return {
+            "file_id": output_file_id,
+            "filename": output_filename,
+            "page": highlighted_page,
+        }
 
     coordinate_input = (cell_range or cell or "").strip()
     if not coordinate_input and not source_refs:

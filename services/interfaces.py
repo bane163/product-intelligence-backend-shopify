@@ -269,6 +269,16 @@ class CollaboraServiceInterface(Protocol):
         timeout: int = 60,
     ) -> bytes: ...
 
+    async def convert_document_to_pdf_collabora(
+        self,
+        file_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> bytes: ...
+
     async def convert_pdf_to_png_collabora(
         self,
         pdf_bytes: bytes,
@@ -285,6 +295,16 @@ class CollaboraServiceInterface(Protocol):
         collabora_base_url: str = "http://localhost:8080",
         timeout: int = 60,
     ) -> list[bytes]: ...
+
+    async def extract_link_targets_collabora(
+        self,
+        file_bytes: bytes,
+        *,
+        filename: str,
+        content_type: str,
+        collabora_base_url: str = "http://localhost:8080",
+        timeout: int = 60,
+    ) -> dict[str, dict[str, str]]: ...
 
     def get_runtime_url(self, default: str = "http://localhost:9980") -> str: ...
 

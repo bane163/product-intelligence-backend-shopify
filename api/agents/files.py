@@ -137,27 +137,6 @@ async def upload_file(
         content_type=stored_content_type,
     )
     thumbnail_generated = False
-    try:
-        collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
-        thumbnail_bytes = await generate_thumbnail_bytes(
-            file_bytes=file_bytes,
-            filename=stored_name,
-            content_type=stored_content_type,
-            collabora_url=collabora_url,
-            collabora=ctx.services.collabora,
-        )
-        from application.use_cases.files.save_file_thumbnail import (
-            execute as save_thumb_execute,
-        )
-
-        thumbnail_path = save_thumb_execute(
-            supabase=ctx.services.supabase, file_id=file_id, content=thumbnail_bytes
-        )
-        thumbnail_generated = bool(thumbnail_path)
-    except Exception as e:
-        LOG.warning(
-            "Thumbnail generation failed for file_id=%s: %s", file_id, e, exc_info=True
-        )
 
     from application.use_cases.files.get_file import execute as get_file_execute
 
@@ -321,8 +300,9 @@ async def create_source_highlight(
         parsed_source_refs = decoded_source_refs
 
     try:
-        return create_source_highlight_execute(
+        return await create_source_highlight_execute(
             supabase=ctx.services.supabase,
+            collabora=ctx.services.collabora,
             source_file_id=file_id,
             sheet=sheet,
             cell=cell,
@@ -338,6 +318,45 @@ async def create_source_highlight(
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Source highlight generation failed: {exc}"
+        )
+
+
+@router.get(
+    "/files/{file_id}/source-target",
+    summary="Resolve non-spreadsheet Collabora source target",
+)
+async def resolve_source_target(
+    file_id: str,
+    value: str | None = None,
+    document_kind: str | None = None,
+    page: int | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.files.resolve_collabora_source_target import (
+        execute as resolve_source_target_execute,
+    )
+
+    if page is not None and page < 1:
+        raise HTTPException(status_code=422, detail="page must be greater than 0")
+
+    try:
+        collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
+        return await resolve_source_target_execute(
+            supabase=ctx.services.supabase,
+            collabora=ctx.services.collabora,
+            source_file_id=file_id,
+            source_value=value,
+            source_document_kind=document_kind,
+            source_page=page,
+            collabora_base_url=collabora_url,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Source target resolution failed: {exc}"
         )
 
 

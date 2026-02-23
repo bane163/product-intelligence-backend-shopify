@@ -161,24 +161,40 @@ async def test_upload_csv_conversion_failure_returns_500_and_skips_save(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_upload_does_not_block_on_thumbnail_generation(monkeypatch):
+    def fail_if_thumbnail_called(*args, **kwargs):
+        _ = (args, kwargs)
+        raise AssertionError("upload route should not generate thumbnails synchronously")
+
+    import api.agents.files as files_api
+
+    monkeypatch.setattr(files_api, "generate_thumbnail_bytes", fail_if_thumbnail_called)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "sheet.xlsx",
+                io.BytesIO(b"sheetdata"),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        r = await ac.post("/agents/upload", files=files)
+        assert r.status_code == 200
+        body = r.json()
+        assert "file_id" in body
+        assert body["thumbnail_generated"] is False
+
+
+@pytest.mark.asyncio
 async def test_preview_generates_png(monkeypatch):
-    # Patch conversion helpers to return canned outputs
-    async def fake_convert_excel_to_pdf_collabora(content, collabora_base_url=None):
-        return b"PDF_BYTES"
+    async def fake_generate_thumbnail_bytes(**kwargs):
+        _ = kwargs
+        return b"PNG_BYTES_PAGE_1"
 
-    async def fake_convert_pdf_to_png_collabora(pdf_bytes, collabora_base_url=None):
-        return [b"PNG_BYTES_PAGE_1"]
+    import api.agents.files as files_api
 
-    monkeypatch.setenv("COLLABORA_URL", "http://localhost:9980")
-
-    import ai.collabora_utils as cu
-
-    monkeypatch.setattr(
-        cu, "convert_excel_to_pdf_collabora", fake_convert_excel_to_pdf_collabora
-    )
-    monkeypatch.setattr(
-        cu, "convert_pdf_to_png_collabora", fake_convert_pdf_to_png_collabora
-    )
+    monkeypatch.setattr(files_api, "generate_thumbnail_bytes", fake_generate_thumbnail_bytes)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -449,8 +465,58 @@ async def test_source_highlight_rejects_invalid_source_refs_json():
         assert "source_refs_json" in highlighted.json()["detail"]
 
 
+def test_select_highlight_page_candidate_prefers_text_over_image():
+    import application.use_cases.files.create_source_highlight_file as source_highlight_use_case
+
+    selected = None
+    selected = source_highlight_use_case._select_highlight_page_candidate(
+        selected,
+        field="image_src",
+        target_index=2,
+        page=2,
+    )
+    selected = source_highlight_use_case._select_highlight_page_candidate(
+        selected,
+        field="title",
+        target_index=0,
+        page=1,
+    )
+    assert selected is not None
+    assert selected[2] == 1
+
+
+def test_select_highlight_page_candidate_keeps_first_match_for_same_priority():
+    import application.use_cases.files.create_source_highlight_file as source_highlight_use_case
+
+    selected = None
+    selected = source_highlight_use_case._select_highlight_page_candidate(
+        selected,
+        field="vendor",
+        target_index=0,
+        page=1,
+    )
+    selected = source_highlight_use_case._select_highlight_page_candidate(
+        selected,
+        field="vendor",
+        target_index=3,
+        page=4,
+    )
+    assert selected is not None
+    assert selected[2] == 1
+
+
 @pytest.mark.asyncio
-async def test_source_highlight_rejects_non_spreadsheet_file():
+async def test_source_highlight_handles_pdf_source_refs(monkeypatch):
+    def fake_highlight_pdf_bytes(*, pdf_bytes, targets):
+        _ = (pdf_bytes, targets)
+        return b"%PDF-highlighted", 2
+
+    import application.use_cases.files.create_source_highlight_file as source_highlight_use_case
+
+    monkeypatch.setattr(
+        source_highlight_use_case, "_highlight_pdf_bytes", fake_highlight_pdf_bytes
+    )
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         files = {
@@ -466,10 +532,230 @@ async def test_source_highlight_rejects_non_spreadsheet_file():
 
         highlighted = await ac.post(
             f"/agents/files/{source_file_id}/source-highlight",
-            data={"cell": "A1"},
+            data={
+                "source_refs_json": json.dumps(
+                    [{"page": 2, "value": "Materials", "document_kind": "pdf"}]
+                )
+            },
         )
-        assert highlighted.status_code == 422
-        assert "spreadsheet" in highlighted.json()["detail"].lower()
+        assert highlighted.status_code == 200
+        payload = highlighted.json()
+        assert payload["page"] == 2
+        assert payload["filename"].endswith(".pdf")
+
+        highlighted_contents = await ac.get(
+            f"/agents/wopi/files/{payload['file_id']}/contents"
+        )
+        assert highlighted_contents.status_code == 200
+        assert highlighted_contents.content == b"%PDF-highlighted"
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_handles_pdf_source_refs_without_page(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_highlight_pdf_bytes(*, pdf_bytes, targets):
+        _ = pdf_bytes
+        captured["targets"] = targets
+        return b"%PDF-highlighted", 3
+
+    import application.use_cases.files.create_source_highlight_file as source_highlight_use_case
+
+    monkeypatch.setattr(
+        source_highlight_use_case, "_highlight_pdf_bytes", fake_highlight_pdf_bytes
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "document.pdf",
+                io.BytesIO(b"%PDF-1.4\nfake\n"),
+                "application/pdf",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={
+                "source_refs_json": json.dumps(
+                    [
+                        {
+                            "field": "image_src",
+                            "document_kind": "extracted_text",
+                            "value": "https://example.com/images/blue-shirt.jpg",
+                        }
+                    ]
+                )
+            },
+        )
+        assert highlighted.status_code == 200
+        payload = highlighted.json()
+        assert payload["page"] == 3
+        targets = captured.get("targets")
+        assert isinstance(targets, list)
+        assert any(
+            isinstance(target, dict)
+            and target.get("kind") == "text"
+            and target.get("page") is None
+            and target.get("value") == "https://example.com/images/blue-shirt.jpg"
+            for target in targets
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_highlight_converts_non_pdf_document(monkeypatch):
+    conversion_called = {"value": False}
+
+    async def fake_convert_document_to_pdf_collabora(
+        file_bytes,
+        *,
+        filename,
+        content_type,
+        collabora_base_url="http://localhost:8080",
+        timeout=60,
+    ):
+        _ = (file_bytes, filename, content_type, collabora_base_url, timeout)
+        conversion_called["value"] = True
+        return b"%PDF-converted"
+
+    def fake_highlight_pdf_bytes(*, pdf_bytes, targets):
+        _ = targets
+        assert pdf_bytes == b"%PDF-converted"
+        return b"%PDF-highlighted", 1
+
+    import ai.collabora_utils as cu
+    import application.use_cases.files.create_source_highlight_file as source_highlight_use_case
+
+    monkeypatch.setattr(
+        cu, "convert_document_to_pdf_collabora", fake_convert_document_to_pdf_collabora
+    )
+    monkeypatch.setattr(
+        source_highlight_use_case, "_highlight_pdf_bytes", fake_highlight_pdf_bytes
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "document.docx",
+                io.BytesIO(b"PK\x03\x04fake-docx"),
+                "application/octet-stream",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={"source_refs_json": json.dumps([{"page": 1, "value": "Materials"}])},
+        )
+        assert highlighted.status_code == 200
+        payload = highlighted.json()
+        assert payload["page"] == 1
+        assert payload["filename"].endswith(".pdf")
+        assert conversion_called["value"] is True
+
+
+@pytest.mark.asyncio
+async def test_source_target_resolves_non_spreadsheet_target(monkeypatch):
+    async def fake_extract_link_targets_collabora(
+        file_bytes,
+        *,
+        filename,
+        content_type,
+        collabora_base_url="http://localhost:8080",
+        timeout=60,
+    ):
+        _ = (file_bytes, filename, content_type, collabora_base_url, timeout)
+        return {
+            "Headings": {
+                "Materials": "Materials|region",
+                "Care": "Care|region",
+            },
+            "Bookmarks": {"_toc": "_toc"},
+        }
+
+    import ai.collabora_utils as cu
+
+    monkeypatch.setattr(
+        cu, "extract_link_targets_collabora", fake_extract_link_targets_collabora
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "document.pdf",
+                io.BytesIO(b"%PDF-1.4\nfake\n"),
+                "application/pdf",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        resolved = await ac.get(
+            f"/agents/files/{source_file_id}/source-target",
+            params={"value": "Materials & Care", "document_kind": "pdf", "page": 2},
+        )
+        assert resolved.status_code == 200
+        body = resolved.json()
+        assert body["target"] == "Materials|region"
+        assert body["matched_label"] == "Materials"
+        assert body["matched_group"] == "Headings"
+        assert body["reason"] == "matched"
+
+
+@pytest.mark.asyncio
+async def test_source_target_skips_spreadsheet_files(monkeypatch):
+    called = {"value": False}
+
+    async def fake_extract_link_targets_collabora(*args, **kwargs):
+        _ = (args, kwargs)
+        called["value"] = True
+        return {"Headings": {"Title": "Title|region"}}
+
+    import ai.collabora_utils as cu
+
+    monkeypatch.setattr(
+        cu, "extract_link_targets_collabora", fake_extract_link_targets_collabora
+    )
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Products"
+    sheet["A1"] = "Title"
+    source_buffer = io.BytesIO()
+    workbook.save(source_buffer)
+    workbook.close()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "source.xlsx",
+                io.BytesIO(source_buffer.getvalue()),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        resolved = await ac.get(
+            f"/agents/files/{source_file_id}/source-target",
+            params={"value": "Title", "document_kind": "spreadsheet"},
+        )
+        assert resolved.status_code == 200
+        body = resolved.json()
+        assert body["target"] is None
+        assert body["reason"] == "spreadsheet"
+        assert called["value"] is False
 
 
 @pytest.mark.asyncio

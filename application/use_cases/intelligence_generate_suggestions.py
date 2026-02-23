@@ -721,8 +721,8 @@ def _build_persisted_suggestions(
                 "category": item.category.strip(),
                 "severity": item.severity,
                 "message": item.message.strip(),
-                "patch_payload": item.patch_payload,
-                "details": item.details or {},
+                "patch_payload": item.patch_payload.model_dump(exclude_none=True),
+                "details": item.details.model_dump(exclude_none=True) if item.details else {},
                 "status": "pending",
                 "shop_domain": shop_domain,
             }

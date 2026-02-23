@@ -13,6 +13,15 @@ Rules:
 - product_index must point to an item in the input products list.
 - severity must be one of low, medium, high.
 - patch_payload must be a non-empty object.
+- patch_payload may only include these keys:
+  - title, body_html, vendor, product_type, product_category, seo_title, seo_description, tags
+  - metafields (array of {namespace, key, value, optional type})
+  - variant_operations ({create_options, create_variants, defaults})
+- details may only include these keys:
+  - confidence, rule_id, detected_value, canonical_value
+  - detected_values, canonical_values
+  - evidence_source, evidence_sources
+  - inferred_dimensions
 - Keep suggestions actionable and safe for merchant catalogs.
 - Prefer normalized, structured data from title/description/images when variants/options are incomplete.
 

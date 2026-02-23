@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Any, Optional, List, Literal
 
 
@@ -128,27 +128,145 @@ class ProductsList(BaseModel):
     products: List[ProductInput]
 
 
-class ProductIntelligenceSuggestionDraft(BaseModel):
+def _has_meaningful_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_has_meaningful_value(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_meaningful_value(item) for item in value.values())
+    return True
+
+
+class StrictSchemaModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+SuggestionScalar = str | int | float | bool
+SuggestionValue = SuggestionScalar | list[SuggestionScalar] | list[list[SuggestionScalar]]
+
+
+class ProductIntelligenceMetafieldPatch(StrictSchemaModel):
+    namespace: str = Field(min_length=1)
+    key: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    type: Optional[str] = None
+
+
+class ProductIntelligenceVariantOptionValuePatch(StrictSchemaModel):
+    option_name: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
+class ProductIntelligenceVariantCreateOptionPatch(StrictSchemaModel):
+    name: str = Field(min_length=1)
+    values: List[str] = Field(min_length=1)
+
+    @field_validator("values")
+    @classmethod
+    def validate_values(cls, value: List[str]) -> List[str]:
+        normalized = [item.strip() for item in value if item.strip()]
+        if not normalized:
+            raise ValueError("values must include at least one non-empty item")
+        return normalized
+
+
+class ProductIntelligenceVariantCreatePatch(StrictSchemaModel):
+    option_values: List[ProductIntelligenceVariantOptionValuePatch] = Field(min_length=1)
+    sku: Optional[str] = None
+    price: Optional[str | float | int] = None
+    inventory_quantity: Optional[int] = None
+
+
+class ProductIntelligenceVariantDefaultsPatch(StrictSchemaModel):
+    copy_from_first_variant: Optional[bool] = None
+    requires_review: Optional[bool] = None
+
+
+class ProductIntelligenceVariantOperationsPatch(StrictSchemaModel):
+    create_options: List[ProductIntelligenceVariantCreateOptionPatch] = Field(
+        default_factory=list
+    )
+    create_variants: List[ProductIntelligenceVariantCreatePatch] = Field(default_factory=list)
+    defaults: Optional[ProductIntelligenceVariantDefaultsPatch] = None
+
+
+class ProductIntelligencePatchPayload(StrictSchemaModel):
+    title: Optional[str] = None
+    body_html: Optional[str] = None
+    vendor: Optional[str] = None
+    product_type: Optional[str] = None
+    product_category: Optional[str] = None
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
+    tags: Optional[str | List[str]] = None
+    metafields: Optional[List[ProductIntelligenceMetafieldPatch]] = None
+    variant_operations: Optional[ProductIntelligenceVariantOperationsPatch] = None
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, value: Optional[str | List[str]]) -> Optional[str | List[str]]:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized or None
+        if isinstance(value, list):
+            normalized = [item.strip() for item in value if item.strip()]
+            return normalized or None
+        return value
+
+    @model_validator(mode="after")
+    def validate_non_empty(self) -> "ProductIntelligencePatchPayload":
+        payload = self.model_dump(exclude_none=True)
+        if not _has_meaningful_value(payload):
+            raise ValueError("patch_payload must include at least one non-empty field")
+        return self
+
+
+class ProductIntelligenceInferredDimension(StrictSchemaModel):
+    dimension: Optional[str] = None
+    detected_value: Optional[SuggestionValue] = None
+    canonical_value: Optional[SuggestionValue] = None
+    detected_values: Optional[List[str]] = None
+    canonical_values: Optional[List[str]] = None
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    source: Optional[Literal["title", "description", "image"]] = None
+    evidence_sources: Optional[List[Literal["title", "description", "image"]]] = None
+
+
+class ProductIntelligenceSuggestionDetails(StrictSchemaModel):
+    confidence: Optional[float] = Field(default=None, ge=0, le=1)
+    rule_id: Optional[str] = None
+    detected_value: Optional[SuggestionValue] = None
+    canonical_value: Optional[SuggestionValue] = None
+    detected_values: Optional[List[str]] = None
+    canonical_values: Optional[List[str]] = None
+    evidence_source: Optional[Literal["title", "description", "image"]] = None
+    evidence_sources: Optional[List[Literal["title", "description", "image"]]] = None
+    inferred_dimensions: Optional[List[ProductIntelligenceInferredDimension]] = None
+
+
+class ProductIntelligenceSuggestionDraft(StrictSchemaModel):
     product_index: int = Field(ge=0)
     category: str = Field(min_length=1)
     severity: Literal["low", "medium", "high"] = "low"
     message: str = Field(min_length=1)
-    patch_payload: dict[str, Any]
-    details: Optional[dict[str, Any]] = None
+    patch_payload: ProductIntelligencePatchPayload
+    details: Optional[ProductIntelligenceSuggestionDetails] = None
     product_title: Optional[str] = None
 
     @field_validator("patch_payload")
     @classmethod
-    def validate_patch_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(value, dict) or not value:
-            raise ValueError("patch_payload must be a non-empty object")
-        normalized = {str(key).strip(): item for key, item in value.items() if str(key).strip()}
-        if not normalized:
+    def validate_patch_payload(
+        cls, value: ProductIntelligencePatchPayload
+    ) -> ProductIntelligencePatchPayload:
+        if not _has_meaningful_value(value.model_dump(exclude_none=True)):
             raise ValueError("patch_payload must include at least one non-empty field")
-        return normalized
+        return value
 
 
-class ProductIntelligenceSuggestionsList(BaseModel):
+class ProductIntelligenceSuggestionsList(StrictSchemaModel):
     suggestions: List[ProductIntelligenceSuggestionDraft]
 
 

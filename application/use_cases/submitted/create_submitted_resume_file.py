@@ -21,5 +21,6 @@ def execute(supabase: SupabasePort, submitted_id: str) -> dict[str, str]:
         name=filename,
         content=output_bytes,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_origin="submitted_resume",
     )
     return {"file_id": file_id, "filename": filename}

@@ -20,6 +20,7 @@ from .schemas import BulkDeletePayload, BulkDeleteResult
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
+MERCHANT_UPLOAD_FILE_ORIGIN = "merchant_upload"
 
 
 def _optional_str(entry: dict[str, object] | None, key: str) -> str | None:
@@ -38,13 +39,15 @@ def _required_str(entry: dict[str, object], key: str) -> str:
 
 @router.get("/files", summary="List uploaded files")
 async def list_uploaded_files(
-    limit: int = 100, offset: int = 0, ctx: AppContext = Depends(get_ctx)
+    limit: int = 1000, offset: int = 0, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, Any]:
     """List all uploaded files."""
     from application.use_cases.files.list_files import execute as list_files_execute
 
+    resolved_limit = max(1, min(limit, 5000))
+    resolved_offset = max(0, offset)
     files = list_files_execute(
-        supabase=ctx.services.supabase, limit=limit, offset=offset
+        supabase=ctx.services.supabase, limit=resolved_limit, offset=resolved_offset
     )
     return {"files": files}
 
@@ -135,6 +138,7 @@ async def upload_file(
         name=stored_name,
         content=file_bytes,
         content_type=stored_content_type,
+        file_origin=MERCHANT_UPLOAD_FILE_ORIGIN,
     )
     thumbnail_generated = False
 

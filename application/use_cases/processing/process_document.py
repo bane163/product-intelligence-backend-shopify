@@ -55,11 +55,13 @@ async def execute(
     supabase.create_or_update_run(
         run_id,
         {
-            "status": "running",
+            "status": "queued",
             "source": "document_import",
             "started_at": started_at.isoformat(),
             "prompt": DEFAULT_IMPORT_AGENT_PROMPT,
             "writer_prompt": DEFAULT_IMPORT_WRITER_PROMPT,
+            "attempt": 1,
+            "shop_domain": shop_domain,
         },
     )
     try:
@@ -115,6 +117,13 @@ async def execute(
             phase="workflow_start",
             message="Starting document workflow execution",
             payload_preview={"input_bytes": len(file_bytes)},
+        )
+        supabase.create_or_update_run(
+            run_id,
+            {
+                "status": "running",
+                "shop_domain": shop_domain,
+            },
         )
 
         final_output_path = None
@@ -195,6 +204,7 @@ async def execute(
                         name=generated_filename,
                         content=out_bytes,
                         content_type=ct,
+                        file_origin="workflow_output",
                     )
                     try:
                         os.remove(result)

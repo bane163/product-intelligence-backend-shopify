@@ -15,9 +15,20 @@ class SupabaseAdapter(SupabasePort):
         self._service = service
 
     def save_file(
-        self, file_id: str, name: str, content: bytes, content_type: str | None = None
+        self,
+        file_id: str,
+        name: str,
+        content: bytes,
+        content_type: str | None = None,
+        file_origin: str | None = None,
     ) -> None:
-        return self._service.save_file(file_id, name, content, content_type)
+        return self._service.save_file(
+            file_id,
+            name,
+            content,
+            content_type,
+            file_origin=file_origin,
+        )
 
     def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         return self._service.list_files(limit, offset)
@@ -71,15 +82,19 @@ class SupabaseAdapter(SupabasePort):
         )
 
     def list_runs(
-        self, limit: int = 50, offset: int = 0, status: str | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._service.list_runs(limit, offset, status)
+        return self._service.list_runs(limit, offset, status, shop_domain)
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
-        return self._service.get_run(run_id)
+    def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None:
+        return self._service.get_run(run_id, shop_domain=shop_domain)
 
-    def get_run_history(self, run_id: str) -> dict[str, Any]:
-        return self._service.get_run_history(run_id)
+    def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]:
+        return self._service.get_run_history(run_id, shop_domain=shop_domain)
 
     def save_product_draft(
         self,

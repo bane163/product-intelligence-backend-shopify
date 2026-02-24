@@ -25,6 +25,12 @@ NORMALIZATION_CATEGORY_KEYS = (
     "missing_options",
 )
 
+FILE_ORIGIN_MERCHANT_UPLOAD = "merchant_upload"
+FILE_ORIGIN_WORKFLOW_OUTPUT = "workflow_output"
+FILE_ORIGIN_SOURCE_HIGHLIGHT = "source_highlight"
+FILE_ORIGIN_DRAFT_RESUME = "draft_resume"
+FILE_ORIGIN_SUBMITTED_RESUME = "submitted_resume"
+
 
 class SupabaseService(SupabaseServiceInterface):
     def __init__(self, bucket_name: str | None = None):
@@ -68,10 +74,79 @@ class SupabaseService(SupabaseServiceInterface):
             LOG.debug("Supabase client unavailable", exc_info=True)
             return None
 
+    @staticmethod
+    def _normalize_file_origin(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        return normalized or None
+
+    @classmethod
+    def _infer_file_origin_from_filename(cls, filename: Any) -> str:
+        name = str(filename or "").strip().lower()
+        if not name:
+            return FILE_ORIGIN_MERCHANT_UPLOAD
+        if "-source-highlight" in name:
+            return FILE_ORIGIN_SOURCE_HIGHLIGHT
+        if name.startswith("draft-") and name.endswith(".xlsx"):
+            return FILE_ORIGIN_DRAFT_RESUME
+        if name.startswith("submitted-") and name.endswith(".xlsx"):
+            return FILE_ORIGIN_SUBMITTED_RESUME
+        if name.endswith("-products.xlsx"):
+            return FILE_ORIGIN_WORKFLOW_OUTPUT
+        return FILE_ORIGIN_MERCHANT_UPLOAD
+
+    @classmethod
+    def _normalize_file_row_origin(cls, row: dict[str, Any]) -> str:
+        return (
+            cls._normalize_file_origin(row.get("file_origin"))
+            or cls._infer_file_origin_from_filename(row.get("filename"))
+        )
+
+    @classmethod
+    def _dedupe_and_filter_document_rows(
+        cls, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        deduped: dict[str, dict[str, Any]] = {}
+        for item in rows:
+            storage_path = str(item.get("storage_path") or item.get("file_id") or "").strip()
+            if not storage_path:
+                continue
+            current = deduped.get(storage_path)
+            if current is None:
+                deduped[storage_path] = item
+                continue
+            current_created = str(current.get("created_at") or "")
+            candidate_created = str(item.get("created_at") or "")
+            if candidate_created >= current_created:
+                deduped[storage_path] = item
+
+        visible_rows: list[dict[str, Any]] = []
+        for item in deduped.values():
+            if cls._normalize_file_row_origin(item) != FILE_ORIGIN_MERCHANT_UPLOAD:
+                continue
+            visible_rows.append(
+                {
+                    **item,
+                    "file_id": str(item.get("storage_path") or item.get("file_id") or ""),
+                }
+            )
+        visible_rows.sort(
+            key=lambda item: str(item.get("created_at") or ""),
+            reverse=True,
+        )
+        return visible_rows
+
     # ----- File storage -----
     def save_file(
-        self, file_id: str, name: str, content: bytes, content_type: str | None = None
+        self,
+        file_id: str,
+        name: str,
+        content: bytes,
+        content_type: str | None = None,
+        file_origin: str | None = None,
     ) -> None:
+        normalized_origin = self._normalize_file_origin(file_origin) or self._infer_file_origin_from_filename(name)
         bucket = self._try_get_bucket()
         if bucket is None:
             self.file_storage[file_id] = {
@@ -79,6 +154,7 @@ class SupabaseService(SupabaseServiceInterface):
                 "content": content,
                 "content_type": content_type or "application/octet-stream",
                 "storage_path": file_id,
+                "file_origin": normalized_origin,
                 "thumbnail_storage_path": None,
                 "thumbnail_content": None,
             }
@@ -117,14 +193,26 @@ class SupabaseService(SupabaseServiceInterface):
         try:
             client = self._get_supabase_client()
             if client:
-                client.table("file_metadata").insert(
-                    {
-                        "storage_path": file_id,
-                        "filename": name,
-                        "content_type": content_type or "application/octet-stream",
-                        "size": len(content) if content else 0,
-                    }
-                ).execute()
+                metadata_payload = {
+                    "storage_path": file_id,
+                    "filename": name,
+                    "content_type": content_type or "application/octet-stream",
+                    "size": len(content) if content else 0,
+                    "file_origin": normalized_origin,
+                }
+                try:
+                    client.table("file_metadata").upsert(
+                        metadata_payload, on_conflict="storage_path"
+                    ).execute()
+                except Exception:
+                    legacy_payload = dict(metadata_payload)
+                    legacy_payload.pop("file_origin", None)
+                    try:
+                        client.table("file_metadata").upsert(
+                            legacy_payload, on_conflict="storage_path"
+                        ).execute()
+                    except Exception:
+                        client.table("file_metadata").insert(legacy_payload).execute()
         except Exception:
             LOG.exception("Failed inserting file metadata for %s", file_id)
 
@@ -132,44 +220,55 @@ class SupabaseService(SupabaseServiceInterface):
         try:
             client = self._get_supabase_client()
             if client:
+                db_limit = min(max(limit + offset, 1000), 5000)
                 res = (
                     client.table("file_metadata")
                     .select("*")
                     .order("created_at", desc=True)
-                    .range(offset, offset + limit - 1)
+                    .limit(db_limit)
                     .execute()
                 )
-                return res.data or []
+                rows = self._dedupe_and_filter_document_rows(res.data or [])
+                return rows[offset : offset + limit]
         except Exception:
             LOG.exception("Failed listing files from DB")
 
         bucket = self._try_get_bucket()
         if bucket is None:
-            return [
+            rows = [
                 {
                     "file_id": k,
                     "storage_path": k,
                     "filename": v["name"],
                     "content_type": v["content_type"],
+                    "file_origin": v.get("file_origin"),
+                    "created_at": v.get("created_at") or self._utc_now(),
                     "thumbnail_storage_path": v.get("thumbnail_storage_path"),
                 }
                 for k, v in self.file_storage.items()
             ]
+            filtered_rows = self._dedupe_and_filter_document_rows(rows)
+            return filtered_rows[offset : offset + limit]
 
         try:
             files = bucket.list(path=None)
-            return [
+            rows = [
                 {
                     "file_id": f.get("name"),
                     "storage_path": f.get("name"),
                     "filename": f.get("metadata", {}).get("name", f.get("name")),
                     "content_type": f.get("metadata", {}).get("mimetype"),
+                    "file_origin": self._infer_file_origin_from_filename(
+                        f.get("metadata", {}).get("name", f.get("name"))
+                    ),
                     "size": f.get("metadata", {}).get("size"),
                     "created_at": f.get("created_at"),
                     "thumbnail_storage_path": None,
                 }
                 for f in files
             ]
+            filtered_rows = self._dedupe_and_filter_document_rows(rows)
+            return filtered_rows[offset : offset + limit]
         except Exception:
             LOG.exception("Failed listing files from bucket")
             return []
@@ -192,6 +291,7 @@ class SupabaseService(SupabaseServiceInterface):
 
         name = file_id
         content_type = "application/octet-stream"
+        file_origin = FILE_ORIGIN_MERCHANT_UPLOAD
         thumbnail_storage_path = None
         try:
             client = self._get_supabase_client()
@@ -200,6 +300,7 @@ class SupabaseService(SupabaseServiceInterface):
                     client.table("file_metadata")
                     .select("*")
                     .eq("storage_path", file_id)
+                    .order("created_at", desc=True)
                     .limit(1)
                     .execute()
                 )
@@ -208,6 +309,7 @@ class SupabaseService(SupabaseServiceInterface):
                     meta = rows[0]
                     name = meta.get("filename", name)
                     content_type = meta.get("content_type", content_type)
+                    file_origin = self._normalize_file_row_origin(meta)
                     thumbnail_storage_path = meta.get("thumbnail_storage_path")
         except Exception:
             LOG.debug("DB metadata fetch failed for %s", file_id, exc_info=True)
@@ -216,6 +318,7 @@ class SupabaseService(SupabaseServiceInterface):
             "name": name,
             "content": content,
             "content_type": content_type,
+            "file_origin": file_origin,
             "storage_path": file_id,
             "thumbnail_storage_path": thumbnail_storage_path,
         }
@@ -271,16 +374,29 @@ class SupabaseService(SupabaseServiceInterface):
                             file_id,
                         )
                         return None
-                    client.table("file_metadata").insert(
-                        {
-                            "storage_path": file_id,
-                            "filename": file_entry.get("name") or file_id,
-                            "content_type": file_entry.get("content_type")
-                            or "application/octet-stream",
-                            "size": len(file_entry.get("content") or b""),
-                            "thumbnail_storage_path": thumbnail_path,
-                        }
-                    ).execute()
+                    metadata_payload = {
+                        "storage_path": file_id,
+                        "filename": file_entry.get("name") or file_id,
+                        "content_type": file_entry.get("content_type")
+                        or "application/octet-stream",
+                        "size": len(file_entry.get("content") or b""),
+                        "thumbnail_storage_path": thumbnail_path,
+                    }
+                    metadata_payload_with_origin = {
+                        **metadata_payload,
+                        "file_origin": self._normalize_file_origin(
+                            file_entry.get("file_origin")
+                        )
+                        or self._infer_file_origin_from_filename(
+                            file_entry.get("name") or file_id
+                        ),
+                    }
+                    try:
+                        client.table("file_metadata").insert(
+                            metadata_payload_with_origin
+                        ).execute()
+                    except Exception:
+                        client.table("file_metadata").insert(metadata_payload).execute()
         except Exception:
             LOG.exception(
                 "Failed updating thumbnail metadata for %s; verify thumbnail_storage_path migration is applied",
@@ -363,11 +479,39 @@ class SupabaseService(SupabaseServiceInterface):
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _normalize_shop_domain(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip().lower()
+        return normalized or None
+
+    @staticmethod
+    def _normalize_run_status(value: Any) -> str | None:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return None
+        if normalized in {"queued", "pending", "created"}:
+            return "queued"
+        if normalized in {"running", "in_progress", "processing"}:
+            return "running"
+        if normalized in {"succeeded", "success", "completed", "complete", "done"}:
+            return "succeeded"
+        if normalized in {"failed", "error", "errored"}:
+            return "failed"
+        if normalized in {"cancelled", "canceled", "aborted"}:
+            return "cancelled"
+        return normalized
+
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None:
         client = self._get_supabase_client()
         if not client:
             return
         payload = {"run_id": run_id, **fields}
+        if "shop_domain" in payload:
+            payload["shop_domain"] = self._normalize_shop_domain(payload.get("shop_domain"))
+        if "status" in payload:
+            payload["status"] = self._normalize_run_status(payload.get("status"))
         for key in ("prompt", "writer_prompt", "error"):
             if key in payload:
                 payload[key] = sanitize_text(payload.get(key))
@@ -433,19 +577,32 @@ class SupabaseService(SupabaseServiceInterface):
         error: str | None = None,
         extra_fields: dict[str, Any] | None = None,
     ) -> None:
+        normalized_status = self._normalize_run_status(status) or "failed"
         fields: dict[str, Any] = {
-            "status": status,
+            "status": normalized_status,
             "ended_at": self._utc_now(),
             "duration_ms": duration_ms,
         }
         if error:
             fields["error"] = error
+        if normalized_status == "failed":
+            fields.setdefault("failure_code", "run_failed")
+            fields.setdefault("failure_message", sanitize_text(error) if error else "Run failed")
+            fields.setdefault("resume_token", str(uuid.uuid4()))
+        elif normalized_status in {"succeeded", "cancelled"}:
+            fields.setdefault("resume_token", None)
+            fields.setdefault("failure_code", None)
+            fields.setdefault("failure_message", None)
         if extra_fields:
             fields.update(extra_fields)
         self.create_or_update_run(run_id, fields)
 
     def list_runs(
-        self, limit: int = 50, offset: int = 0, status: str | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         client = self._get_supabase_client()
         if not client:
@@ -459,35 +616,38 @@ class SupabaseService(SupabaseServiceInterface):
             )
             if status:
                 query = query.eq("status", status)
+            normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+            if normalized_shop_domain:
+                query = query.eq("shop_domain", normalized_shop_domain)
             res = query.execute()
             return res.data or []
         except Exception:
             LOG.exception("Failed listing llm_runs")
             return []
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None:
+    def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None:
         client = self._get_supabase_client()
         if not client:
             return None
         try:
-            res = (
-                client.table("llm_runs")
-                .select("*")
-                .eq("run_id", run_id)
-                .limit(1)
-                .execute()
-            )
+            query = client.table("llm_runs").select("*").eq("run_id", run_id)
+            normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+            if normalized_shop_domain:
+                query = query.eq("shop_domain", normalized_shop_domain)
+            res = query.limit(1).execute()
             rows = res.data or []
             return rows[0] if rows else None
         except Exception:
             LOG.exception("Failed fetching llm_runs for run_id=%s", run_id)
             return None
 
-    def get_run_history(self, run_id: str) -> dict[str, Any]:
+    def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]:
         client = self._get_supabase_client()
         if not client:
             return {"run": None, "events": [], "messages": []}
-        run = self.get_run(run_id)
+        run = self.get_run(run_id, shop_domain=shop_domain)
+        if not run:
+            return {"run": None, "events": [], "messages": []}
         events: list[dict[str, Any]] = []
         messages: list[dict[str, Any]] = []
         try:
@@ -587,6 +747,7 @@ class SupabaseService(SupabaseServiceInterface):
     ) -> list[dict[str, Any]]:
         db_drafts: list[dict[str, Any]] = []
         submitted_draft_ids: set[str] = set()
+        db_drafts_loaded = False
         client = self._get_supabase_client()
         if client:
             try:
@@ -598,6 +759,7 @@ class SupabaseService(SupabaseServiceInterface):
                     .execute()
                 )
                 db_drafts = res.data or []
+                db_drafts_loaded = True
             except Exception:
                 LOG.exception("Failed listing product drafts")
             try:
@@ -617,18 +779,21 @@ class SupabaseService(SupabaseServiceInterface):
                     exc_info=True,
                 )
 
-        drafts_map: dict[str, dict[str, Any]] = {
-            str(item.get("draft_id")): item
-            for item in db_drafts
-            if item.get("draft_id")
-        }
-        for key, item in self.product_drafts.items():
-            drafts_map[str(item.get("draft_id") or key)] = item
-
-        for item in self.submitted_documents.values():
-            draft_id = item.get("draft_id")
-            if draft_id:
-                submitted_draft_ids.add(str(draft_id))
+        if db_drafts_loaded:
+            drafts_map: dict[str, dict[str, Any]] = {
+                str(item.get("draft_id")): item
+                for item in db_drafts
+                if item.get("draft_id")
+            }
+        else:
+            drafts_map = {
+                str(item.get("draft_id") or key): item
+                for key, item in self.product_drafts.items()
+            }
+            for item in self.submitted_documents.values():
+                draft_id = item.get("draft_id")
+                if draft_id:
+                    submitted_draft_ids.add(str(draft_id))
 
         drafts = [
             item
@@ -755,6 +920,7 @@ class SupabaseService(SupabaseServiceInterface):
         sort_dir: str = "desc",
     ) -> list[dict[str, Any]]:
         db_docs: list[dict[str, Any]] = []
+        db_docs_loaded = False
         client = self._get_supabase_client()
         if client:
             try:
@@ -765,18 +931,16 @@ class SupabaseService(SupabaseServiceInterface):
                     .execute()
                 )
                 db_docs = res.data or []
+                db_docs_loaded = True
             except Exception:
                 LOG.exception("Failed listing submitted documents")
 
-        docs_map: dict[str, dict[str, Any]] = {
-            str(item.get("submitted_id")): item
-            for item in db_docs
-            if item.get("submitted_id")
-        }
-        for key, item in self.submitted_documents.items():
-            docs_map[str(item.get("submitted_id") or key)] = item
-
-        docs = list(docs_map.values())
+        if db_docs_loaded:
+            docs = [
+                item for item in db_docs if item.get("submitted_id")
+            ]
+        else:
+            docs = list(self.submitted_documents.values())
         for doc in docs:
             preview_file_id = doc.get("preview_file_id")
             resolved_preview = (

@@ -388,6 +388,7 @@ async def run_excel_writer_agent(
             filename,
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_origin="workflow_output",
         )
 
         _trace(
@@ -493,6 +494,7 @@ async def run_excel_writer_agent(
             filename,
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_origin="workflow_output",
         )
         generated_file = {
             "file_id": file_id,

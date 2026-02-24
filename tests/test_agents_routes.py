@@ -12,13 +12,22 @@ from app_context import get_app_context
 from api.agents.files_helper import _generate_thumbnail_bytes, _is_blank_png
 from main import app
 
+TEST_SHOP_DOMAIN = "store.myshopify.com"
+TEST_SHOP_HEADERS = {"x-shop-domain": TEST_SHOP_DOMAIN}
+
 
 @pytest.mark.asyncio
 async def test_upload_and_wopi_get_file_contents():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         file_bytes = b"hello world"
-        files = {"file": ("test.txt", io.BytesIO(file_bytes), "text/plain")}
+        files = {
+            "file": (
+                "test.xlsx",
+                io.BytesIO(file_bytes),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
         r = await ac.post("/agents/upload", files=files)
         assert r.status_code == 200
         body = r.json()
@@ -320,6 +329,84 @@ async def test_source_highlight_reuses_existing_highlight_file():
         assert highlighted_sheet["A3"].fill.fill_type == "solid"
         assert highlighted_sheet["A2"].fill.fill_type != "solid"
         highlighted_workbook.close()
+
+
+@pytest.mark.asyncio
+async def test_list_files_hides_source_highlight_artifacts():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Products"
+    sheet["A1"] = "Title"
+    sheet["A2"] = "Demo product"
+    source_buffer = io.BytesIO()
+    workbook.save(source_buffer)
+    workbook.close()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = {
+            "file": (
+                "source.xlsx",
+                io.BytesIO(source_buffer.getvalue()),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        }
+        uploaded = await ac.post("/agents/upload", files=files)
+        assert uploaded.status_code == 200
+        source_file_id = uploaded.json()["file_id"]
+
+        highlighted = await ac.post(
+            f"/agents/files/{source_file_id}/source-highlight",
+            data={"sheet": "Products", "cell_range": "A2:A2"},
+        )
+        assert highlighted.status_code == 200
+        highlight_file_id = highlighted.json()["file_id"]
+
+        listed = await ac.get("/agents/files?limit=1000")
+        assert listed.status_code == 200
+        listed_ids = {str(item.get("file_id")) for item in listed.json().get("files", [])}
+        assert source_file_id in listed_ids
+        assert highlight_file_id not in listed_ids
+
+
+@pytest.mark.asyncio
+async def test_list_files_hides_draft_resume_files():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "merchant-upload.xlsx",
+                    io.BytesIO(b"merchant-upload"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        merchant_file_id = uploaded.json()["file_id"]
+
+        created_draft = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Resume Product"}]),
+                "run_id": "run-resume-hide",
+                "import_mode": "auto",
+                "draft_name": "resume-hide.xlsx",
+            },
+        )
+        assert created_draft.status_code == 200
+        draft_id = created_draft.json()["draft_id"]
+
+        resumed = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
+        assert resumed.status_code == 200
+        resume_file_id = resumed.json()["file_id"]
+
+        listed = await ac.get("/agents/files?limit=1000")
+        assert listed.status_code == 200
+        listed_ids = {str(item.get("file_id")) for item in listed.json().get("files", [])}
+        assert merchant_file_id in listed_ids
+        assert resume_file_id not in listed_ids
 
 
 @pytest.mark.asyncio
@@ -1400,7 +1487,32 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
             }
         }
 
+    async def fake_generate_suggestions_execute(
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
+    ):
+        _ = (supabase, shop_domain, normalization_settings, trace_event)
+        target_title = str(products[0].get("title") or "Short") if products else "Short"
+        return [
+            {
+                "suggestion_id": f"suggestion-{uuid.uuid4()}",
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "product_title": target_title,
+                "category": "completeness",
+                "severity": "medium",
+                "message": "Add vendor detail",
+                "patch_payload": {"vendor": "Improved Vendor"},
+                "status": "pending",
+            }
+        ]
+
     import shopify as shopify_module
+    import application.use_cases.intelligence_generate_suggestions as suggestions_uc
 
     monkeypatch.setattr(
         shopify_module.ShopifyClient,
@@ -1408,9 +1520,14 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
         fake_update_product_from_input,
     )
     monkeypatch.setattr(shopify_module.ShopifyClient, "get_product", fake_get_product)
+    monkeypatch.setattr(
+        suggestions_uc, "execute", fake_generate_suggestions_execute
+    )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
         audit_run = await ac.post(
             "/agents/intelligence/audit",
             json={
@@ -1497,16 +1614,50 @@ async def test_intelligence_audit_with_existing_products_mode(monkeypatch):
             }
         ]
 
+    async def fake_generate_suggestions_execute(
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
+    ):
+        _ = (supabase, shop_domain, normalization_settings, trace_event)
+        target_title = (
+            str(products[0].get("title") or "Catalog Product")
+            if products
+            else "Catalog Product"
+        )
+        return [
+            {
+                "suggestion_id": f"suggestion-{uuid.uuid4()}",
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "product_title": target_title,
+                "category": "seo_readiness",
+                "severity": "low",
+                "message": "Improve vendor detail",
+                "patch_payload": {"vendor": "Catalog Vendor"},
+                "status": "pending",
+            }
+        ]
+
     import infrastructure.adapters.shopify_adapter as shopify_adapter
+    import application.use_cases.intelligence_generate_suggestions as suggestions_uc
 
     monkeypatch.setattr(
         shopify_adapter.ShopifyAdapter,
         "list_products_for_audit",
         fake_list_products_for_audit,
     )
+    monkeypatch.setattr(
+        suggestions_uc, "execute", fake_generate_suggestions_execute
+    )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
         products_response = await ac.get(
             "/agents/intelligence/shopify-products?query=catalog&limit=10"
         )
@@ -1565,7 +1716,36 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
             }
         }
 
+    async def fake_generate_suggestions_execute(
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
+    ):
+        _ = (supabase, shop_domain, normalization_settings, trace_event)
+        target_title = (
+            str(products[0].get("title") or "Catalog Product")
+            if products
+            else "Catalog Product"
+        )
+        return [
+            {
+                "suggestion_id": f"suggestion-{uuid.uuid4()}",
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "product_title": target_title,
+                "category": "completeness",
+                "severity": "medium",
+                "message": "Add missing vendor",
+                "patch_payload": {"vendor": "Improved Vendor"},
+                "status": "pending",
+            }
+        ]
+
     import shopify as shopify_module
+    import application.use_cases.intelligence_generate_suggestions as suggestions_uc
 
     monkeypatch.setattr(shopify_module.ShopifyClient, "get_product", fake_get_product)
     monkeypatch.setattr(
@@ -1573,9 +1753,14 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
         "update_product_from_input",
         fake_update_product_from_input,
     )
+    monkeypatch.setattr(
+        suggestions_uc, "execute", fake_generate_suggestions_execute
+    )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
         audit_run = await ac.post(
             "/agents/intelligence/audit",
             json={
@@ -1694,6 +1879,7 @@ async def test_apply_partial_field_keeps_remaining_fields_pending(monkeypatch):
                 }
             ]
         },
+        shop_domain=TEST_SHOP_DOMAIN,
     )
     ctx.services.supabase.save_product_intelligence_suggestions(
         audit_id=audit_id,
@@ -1713,10 +1899,13 @@ async def test_apply_partial_field_keeps_remaining_fields_pending(monkeypatch):
                 "status": "pending",
             }
         ],
+        shop_domain=TEST_SHOP_DOMAIN,
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
         apply_single = await ac.post(
             f"/agents/intelligence/suggestions/{suggestion_id}/apply",
             json={"patch_payload": {"vendor": "Updated Vendor"}},
@@ -1805,6 +1994,7 @@ async def test_revert_blocked_for_non_reversible_missing_original_field(monkeypa
                 }
             ]
         },
+        shop_domain=TEST_SHOP_DOMAIN,
     )
     ctx.services.supabase.save_product_intelligence_suggestions(
         audit_id=audit_id,
@@ -1821,10 +2011,13 @@ async def test_revert_blocked_for_non_reversible_missing_original_field(monkeypa
                 "status": "pending",
             }
         ],
+        shop_domain=TEST_SHOP_DOMAIN,
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
         apply_single = await ac.post(
             f"/agents/intelligence/suggestions/{suggestion_id}/apply"
         )

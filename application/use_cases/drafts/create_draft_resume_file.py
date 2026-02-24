@@ -47,6 +47,7 @@ def execute(supabase: SupabasePort, draft_id: str) -> dict[str, str]:
         name=filename,
         content=output_bytes,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_origin="draft_resume",
     )
     # update the draft with output file info
     from application.use_cases.drafts.save_product_draft import (

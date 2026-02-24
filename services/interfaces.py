@@ -6,7 +6,12 @@ from ai.models import ProductsList
 
 class SupabaseServiceInterface(Protocol):
     def save_file(
-        self, file_id: str, name: str, content: bytes, content_type: str | None = None
+        self,
+        file_id: str,
+        name: str,
+        content: bytes,
+        content_type: str | None = None,
+        file_origin: str | None = None,
     ) -> None: ...
 
     def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]: ...
@@ -46,12 +51,16 @@ class SupabaseServiceInterface(Protocol):
     ) -> None: ...
 
     def list_runs(
-        self, limit: int = 50, offset: int = 0, status: str | None = None
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_run(self, run_id: str) -> dict[str, Any] | None: ...
+    def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None: ...
 
-    def get_run_history(self, run_id: str) -> dict[str, Any]: ...
+    def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]: ...
 
     def save_product_draft(
         self,

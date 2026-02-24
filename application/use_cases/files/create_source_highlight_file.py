@@ -396,6 +396,7 @@ async def execute(
             name=output_filename,
             content=highlighted_pdf_bytes,
             content_type=_PDF_CONTENT_TYPE,
+            file_origin="source_highlight",
         )
         return {
             "file_id": output_file_id,
@@ -529,6 +530,7 @@ async def execute(
         name=output_filename,
         content=output.getvalue(),
         content_type=output_content_type,
+        file_origin="source_highlight",
     )
 
     return {

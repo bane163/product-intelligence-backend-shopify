@@ -224,9 +224,11 @@ async def run_product_intelligence_audit(
     ctx.services.supabase.create_or_update_run(
         run_id_value,
         {
-            "status": "running",
+            "status": "queued",
             "source": "product_intelligence_audit",
             "started_at": started_at.isoformat(),
+            "attempt": 1,
+            "shop_domain": shop_domain,
         },
     )
     from application.services.run_event_emitter import RunEventEmitter
@@ -243,6 +245,13 @@ async def run_product_intelligence_audit(
             "products_count": len(products),
             "all_products": all_products,
             "submitted_id": str(submitted_id) if submitted_id else None,
+        },
+    )
+    ctx.services.supabase.create_or_update_run(
+        run_id_value,
+        {
+            "status": "running",
+            "shop_domain": shop_domain,
         },
     )
 

@@ -87,7 +87,18 @@ async def wopi_put_file(file_id: str, request: Request, ctx: AppContext = Depend
         raise HTTPException(status_code=400, detail="Empty file content")
 
     from application.use_cases.files.save_file import execute as save_file_execute
-    save_file_execute(supabase=ctx.services.supabase, file_id=file_id, name=str(file_data.get("name") or f"{file_id}.xlsx"), content=body, content_type=str(file_data.get("content_type") or "application/octet-stream"))
+    save_file_execute(
+        supabase=ctx.services.supabase,
+        file_id=file_id,
+        name=str(file_data.get("name") or f"{file_id}.xlsx"),
+        content=body,
+        content_type=str(file_data.get("content_type") or "application/octet-stream"),
+        file_origin=(
+            str(file_data.get("file_origin"))
+            if isinstance(file_data.get("file_origin"), str)
+            else None
+        ),
+    )
     return Response(status_code=200)
 
 

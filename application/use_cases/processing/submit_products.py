@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
 from application.ports.shopify_port import ShopifyPort
 from application.ports.supabase_port import SupabasePort
@@ -187,6 +188,7 @@ async def execute(
     shop_access_token: str | None = None,
     enable_ai_enhancements: bool = False,
 ) -> dict[str, object]:
+    submit_started_at = perf_counter()
     current_run_id = run_id or str(uuid.uuid4())
     emitter = None
     try:
@@ -201,13 +203,22 @@ async def execute(
     supabase.create_or_update_run(
         current_run_id,
         {
-            "status": "running",
+            "status": "queued",
             "source": "shopify_submit",
             "started_at": datetime.now(timezone.utc).isoformat(),
             "ai_enhancements_enabled": bool(enable_ai_enhancements),
+            "attempt": 1,
+            "shop_domain": shop_domain,
         },
     )
     emit_and_persist(phase="submit_start", message="Starting Shopify submit")
+    supabase.create_or_update_run(
+        current_run_id,
+        {
+            "status": "running",
+            "shop_domain": shop_domain,
+        },
+    )
     submit_client = (
         shopify
     )
@@ -300,7 +311,10 @@ async def execute(
 
     results: list[dict[str, Any]] = []
     success_count = 0
+    handle_lookup_cache: dict[str, str | None] = {}
+    sku_lookup_cache: dict[str, str | None] = {}
     for index, product in enumerate(products):
+        item_started_at = perf_counter()
         title = product.get("title")
         if not title:
             emit_and_persist(
@@ -320,18 +334,30 @@ async def execute(
             )
             continue
         try:
+            lookup_started_at = perf_counter()
             gid = product.get("id") or product.get("shopify_gid")
             resolve_reason = "id" if gid else None
             if not gid and product.get("handle"):
-                gid = await submit_client.find_product_id_by_handle(str(product["handle"]))
+                handle_key = str(product["handle"]).strip().lower()
+                if handle_key in handle_lookup_cache:
+                    gid = handle_lookup_cache[handle_key]
+                else:
+                    gid = await submit_client.find_product_id_by_handle(str(product["handle"]))
+                    handle_lookup_cache[handle_key] = gid
                 if gid:
                     resolve_reason = "handle"
             if not gid:
                 sku = extract_first_sku(product)
                 if sku:
-                    gid = await submit_client.find_product_id_by_sku(sku)
+                    sku_key = str(sku).strip()
+                    if sku_key in sku_lookup_cache:
+                        gid = sku_lookup_cache[sku_key]
+                    else:
+                        gid = await submit_client.find_product_id_by_sku(sku)
+                        sku_lookup_cache[sku_key] = gid
                     if gid:
                         resolve_reason = "sku"
+            lookup_duration_ms = int((perf_counter() - lookup_started_at) * 1000)
 
             if gid:
                 emit_and_persist(
@@ -342,9 +368,11 @@ async def execute(
                         "title": title,
                         "mode": "update",
                         "reason": resolve_reason,
+                        "lookup_duration_ms": lookup_duration_ms,
                         "shopify_product_id": gid,
                     },
                 )
+                mutation_started_at = perf_counter()
                 response = await submit_client.update_product_from_input({**product, "id": gid})
                 payload = response.get("data", {}).get("productUpdate", {})
                 mode_used = "update"
@@ -352,11 +380,18 @@ async def execute(
                 emit_and_persist(
                     phase="submit_item_mode",
                     message=f"No existing match found for '{title}', creating",
-                    payload_preview={"index": index, "title": title, "mode": "create"},
+                    payload_preview={
+                        "index": index,
+                        "title": title,
+                        "mode": "create",
+                        "lookup_duration_ms": lookup_duration_ms,
+                    },
                 )
+                mutation_started_at = perf_counter()
                 response = await submit_client.create_product_from_input(product)
                 payload = response.get("data", {}).get("productCreate", {})
                 mode_used = "create"
+            mutation_duration_ms = int((perf_counter() - mutation_started_at) * 1000)
 
             errors = payload.get("userErrors") or []
             product_data = payload.get("product") or {}
@@ -398,6 +433,9 @@ async def execute(
                     payload_preview={
                         "index": index,
                         "mode": mode_used,
+                        "lookup_duration_ms": lookup_duration_ms,
+                        "mutation_duration_ms": mutation_duration_ms,
+                        "item_duration_ms": int((perf_counter() - item_started_at) * 1000),
                         "shopify_product_id": product_data.get("id"),
                     },
                 )
@@ -408,6 +446,8 @@ async def execute(
                         "status": "success",
                         "mode": mode_used,
                         "shopify_product_id": product_data.get("id"),
+                        "lookup_duration_ms": lookup_duration_ms,
+                        "mutation_duration_ms": mutation_duration_ms,
                         "errors": [],
                     }
                 )
@@ -424,6 +464,7 @@ async def execute(
                     "index": index,
                     "title": title,
                     "status": "failed",
+                    "item_duration_ms": int((perf_counter() - item_started_at) * 1000),
                     "errors": [{"field": None, "message": str(exc)}],
                 }
             )
@@ -449,7 +490,13 @@ async def execute(
         )
         submitted_id = str(submitted.get("submitted_id"))
 
-    supabase.finalize_run(current_run_id, status=status)
+    submit_duration_ms = int((perf_counter() - submit_started_at) * 1000)
+    supabase.finalize_run(current_run_id, status=status, duration_ms=submit_duration_ms)
     tracing.complete_run(current_run_id)
 
-    return {"success_count": success_count, "results": results, "submitted_id": submitted_id}
+    return {
+        "success_count": success_count,
+        "results": results,
+        "submitted_id": submitted_id,
+        "duration_ms": submit_duration_ms,
+    }

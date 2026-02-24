@@ -7,6 +7,7 @@ from application.use_cases.intelligence_revert_suggestion import execute as reve
 class _FakeSupabaseApply:
     def __init__(self) -> None:
         self.applied_previous_payload = None
+        self.intelligence = self
 
     def get_product_intelligence_suggestion(self, suggestion_id: str, shop_domain=None):
         _ = suggestion_id, shop_domain
@@ -119,6 +120,7 @@ class _FakeShopifyApply:
 class _FakeSupabaseRevert:
     def __init__(self) -> None:
         self.pending_calls = 0
+        self.intelligence = self
 
     def get_product_intelligence_suggestion(self, suggestion_id: str, shop_domain=None):
         _ = suggestion_id, shop_domain

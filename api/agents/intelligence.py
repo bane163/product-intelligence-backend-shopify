@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app_context import AppContext, get_ctx
+from .utils import require_shop_domain, resolve_shop_access_token
 
 router = APIRouter()
 
@@ -35,37 +36,6 @@ def _with_reversibility_flags(suggestion: dict[str, Any]) -> dict[str, Any]:
     if "is_reversible" not in enriched:
         enriched["is_reversible"] = True
     return enriched
-
-
-def _normalize_shop_domain(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    return normalized or None
-
-
-def _resolve_shop_domain(request: Request, candidate: Any = None) -> str | None:
-    header_shop = _normalize_shop_domain(request.headers.get("x-shop-domain"))
-    body_shop = _normalize_shop_domain(candidate)
-    if header_shop and body_shop and header_shop != body_shop:
-        raise HTTPException(status_code=403, detail="shop_domain mismatch")
-    return header_shop or body_shop
-
-
-def _require_shop_domain(request: Request, candidate: Any = None) -> str:
-    shop_domain = _resolve_shop_domain(request, candidate)
-    if not shop_domain:
-        raise HTTPException(status_code=400, detail="Missing shop_domain")
-    return shop_domain
-
-
-def _resolve_shop_access_token(request: Request, candidate: Any = None) -> str | None:
-    header_token = request.headers.get("x-shop-access-token")
-    if isinstance(header_token, str) and header_token.strip():
-        return header_token.strip()
-    if isinstance(candidate, str) and candidate.strip():
-        return candidate.strip()
-    return None
 
 
 def _resolve_shopify_client(
@@ -115,15 +85,34 @@ def _coerce_normalization_settings(
     *,
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
-    raw_unit_system = str(payload.get("unit_system") or fallback.get("unit_system") or "metric").strip().lower()
-    unit_system = raw_unit_system if raw_unit_system in {"metric", "imperial"} else str(fallback.get("unit_system") or "metric")
+    raw_unit_system = (
+        str(payload.get("unit_system") or fallback.get("unit_system") or "metric")
+        .strip()
+        .lower()
+    )
+    unit_system = (
+        raw_unit_system
+        if raw_unit_system in {"metric", "imperial"}
+        else str(fallback.get("unit_system") or "metric")
+    )
 
-    raw_locale_default = payload.get("locale_default_unit_system", fallback.get("locale_default_unit_system"))
-    locale_default_unit_system = str(raw_locale_default).strip().lower() if isinstance(raw_locale_default, str) else None
+    raw_locale_default = payload.get(
+        "locale_default_unit_system", fallback.get("locale_default_unit_system")
+    )
+    locale_default_unit_system = (
+        str(raw_locale_default).strip().lower()
+        if isinstance(raw_locale_default, str)
+        else None
+    )
     if locale_default_unit_system not in {"metric", "imperial"}:
-        locale_default_unit_system = str(fallback.get("locale_default_unit_system") or "").strip().lower() or None
+        locale_default_unit_system = (
+            str(fallback.get("locale_default_unit_system") or "").strip().lower()
+            or None
+        )
 
-    raw_confidence = payload.get("confidence_threshold", fallback.get("confidence_threshold"))
+    raw_confidence = payload.get(
+        "confidence_threshold", fallback.get("confidence_threshold")
+    )
     if raw_confidence in (None, ""):
         confidence_threshold = None
     elif isinstance(raw_confidence, (int, float)):
@@ -131,8 +120,14 @@ def _coerce_normalization_settings(
     else:
         raise HTTPException(status_code=400, detail="Invalid confidence_threshold")
 
-    raw_categories = payload.get("categories") if isinstance(payload.get("categories"), dict) else {}
-    fallback_categories = fallback.get("categories") if isinstance(fallback.get("categories"), dict) else {}
+    raw_categories = (
+        payload.get("categories") if isinstance(payload.get("categories"), dict) else {}
+    )
+    fallback_categories = (
+        fallback.get("categories")
+        if isinstance(fallback.get("categories"), dict)
+        else {}
+    )
     categories = {
         key: (
             raw_categories[key]
@@ -155,7 +150,9 @@ async def run_product_intelligence_audit(
     request: Request,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
-    from application.use_cases.intelligence_run_audit import execute as run_audit_execute
+    from application.use_cases.intelligence_run_audit import (
+        execute as run_audit_execute,
+    )
 
     payload: dict[str, Any] = {}
     content_type = (request.headers.get("content-type") or "").lower()
@@ -166,7 +163,10 @@ async def run_product_intelligence_audit(
                 payload.update(raw_json)
         except Exception:
             payload = {}
-    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+    elif (
+        "multipart/form-data" in content_type
+        or "application/x-www-form-urlencoded" in content_type
+    ):
         form = await request.form()
         for key, value in form.items():
             payload[key] = value
@@ -181,9 +181,13 @@ async def run_product_intelligence_audit(
     run_id = payload.get("run_id")
     all_products = _to_bool(payload.get("all_products"))
     query = payload.get("query")
-    shop_domain = _require_shop_domain(request, payload.get("shop_domain"))
-    shop_access_token = _resolve_shop_access_token(request, payload.get("shop_access_token"))
-    query_text = str(query).strip() if isinstance(query, str) and query.strip() else None
+    shop_domain = require_shop_domain(request, payload.get("shop_domain"))
+    shop_access_token = resolve_shop_access_token(
+        request, payload.get("shop_access_token")
+    )
+    query_text = (
+        str(query).strip() if isinstance(query, str) and query.strip() else None
+    )
     raw_limit = payload.get("limit")
     try:
         requested_limit = int(raw_limit) if raw_limit is not None else 250
@@ -197,7 +201,7 @@ async def run_product_intelligence_audit(
         products = [item for item in raw_products if isinstance(item, dict)]
 
     if submitted_id:
-        document = ctx.services.supabase.get_submitted_document(str(submitted_id))
+        document = ctx.supabase.submitted.get_submitted_document(str(submitted_id))
         if not document:
             raise HTTPException(status_code=404, detail="Submitted document not found")
         doc_products = document.get("products")
@@ -219,9 +223,13 @@ async def run_product_intelligence_audit(
     if not products:
         raise HTTPException(status_code=400, detail="No products found for audit")
 
-    run_id_value = str(run_id).strip() if isinstance(run_id, str) and run_id.strip() else str(uuid.uuid4())
+    run_id_value = (
+        str(run_id).strip()
+        if isinstance(run_id, str) and run_id.strip()
+        else str(uuid.uuid4())
+    )
     started_at = datetime.now(timezone.utc)
-    ctx.services.supabase.create_or_update_run(
+    ctx.supabase.runs.create_or_update_run(
         run_id_value,
         {
             "status": "queued",
@@ -235,7 +243,7 @@ async def run_product_intelligence_audit(
 
     emitter = RunEventEmitter(
         tracing=ctx.services.tracing,
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         run_id=run_id_value,
     )
     emitter.emit_and_persist(
@@ -247,7 +255,7 @@ async def run_product_intelligence_audit(
             "submitted_id": str(submitted_id) if submitted_id else None,
         },
     )
-    ctx.services.supabase.create_or_update_run(
+    ctx.supabase.runs.create_or_update_run(
         run_id_value,
         {
             "status": "running",
@@ -257,7 +265,7 @@ async def run_product_intelligence_audit(
 
     try:
         result = await run_audit_execute(
-            supabase=ctx.services.supabase,
+            supabase=ctx.supabase,
             products=products,
             submitted_id=str(submitted_id) if submitted_id else None,
             run_id=run_id_value,
@@ -272,8 +280,10 @@ async def run_product_intelligence_audit(
                 "findings_count": result.get("findings_count"),
             },
         )
-        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-        ctx.services.supabase.finalize_run(
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
+        ctx.supabase.runs.finalize_run(
             run_id_value,
             status="success",
             duration_ms=duration_ms,
@@ -287,8 +297,10 @@ async def run_product_intelligence_audit(
             level="error",
             error=str(exc),
         )
-        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-        ctx.services.supabase.finalize_run(
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
+        ctx.supabase.runs.finalize_run(
             run_id_value,
             status="error",
             duration_ms=duration_ms,
@@ -303,8 +315,10 @@ async def run_product_intelligence_audit(
             level="error",
             error=str(exc),
         )
-        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
-        ctx.services.supabase.finalize_run(
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
+        ctx.supabase.runs.finalize_run(
             run_id_value,
             status="error",
             duration_ms=duration_ms,
@@ -325,12 +339,12 @@ async def search_shopify_products_for_audit(
     shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, list[dict[str, Any]]]:
-    tenant = _require_shop_domain(request, shop_domain)
+    tenant = require_shop_domain(request, shop_domain)
     safe_limit = max(1, min(limit, 100))
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=tenant,
-        shop_access_token=_resolve_shop_access_token(request),
+        shop_access_token=resolve_shop_access_token(request),
     )
     products = await shopify_client.list_products_for_audit(
         query=query.strip() if query and query.strip() else None,
@@ -356,13 +370,18 @@ async def search_shopify_products_for_audit_post(
                 data.update(raw_json)
         except Exception:
             data = {}
-    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+    elif (
+        "multipart/form-data" in content_type
+        or "application/x-www-form-urlencoded" in content_type
+    ):
         form = await request.form()
         for key, value in form.items():
             data[key] = value
     query = data.get("query")
-    shop_domain = _require_shop_domain(request, data.get("shop_domain"))
-    shop_access_token = _resolve_shop_access_token(request, data.get("shop_access_token"))
+    shop_domain = require_shop_domain(request, data.get("shop_domain"))
+    shop_access_token = resolve_shop_access_token(
+        request, data.get("shop_access_token")
+    )
     raw_limit = data.get("limit")
     try:
         safe_limit = int(raw_limit) if raw_limit is not None else 25
@@ -391,11 +410,13 @@ async def list_product_intelligence_audits(
     shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, list[dict[str, Any]]]:
-    from application.use_cases.intelligence_list_audits import execute as list_audits_execute
+    from application.use_cases.intelligence_list_audits import (
+        execute as list_audits_execute,
+    )
 
-    tenant = _require_shop_domain(request, shop_domain)
+    tenant = require_shop_domain(request, shop_domain)
     audits = list_audits_execute(
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         shop_domain=tenant,
         limit=limit,
         offset=offset,
@@ -410,11 +431,13 @@ async def get_product_intelligence_audit(
     shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
-    from application.use_cases.intelligence_get_audit import execute as get_audit_execute
+    from application.use_cases.intelligence_get_audit import (
+        execute as get_audit_execute,
+    )
 
-    tenant = _require_shop_domain(request, shop_domain)
+    tenant = require_shop_domain(request, shop_domain)
     audit = get_audit_execute(
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         audit_id=audit_id,
         shop_domain=tenant,
     )
@@ -437,9 +460,9 @@ async def list_product_intelligence_suggestions(
         execute as list_suggestions_execute,
     )
 
-    tenant = _require_shop_domain(request, shop_domain)
+    tenant = require_shop_domain(request, shop_domain)
     suggestions = list_suggestions_execute(
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         audit_id=audit_id,
         shop_domain=tenant,
     )
@@ -473,7 +496,10 @@ async def apply_product_intelligence_suggestion(
                 data.update(raw_json)
         except Exception:
             data = {}
-    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+    elif (
+        "multipart/form-data" in content_type
+        or "application/x-www-form-urlencoded" in content_type
+    ):
         form = await request.form()
         for key, value in form.items():
             data[key] = value
@@ -486,12 +512,18 @@ async def apply_product_intelligence_suggestion(
         try:
             parsed_patch_payload = json.loads(raw_patch_payload_json)
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid patch_payload_json: {exc}")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid patch_payload_json: {exc}"
+            )
         if not isinstance(parsed_patch_payload, dict):
-            raise HTTPException(status_code=400, detail="patch_payload_json must decode to an object")
+            raise HTTPException(
+                status_code=400, detail="patch_payload_json must decode to an object"
+            )
         patch_payload = parsed_patch_payload
-    shop_domain = _require_shop_domain(request, data.get("shop_domain"))
-    shop_access_token = _resolve_shop_access_token(request, data.get("shop_access_token"))
+    shop_domain = require_shop_domain(request, data.get("shop_domain"))
+    shop_access_token = resolve_shop_access_token(
+        request, data.get("shop_access_token")
+    )
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
@@ -502,7 +534,7 @@ async def apply_product_intelligence_suggestion(
 
     try:
         result = await apply_suggestion_execute(
-            supabase=ctx.services.supabase,
+            supabase=ctx.supabase,
             shopify=shopify_client,
             suggestion_id=suggestion_id,
             patch_payload=patch_payload,
@@ -540,12 +572,17 @@ async def revert_product_intelligence_suggestion(
                 data.update(raw_json)
         except Exception:
             data = {}
-    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+    elif (
+        "multipart/form-data" in content_type
+        or "application/x-www-form-urlencoded" in content_type
+    ):
         form = await request.form()
         for key, value in form.items():
             data[key] = value
-    shop_domain = _require_shop_domain(request, data.get("shop_domain"))
-    shop_access_token = _resolve_shop_access_token(request, data.get("shop_access_token"))
+    shop_domain = require_shop_domain(request, data.get("shop_domain"))
+    shop_access_token = resolve_shop_access_token(
+        request, data.get("shop_access_token")
+    )
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
@@ -556,7 +593,7 @@ async def revert_product_intelligence_suggestion(
 
     try:
         result = await revert_suggestion_execute(
-            supabase=ctx.services.supabase,
+            supabase=ctx.supabase,
             shopify=shopify_client,
             suggestion_id=suggestion_id,
             shop_domain=shop_domain,
@@ -571,15 +608,16 @@ async def revert_product_intelligence_suggestion(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-
-@router.get("/intelligence/normalization-settings", summary="Get normalization settings")
+@router.get(
+    "/intelligence/normalization-settings", summary="Get normalization settings"
+)
 async def get_product_intelligence_normalization_settings(
     request: Request,
     shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
-    tenant = _require_shop_domain(request, shop_domain)
-    stored = ctx.services.supabase.get_product_intelligence_normalization_settings(
+    tenant = require_shop_domain(request, shop_domain)
+    stored = ctx.supabase.intelligence.get_product_intelligence_normalization_settings(
         shop_domain=tenant,
     )
     fallback = _default_normalization_settings(request)
@@ -593,7 +631,9 @@ async def get_product_intelligence_normalization_settings(
     }
 
 
-@router.post("/intelligence/normalization-settings", summary="Upsert normalization settings")
+@router.post(
+    "/intelligence/normalization-settings", summary="Upsert normalization settings"
+)
 async def upsert_product_intelligence_normalization_settings(
     request: Request,
     ctx: AppContext = Depends(get_ctx),
@@ -607,7 +647,10 @@ async def upsert_product_intelligence_normalization_settings(
                 payload.update(raw_json)
         except Exception:
             payload = {}
-    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+    elif (
+        "multipart/form-data" in content_type
+        or "application/x-www-form-urlencoded" in content_type
+    ):
         form = await request.form()
         for key, value in form.items():
             payload[key] = value
@@ -621,9 +664,13 @@ async def upsert_product_intelligence_normalization_settings(
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid settings_json: {exc}")
 
-    tenant = _require_shop_domain(request, payload.get("shop_domain"))
-    settings_payload = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
-    current = ctx.services.supabase.get_product_intelligence_normalization_settings(
+    tenant = require_shop_domain(request, payload.get("shop_domain"))
+    settings_payload = (
+        payload.get("settings")
+        if isinstance(payload.get("settings"), dict)
+        else payload
+    )
+    current = ctx.supabase.intelligence.get_product_intelligence_normalization_settings(
         shop_domain=tenant,
     )
     fallback = _coerce_normalization_settings(
@@ -631,7 +678,7 @@ async def upsert_product_intelligence_normalization_settings(
         fallback=_default_normalization_settings(request),
     )
     normalized = _coerce_normalization_settings(settings_payload, fallback=fallback)
-    saved = ctx.services.supabase.upsert_product_intelligence_normalization_settings(
+    saved = ctx.supabase.intelligence.upsert_product_intelligence_normalization_settings(
         shop_domain=tenant,
         settings=normalized,
     )
@@ -664,26 +711,37 @@ async def apply_product_intelligence_suggestions_bulk(
                 payload.update(raw_json)
         except Exception:
             payload = {}
-    elif "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+    elif (
+        "multipart/form-data" in content_type
+        or "application/x-www-form-urlencoded" in content_type
+    ):
         form = await request.form()
         for key, value in form.items():
             payload[key] = value
     raw_ids: Any = payload.get("suggestion_ids")
     raw_ids_json = payload.get("suggestion_ids_json")
-    if not isinstance(raw_ids, list) and isinstance(raw_ids_json, str) and raw_ids_json.strip():
+    if (
+        not isinstance(raw_ids, list)
+        and isinstance(raw_ids_json, str)
+        and raw_ids_json.strip()
+    ):
         try:
             parsed_ids = json.loads(raw_ids_json)
             if isinstance(parsed_ids, list):
                 raw_ids = parsed_ids
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid suggestion_ids_json: {exc}")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid suggestion_ids_json: {exc}"
+            )
     if not isinstance(raw_ids, list):
         raise HTTPException(status_code=400, detail="suggestion_ids must be a list")
     suggestion_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
     if not suggestion_ids:
         raise HTTPException(status_code=400, detail="No suggestion_ids provided")
-    shop_domain = _require_shop_domain(request, payload.get("shop_domain"))
-    shop_access_token = _resolve_shop_access_token(request, payload.get("shop_access_token"))
+    shop_domain = require_shop_domain(request, payload.get("shop_domain"))
+    shop_access_token = resolve_shop_access_token(
+        request, payload.get("shop_access_token")
+    )
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
@@ -697,7 +755,7 @@ async def apply_product_intelligence_suggestions_bulk(
     for suggestion_id in suggestion_ids:
         try:
             result = await apply_suggestion_execute(
-                supabase=ctx.services.supabase,
+                supabase=ctx.supabase,
                 shopify=shopify_client,
                 suggestion_id=suggestion_id,
                 shop_domain=shop_domain,

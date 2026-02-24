@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app_context import AppContext, get_ctx
+from .utils import require_shop_domain
 
 router = APIRouter()
 
@@ -16,28 +17,6 @@ CANONICAL_RUN_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _normalize_shop_domain(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    return normalized or None
-
-
-def _resolve_shop_domain(request: Request, candidate: Any = None) -> str | None:
-    header_shop = _normalize_shop_domain(request.headers.get("x-shop-domain"))
-    body_shop = _normalize_shop_domain(candidate)
-    if header_shop and body_shop and header_shop != body_shop:
-        raise HTTPException(status_code=403, detail="shop_domain mismatch")
-    return header_shop or body_shop
-
-
-def _require_shop_domain(request: Request, candidate: Any = None) -> str:
-    shop_domain = _resolve_shop_domain(request, candidate)
-    if not shop_domain:
-        raise HTTPException(status_code=400, detail="Missing shop_domain")
-    return shop_domain
 
 
 def _normalize_run_status(value: Any, fallback: str = "running") -> str:
@@ -78,9 +57,9 @@ def _append_control_event(
         message=message,
         metadata=metadata,
     )
-    history = ctx.services.supabase.get_run_history(run_id, shop_domain=shop_domain)
+    history = ctx.supabase.runs.get_run_history(run_id, shop_domain=shop_domain)
     next_seq = len(history.get("events") or []) + 1
-    ctx.services.supabase.append_run_event(run_id, event, next_seq)
+    ctx.supabase.runs.append_run_event(run_id, event, next_seq)
 
 
 def _validate_control_operation(operation: str) -> str:
@@ -98,10 +77,14 @@ async def stream_events(
     ctx: AppContext = Depends(get_ctx),
 ) -> StreamingResponse:
     from application.use_cases.runs.get_run import execute as get_run_execute
-    from application.use_cases.runs.stream_run_events import execute as stream_events_execute
+    from application.use_cases.runs.stream_run_events import (
+        execute as stream_events_execute,
+    )
 
-    tenant = _require_shop_domain(request, shop_domain)
-    run = get_run_execute(supabase=ctx.services.supabase, run_id=run_id, shop_domain=tenant)
+    tenant = require_shop_domain(request, shop_domain)
+    run = get_run_execute(
+        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
@@ -127,14 +110,14 @@ async def list_llm_runs(
 ) -> dict[str, list[dict]]:
     from application.use_cases.runs.list_runs import execute as list_runs_execute
 
-    tenant = _require_shop_domain(request, shop_domain)
+    tenant = require_shop_domain(request, shop_domain)
     normalized_status = _normalize_run_status(status, "") if status else None
     if status and normalized_status not in CANONICAL_RUN_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid run status filter")
 
     return {
         "runs": list_runs_execute(
-            supabase=ctx.services.supabase,
+            supabase=ctx.supabase,
             limit=limit,
             offset=offset,
             status=normalized_status,
@@ -152,8 +135,10 @@ async def get_llm_run(
 ) -> dict[str, dict]:
     from application.use_cases.runs.get_run import execute as get_run_execute
 
-    tenant = _require_shop_domain(request, shop_domain)
-    run = get_run_execute(supabase=ctx.services.supabase, run_id=run_id, shop_domain=tenant)
+    tenant = require_shop_domain(request, shop_domain)
+    run = get_run_execute(
+        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return {"run": run}
@@ -166,11 +151,13 @@ async def get_llm_run_history(
     shop_domain: str | None = None,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
-    from application.use_cases.runs.get_run_history import execute as get_run_history_execute
+    from application.use_cases.runs.get_run_history import (
+        execute as get_run_history_execute,
+    )
 
-    tenant = _require_shop_domain(request, shop_domain)
+    tenant = require_shop_domain(request, shop_domain)
     history = get_run_history_execute(
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         run_id=run_id,
         shop_domain=tenant,
     )
@@ -192,9 +179,11 @@ async def control_llm_run(
     normalized_operation = _validate_control_operation(operation)
     payload = await request.form()
     resume_token = str(payload.get("resume_token") or "").strip()
-    tenant = _require_shop_domain(request, shop_domain or payload.get("shop_domain"))
+    tenant = require_shop_domain(request, shop_domain or payload.get("shop_domain"))
 
-    run = get_run_execute(supabase=ctx.services.supabase, run_id=run_id, shop_domain=tenant)
+    run = get_run_execute(
+        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
@@ -295,8 +284,10 @@ async def control_llm_run(
             },
         )
 
-    ctx.services.supabase.create_or_update_run(run_id, updates)
-    updated = get_run_execute(supabase=ctx.services.supabase, run_id=run_id, shop_domain=tenant)
+    ctx.supabase.runs.create_or_update_run(run_id, updates)
+    updated = get_run_execute(
+        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
+    )
     if not updated:
         raise HTTPException(status_code=500, detail="Failed to update run")
 

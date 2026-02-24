@@ -1,5 +1,5 @@
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 
-def execute(supabase: SupabasePort, limit: int = 100, offset: int = 0):
-    return supabase.list_files(limit=limit, offset=offset)
+def execute(supabase: SupabaseNamespacedPort, limit: int = 100, offset: int = 0):
+    return supabase.file.list_files(limit=limit, offset=offset)

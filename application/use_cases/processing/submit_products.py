@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from time import perf_counter
 from typing import Any
 from application.ports.shopify_port import ShopifyPort
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
 from application.use_cases.intelligence_apply_suggestion import (
     _extract_user_errors,
@@ -14,7 +14,7 @@ from application.use_cases.intelligence_generate_suggestions import (
     execute as generate_suggestions_execute,
 )
 
-from api.agents.utils import parse_products_json
+from api.agents.utils import normalize_shop_domain, parse_products_json
 
 
 SUPPORTED_SUGGESTION_FIELDS = {
@@ -37,13 +37,6 @@ def _optional_str(data: dict[str, Any] | None, key: str) -> str | None:
         return None
     value = data.get(key)
     return value if isinstance(value, str) and value else None
-
-
-def _normalize_shop_domain(value: str | None) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip().lower()
-    return normalized or None
 
 
 def _normalize_tags(value: Any) -> str | list[str] | None:
@@ -73,7 +66,9 @@ def _apply_patch_payload(
         if key not in patch_payload:
             continue
         if key == "metafields":
-            merged = _merge_metafields(updated.get("metafields"), patch_payload.get("metafields"))
+            merged = _merge_metafields(
+                updated.get("metafields"), patch_payload.get("metafields")
+            )
             if merged:
                 updated["metafields"] = merged
             continue
@@ -86,7 +81,9 @@ def _apply_patch_payload(
         if value is None:
             continue
         updated[key] = value
-    variant_operations = _normalize_variant_operations(patch_payload.get("variant_operations"))
+    variant_operations = _normalize_variant_operations(
+        patch_payload.get("variant_operations")
+    )
     return updated, variant_operations
 
 
@@ -114,8 +111,12 @@ def _apply_ai_suggestions(
             patch_payload=patch_payload,
         )
         enhanced_products[product_index] = updated
-        if variant_operations.get("create_options") or variant_operations.get("create_variants"):
-            variant_operations_by_index.setdefault(product_index, []).append(variant_operations)
+        if variant_operations.get("create_options") or variant_operations.get(
+            "create_variants"
+        ):
+            variant_operations_by_index.setdefault(product_index, []).append(
+                variant_operations
+            )
     return enhanced_products, variant_operations_by_index
 
 
@@ -128,7 +129,9 @@ async def _apply_variant_operations_for_product(
     for operation in operations:
         create_options = operation.get("create_options")
         if isinstance(create_options, list) and create_options:
-            options_response = await shopify.create_product_options(product_id, create_options)
+            options_response = await shopify.create_product_options(
+                product_id, create_options
+            )
             option_errors = _extract_user_errors(
                 options_response, ["data", "productOptionsCreate", "userErrors"]
             )
@@ -152,16 +155,16 @@ async def _apply_variant_operations_for_product(
 
 def _sync_enhanced_products_to_draft(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     draft_id: str,
     run_id: str,
     import_mode: str,
     products: list[dict[str, Any]],
 ) -> bool:
-    draft = supabase.get_product_draft(draft_id)
+    draft = supabase.drafts.get_product_draft(draft_id)
     if not isinstance(draft, dict):
         return False
-    supabase.save_product_draft(
+    supabase.drafts.save_product_draft(
         draft_id=draft_id,
         run_id=run_id,
         import_mode=_optional_str(draft, "import_mode") or import_mode,
@@ -176,7 +179,7 @@ def _sync_enhanced_products_to_draft(
 
 
 async def execute(
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     shopify: ShopifyPort,
     tracing: TracingPort,
     products_json: str,
@@ -194,13 +197,16 @@ async def execute(
     try:
         from application.services.run_event_emitter import RunEventEmitter
 
-        emitter = RunEventEmitter(tracing=tracing, supabase=supabase, run_id=current_run_id)
+        emitter = RunEventEmitter(
+            tracing=tracing, supabase=supabase, run_id=current_run_id
+        )
         emit_and_persist = emitter.emit_and_persist
     except Exception:
+
         def emit_and_persist(*args, **kwargs):
             return None
 
-    supabase.create_or_update_run(
+    supabase.runs.create_or_update_run(
         current_run_id,
         {
             "status": "queued",
@@ -212,16 +218,14 @@ async def execute(
         },
     )
     emit_and_persist(phase="submit_start", message="Starting Shopify submit")
-    supabase.create_or_update_run(
+    supabase.runs.create_or_update_run(
         current_run_id,
         {
             "status": "running",
             "shop_domain": shop_domain,
         },
     )
-    submit_client = (
-        shopify
-    )
+    submit_client = shopify
 
     def fail_submit(message: str) -> None:
         emit_and_persist(
@@ -231,7 +235,7 @@ async def execute(
             error=message,
         )
         try:
-            supabase.finalize_run(current_run_id, status="error", error=message)
+            supabase.runs.finalize_run(current_run_id, status="error", error=message)
         except Exception:
             pass
         try:
@@ -245,13 +249,15 @@ async def execute(
         fail_submit("No products provided")
 
     variant_operations_by_index: dict[int, list[dict[str, Any]]] = {}
-    tenant = _normalize_shop_domain(shop_domain)
+    tenant = normalize_shop_domain(shop_domain)
     if enable_ai_enhancements:
         if not tenant:
             fail_submit("Missing shop_domain for AI enhancements")
         try:
-            normalization_settings = supabase.get_product_intelligence_normalization_settings(
-                shop_domain=tenant
+            normalization_settings = (
+                supabase.intelligence.get_product_intelligence_normalization_settings(
+                    shop_domain=tenant
+                )
             )
             suggestions = await generate_suggestions_execute(
                 supabase=supabase,
@@ -342,7 +348,9 @@ async def execute(
                 if handle_key in handle_lookup_cache:
                     gid = handle_lookup_cache[handle_key]
                 else:
-                    gid = await submit_client.find_product_id_by_handle(str(product["handle"]))
+                    gid = await submit_client.find_product_id_by_handle(
+                        str(product["handle"])
+                    )
                     handle_lookup_cache[handle_key] = gid
                 if gid:
                     resolve_reason = "handle"
@@ -373,7 +381,9 @@ async def execute(
                     },
                 )
                 mutation_started_at = perf_counter()
-                response = await submit_client.update_product_from_input({**product, "id": gid})
+                response = await submit_client.update_product_from_input(
+                    {**product, "id": gid}
+                )
                 payload = response.get("data", {}).get("productUpdate", {})
                 mode_used = "update"
             else:
@@ -435,7 +445,9 @@ async def execute(
                         "mode": mode_used,
                         "lookup_duration_ms": lookup_duration_ms,
                         "mutation_duration_ms": mutation_duration_ms,
-                        "item_duration_ms": int((perf_counter() - item_started_at) * 1000),
+                        "item_duration_ms": int(
+                            (perf_counter() - item_started_at) * 1000
+                        ),
                         "shopify_product_id": product_data.get("id"),
                     },
                 )
@@ -474,12 +486,14 @@ async def execute(
     if status == "success":
         inferred_name = document_name
         if not inferred_name and draft_id:
-            draft = supabase.get_product_draft(draft_id)
+            draft = supabase.drafts.get_product_draft(draft_id)
             if draft:
-                inferred_name = draft.get("draft_name") or draft.get("first_product_title")
+                inferred_name = draft.get("draft_name") or draft.get(
+                    "first_product_title"
+                )
         if not inferred_name:
             inferred_name = str(products[0].get("title") or "Submitted document")
-        submitted = supabase.save_submitted_document(
+        submitted = supabase.submitted.save_submitted_document(
             submitted_id=str(uuid.uuid4()),
             run_id=current_run_id,
             draft_id=draft_id,
@@ -491,7 +505,7 @@ async def execute(
         submitted_id = str(submitted.get("submitted_id"))
 
     submit_duration_ms = int((perf_counter() - submit_started_at) * 1000)
-    supabase.finalize_run(current_run_id, status=status, duration_ms=submit_duration_ms)
+    supabase.runs.finalize_run(current_run_id, status=status, duration_ms=submit_duration_ms)
     tracing.complete_run(current_run_id)
 
     return {

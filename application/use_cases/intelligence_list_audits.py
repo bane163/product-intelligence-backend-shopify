@@ -1,14 +1,14 @@
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 
 def execute(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     shop_domain: str,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
-    return supabase.list_product_intelligence_audits(
+    return supabase.intelligence.list_product_intelligence_audits(
         shop_domain=shop_domain,
         limit=limit,
         offset=offset,

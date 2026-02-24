@@ -10,6 +10,7 @@ from application.use_cases.intelligence_generate_suggestions import execute
 class _FakeSupabase:
     def __init__(self, config):
         self._config = config
+        self.llm_configs = self
 
     def get_active_llm_model_config(self, shop_domain: str):
         _ = shop_domain

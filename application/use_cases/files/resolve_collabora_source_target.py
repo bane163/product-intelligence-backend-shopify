@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from application.ports.collabora_port import CollaboraPort
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 from application.services.document_formats import classify_document
 
 _SPREADSHEET_SOURCE_KINDS = {
@@ -145,7 +145,7 @@ def _is_spreadsheet_kind(value: str | None) -> bool:
 
 async def execute(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     collabora: CollaboraPort,
     source_file_id: str,
     source_value: str | None = None,
@@ -153,7 +153,7 @@ async def execute(
     source_page: int | None = None,
     collabora_base_url: str = "http://localhost:8080",
 ) -> dict[str, Any]:
-    file_entry = supabase.get_file(source_file_id)
+    file_entry = supabase.file.get_file(source_file_id)
     if not file_entry:
         raise LookupError("File not found")
 

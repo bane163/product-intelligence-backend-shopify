@@ -28,7 +28,7 @@ async def wopi_check_file_info(
     Returns metadata about the file for Collabora Online.
     """
     from application.use_cases.files.get_file import execute as get_file_execute
-    file_data = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
+    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -54,7 +54,7 @@ async def wopi_get_file(file_id: str, ctx: AppContext = Depends(get_ctx)) -> Res
     Returns the file contents for Collabora Online to display.
     """
     from application.use_cases.files.get_file import execute as get_file_execute
-    file_data = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
+    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -72,7 +72,7 @@ async def wopi_put_file(file_id: str, request: Request, ctx: AppContext = Depend
     Persists file content updates from Collabora for editable sessions.
     """
     from application.use_cases.files.get_file import execute as get_file_execute
-    file_data = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
+    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
     if not _can_write(request):
@@ -88,7 +88,7 @@ async def wopi_put_file(file_id: str, request: Request, ctx: AppContext = Depend
 
     from application.use_cases.files.save_file import execute as save_file_execute
     save_file_execute(
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         file_id=file_id,
         name=str(file_data.get("name") or f"{file_id}.xlsx"),
         content=body,

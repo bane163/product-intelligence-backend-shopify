@@ -5,7 +5,7 @@ from typing import Any
 
 from ai.excel_writer import create_excel_bytes
 from ai.models import ProductsList
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 
 def _optional_str(data: dict[str, Any], key: str) -> str | None:
@@ -13,8 +13,8 @@ def _optional_str(data: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def execute(supabase: SupabasePort, draft_id: str) -> dict[str, str]:
-    draft = supabase.get_product_draft(draft_id)
+def execute(supabase: SupabaseNamespacedPort, draft_id: str) -> dict[str, str]:
+    draft = supabase.drafts.get_product_draft(draft_id)
     if not draft:
         raise LookupError("Draft not found")
     products_raw = draft.get("products")
@@ -28,7 +28,7 @@ def execute(supabase: SupabasePort, draft_id: str) -> dict[str, str]:
     existing_output_file_id = _optional_str(draft, "output_file_id")
     existing_output_filename = _optional_str(draft, "output_filename")
     if existing_output_file_id:
-        existing_file = supabase.get_file(existing_output_file_id)
+        existing_file = supabase.file.get_file(existing_output_file_id)
         if existing_file:
             existing_name = existing_file.get("name")
             resolved_name = (
@@ -42,7 +42,7 @@ def execute(supabase: SupabasePort, draft_id: str) -> dict[str, str]:
     output_bytes = create_excel_bytes(parsed)
     file_id = str(uuid.uuid4())
     filename = f"draft-{draft_id[:8]}.xlsx"
-    supabase.save_file(
+    supabase.file.save_file(
         file_id=file_id,
         name=filename,
         content=output_bytes,

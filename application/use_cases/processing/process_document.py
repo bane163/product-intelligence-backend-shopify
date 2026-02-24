@@ -6,7 +6,7 @@ import uuid
 from app_context import AppContext
 
 from application.ports.llm_port import LLMPort
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
 
 DEFAULT_IMPORT_AGENT_PROMPT = "Please analyze the document and the associated image(s)."
@@ -14,7 +14,7 @@ DEFAULT_IMPORT_WRITER_PROMPT: str | None = None
 
 
 async def execute(
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     llm: LLMPort,
     tracing: TracingPort,
     ctx: AppContext,
@@ -52,7 +52,7 @@ async def execute(
         def trace_event(*args, **kwargs):
             return None
 
-    supabase.create_or_update_run(
+    supabase.runs.create_or_update_run(
         run_id,
         {
             "status": "queued",
@@ -76,7 +76,7 @@ async def execute(
         )
 
         # Persist input metadata
-        supabase.create_or_update_run(
+        supabase.runs.create_or_update_run(
             run_id,
             {
                 "input_file_id": None,
@@ -88,14 +88,14 @@ async def execute(
 
         model_env = None
         if shop_domain:
-            active_model = supabase.get_active_llm_model_config(shop_domain)
+            active_model = supabase.llm_configs.get_active_llm_model_config(shop_domain)
             if active_model:
                 model_env = {
                     "OLLAMA_CLOUD_URL": str(active_model.get("base_url") or ""),
                     "OLLAMA_MODEL_ID": str(active_model.get("model_id") or ""),
                     "OLLAMA_API_KEY": str(active_model.get("api_key") or ""),
                 }
-                supabase.create_or_update_run(
+                supabase.runs.create_or_update_run(
                     run_id,
                     {
                         "model_name": active_model.get("model_id"),
@@ -118,7 +118,7 @@ async def execute(
             message="Starting document workflow execution",
             payload_preview={"input_bytes": len(file_bytes)},
         )
-        supabase.create_or_update_run(
+        supabase.runs.create_or_update_run(
             run_id,
             {
                 "status": "running",
@@ -170,7 +170,7 @@ async def execute(
             (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
         )
         try:
-            supabase.finalize_run(
+            supabase.runs.finalize_run(
                 run_id, status="error", duration_ms=duration_ms, error=str(exc)
             )
         except Exception:
@@ -199,7 +199,7 @@ async def execute(
                         if generated_filename.lower().endswith(".csv")
                         else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
-                    supabase.save_file(
+                    supabase.file.save_file(
                         generated_file_id,
                         name=generated_filename,
                         content=out_bytes,
@@ -238,7 +238,7 @@ async def execute(
         }
     duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
     try:
-        supabase.finalize_run(
+        supabase.runs.finalize_run(
             run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta
         )
     except Exception:

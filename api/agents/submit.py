@@ -26,7 +26,7 @@ async def submit_products_to_shopify(
 
     try:
         result = await submit_execute(
-            supabase=ctx.services.supabase,
+            supabase=ctx.supabase,
             shopify=ctx.services.shopify,
             tracing=ctx.services.tracing,
             products_json=products_json,

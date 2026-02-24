@@ -5,7 +5,7 @@ from services import CollaboraService, LLMService, SupabaseService, TracingServi
 
 from application.ports.collabora_port import CollaboraPort
 from application.ports.llm_port import LLMPort
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.shopify_port import ShopifyPort
 from application.ports.tracing_port import TracingPort
 from infrastructure.adapters.shopify_adapter import ShopifyAdapter
@@ -13,7 +13,7 @@ from infrastructure.adapters.shopify_adapter import ShopifyAdapter
 
 @dataclass(frozen=True)
 class ServiceRegistry:
-    supabase: SupabasePort
+    supabase: SupabaseNamespacedPort
     llm: LLMPort
     collabora: CollaboraPort
     tracing: TracingPort
@@ -23,6 +23,10 @@ class ServiceRegistry:
 @dataclass(frozen=True)
 class AppContext:
     services: ServiceRegistry
+
+    @property
+    def supabase(self) -> SupabaseNamespacedPort:
+        return self.services.supabase
 
 
 @lru_cache(maxsize=1)

@@ -13,7 +13,7 @@ from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter, range_boundaries
 
 from application.ports.collabora_port import CollaboraPort
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 from application.services.document_formats import classify_document
 
 _XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -343,7 +343,7 @@ def _highlight_pdf_bytes(
 
 async def execute(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     collabora: CollaboraPort,
     source_file_id: str,
     sheet: str | None = None,
@@ -353,7 +353,7 @@ async def execute(
     preferred_sheet: str | None = None,
     highlight_file_id: str | None = None,
 ) -> dict[str, Any]:
-    file_entry = supabase.get_file(source_file_id)
+    file_entry = supabase.file.get_file(source_file_id)
     if not file_entry:
         raise LookupError("Source file not found")
 
@@ -391,7 +391,7 @@ async def execute(
         output_file_id = (highlight_file_id or "").strip() or str(uuid.uuid4())
         base_name, _ = os.path.splitext(source_filename)
         output_filename = f"{base_name or 'document'}-source-highlight.pdf"
-        supabase.save_file(
+        supabase.file.save_file(
             file_id=output_file_id,
             name=output_filename,
             content=highlighted_pdf_bytes,
@@ -525,7 +525,7 @@ async def execute(
     output_filename = f"{base_name or 'document'}-source-highlight{output_ext}"
     output_content_type = _XLSM_CONTENT_TYPE if keep_vba else _XLSX_CONTENT_TYPE
 
-    supabase.save_file(
+    supabase.file.save_file(
         file_id=output_file_id,
         name=output_filename,
         content=output.getvalue(),

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from ai.agent_client import run_product_intelligence_suggestions
 from ai.models import ProductIntelligenceSuggestionsList
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 _SIZE_ALIAS_MAP: dict[str, str] = {
     "xs": "XS",
@@ -98,8 +98,8 @@ def _strip_markdown_json_fence(text: str) -> str:
     return stripped
 
 
-def _resolve_model_env(supabase: SupabasePort, shop_domain: str) -> dict[str, str]:
-    active_model = supabase.get_active_llm_model_config(shop_domain)
+def _resolve_model_env(supabase: SupabaseNamespacedPort, shop_domain: str) -> dict[str, str]:
+    active_model = supabase.llm_configs.get_active_llm_model_config(shop_domain)
     if not active_model:
         raise ValueError("No active LLM model config found for this shop")
     base_url = str(active_model.get("base_url") or "").strip()
@@ -732,7 +732,7 @@ def _build_persisted_suggestions(
 
 async def execute(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     products: list[dict[str, Any]],
     shop_domain: str,
     normalization_settings: dict[str, Any] | None = None,

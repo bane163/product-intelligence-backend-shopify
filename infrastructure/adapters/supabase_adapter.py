@@ -1,18 +1,41 @@
 from typing import Any
 
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import (
+    SupabaseDraftsNamespacePort,
+    SupabaseFileNamespacePort,
+    SupabaseIntelligenceNamespacePort,
+    SupabaseLlmConfigsNamespacePort,
+    SupabaseNamespacedPort,
+    SupabaseRunsNamespacePort,
+    SupabaseSubmittedNamespacePort,
+)
 from services.interfaces import SupabaseServiceInterface
+from .supabase_namespaces import SupabaseDomainAccessors
 
 
-class SupabaseAdapter(SupabasePort):
+class SupabaseAdapter(SupabaseNamespacedPort):
     """Adapter that proxies calls to the real SupabaseService instance.
 
     This keeps the application layer depending on an interface/port while
     reusing the existing SupabaseService implementation.
     """
 
+    file: SupabaseFileNamespacePort
+    runs: SupabaseRunsNamespacePort
+    drafts: SupabaseDraftsNamespacePort
+    submitted: SupabaseSubmittedNamespacePort
+    intelligence: SupabaseIntelligenceNamespacePort
+    llm_configs: SupabaseLlmConfigsNamespacePort
+
     def __init__(self, service: SupabaseServiceInterface) -> None:
         self._service = service
+        domains = SupabaseDomainAccessors(self)
+        self.file = domains.file
+        self.runs = domains.runs
+        self.drafts = domains.drafts
+        self.submitted = domains.submitted
+        self.intelligence = domains.intelligence
+        self.llm_configs = domains.llm_configs
 
     def save_file(
         self,
@@ -310,6 +333,26 @@ class SupabaseAdapter(SupabasePort):
         return self._service.mark_product_intelligence_suggestion_pending(
             suggestion_id=suggestion_id,
             shop_domain=shop_domain,
+        )
+
+    def get_product_intelligence_normalization_settings(
+        self,
+        *,
+        shop_domain: str,
+    ) -> dict[str, Any] | None:
+        return self._service.get_product_intelligence_normalization_settings(
+            shop_domain=shop_domain,
+        )
+
+    def upsert_product_intelligence_normalization_settings(
+        self,
+        *,
+        shop_domain: str,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._service.upsert_product_intelligence_normalization_settings(
+            shop_domain=shop_domain,
+            settings=settings,
         )
 
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]:

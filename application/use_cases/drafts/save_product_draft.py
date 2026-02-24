@@ -1,10 +1,10 @@
 import uuid
 from typing import Dict, List
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 
-def execute(supabase: SupabasePort, *, draft_id: str, run_id: str | None, import_mode: str, draft_name: str | None, input_file_id: str | None = None, input_filename: str | None = None, output_file_id: str | None = None, output_filename: str | None = None, products: List[Dict[str, object]] = []) -> Dict[str, object]:
-    return supabase.save_product_draft(
+def execute(supabase: SupabaseNamespacedPort, *, draft_id: str, run_id: str | None, import_mode: str, draft_name: str | None, input_file_id: str | None = None, input_filename: str | None = None, output_file_id: str | None = None, output_filename: str | None = None, products: List[Dict[str, object]] = []) -> Dict[str, object]:
+    return supabase.drafts.save_product_draft(
         draft_id=draft_id,
         run_id=run_id,
         import_mode=import_mode,

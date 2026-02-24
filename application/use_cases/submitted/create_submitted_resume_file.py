@@ -2,11 +2,11 @@
 import uuid
 from ai.excel_writer import create_excel_bytes
 from ai.models import ProductsList
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 
-def execute(supabase: SupabasePort, submitted_id: str) -> dict[str, str]:
-    document = supabase.get_submitted_document(submitted_id)
+def execute(supabase: SupabaseNamespacedPort, submitted_id: str) -> dict[str, str]:
+    document = supabase.submitted.get_submitted_document(submitted_id)
     if not document:
         raise LookupError("Submitted document not found")
     products = document.get("products")
@@ -16,7 +16,7 @@ def execute(supabase: SupabasePort, submitted_id: str) -> dict[str, str]:
     output_bytes = create_excel_bytes(parsed)
     file_id = str(uuid.uuid4())
     filename = f"submitted-{submitted_id[:8]}.xlsx"
-    supabase.save_file(
+    supabase.file.save_file(
         file_id=file_id,
         name=filename,
         content=output_bytes,

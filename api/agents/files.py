@@ -47,7 +47,7 @@ async def list_uploaded_files(
     resolved_limit = max(1, min(limit, 5000))
     resolved_offset = max(0, offset)
     files = list_files_execute(
-        supabase=ctx.services.supabase, limit=resolved_limit, offset=resolved_offset
+        supabase=ctx.supabase, limit=resolved_limit, offset=resolved_offset
     )
     return {"files": files}
 
@@ -133,7 +133,7 @@ async def upload_file(
     from application.use_cases.files.save_file import execute as save_file_execute
 
     save_file_execute(
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         file_id=file_id,
         name=stored_name,
         content=file_bytes,
@@ -144,7 +144,7 @@ async def upload_file(
 
     from application.use_cases.files.get_file import execute as get_file_execute
 
-    file_name_dict = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
+    file_name_dict = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     file_name = _optional_str(file_name_dict, "name") or "unknown"
 
     return {
@@ -182,7 +182,7 @@ async def process_excel(
     if file_id:
         from application.use_cases.files.get_file import execute as get_file_execute
 
-        file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
+        file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id)
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
         file_content = file_entry.get("content")
@@ -221,7 +221,7 @@ async def process_excel(
         )
 
     result = await process_document_execute(
-        supabase=ctx.services.supabase,
+        supabase=ctx.supabase,
         llm=ctx.services.llm,
         tracing=ctx.services.tracing,
         ctx=ctx,
@@ -246,7 +246,7 @@ async def get_file_info(
     """Get information about an uploaded file."""
     from application.use_cases.files.get_file import execute as get_file_execute
 
-    file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
+    file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
     file_content = file_entry.get("content")
@@ -305,7 +305,7 @@ async def create_source_highlight(
 
     try:
         return await create_source_highlight_execute(
-            supabase=ctx.services.supabase,
+            supabase=ctx.supabase,
             collabora=ctx.services.collabora,
             source_file_id=file_id,
             sheet=sheet,
@@ -346,7 +346,7 @@ async def resolve_source_target(
     try:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
         return await resolve_source_target_execute(
-            supabase=ctx.services.supabase,
+            supabase=ctx.supabase,
             collabora=ctx.services.collabora,
             source_file_id=file_id,
             source_value=value,
@@ -371,7 +371,7 @@ async def delete_file_route(
     """Delete an uploaded file from storage."""
     from application.use_cases.files.delete_file import execute as delete_file_execute
 
-    if not delete_file_execute(supabase=ctx.services.supabase, file_id=file_id):
+    if not delete_file_execute(supabase=ctx.supabase, file_id=file_id):
         raise HTTPException(status_code=404, detail="File not found")
 
     return {"status": "deleted", "file_id": file_id}
@@ -385,7 +385,7 @@ async def bulk_delete_files(
         execute as bulk_delete_files_execute,
     )
 
-    result = bulk_delete_files_execute(supabase=ctx.services.supabase, ids=payload.ids)
+    result = bulk_delete_files_execute(supabase=ctx.supabase, ids=payload.ids)
     return BulkDeleteResult(**result)
 
 
@@ -399,7 +399,7 @@ async def get_file_preview(
         execute as get_file_thumb_execute,
     )
 
-    file_entry = get_file_execute(supabase=ctx.services.supabase, file_id=file_id)
+    file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
     file_content = file_entry.get("content")
@@ -409,7 +409,7 @@ async def get_file_preview(
     file_content_type = _required_str(file_entry, "content_type")
 
     thumbnail_bytes = get_file_thumb_execute(
-        supabase=ctx.services.supabase, file_id=file_id
+        supabase=ctx.supabase, file_id=file_id
     )
     if thumbnail_bytes:
         return Response(content=thumbnail_bytes, media_type="image/png")
@@ -428,7 +428,7 @@ async def get_file_preview(
         )
 
         save_thumb_execute(
-            supabase=ctx.services.supabase, file_id=file_id, content=preview_png
+            supabase=ctx.supabase, file_id=file_id, content=preview_png
         )
 
         return Response(content=preview_png, media_type="image/png")

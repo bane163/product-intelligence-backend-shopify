@@ -1861,7 +1861,7 @@ async def test_apply_partial_field_keeps_remaining_fields_pending(monkeypatch):
     ctx = get_app_context()
     audit_id = f"audit-partial-{uuid.uuid4()}"
     suggestion_id = f"suggestion-partial-{uuid.uuid4()}"
-    ctx.services.supabase.save_product_intelligence_audit(
+    ctx.services.supabase.intelligence.save_product_intelligence_audit(
         audit_id=audit_id,
         run_id=None,
         submitted_id=None,
@@ -1881,7 +1881,7 @@ async def test_apply_partial_field_keeps_remaining_fields_pending(monkeypatch):
         },
         shop_domain=TEST_SHOP_DOMAIN,
     )
-    ctx.services.supabase.save_product_intelligence_suggestions(
+    ctx.services.supabase.intelligence.save_product_intelligence_suggestions(
         audit_id=audit_id,
         suggestions=[
             {
@@ -1976,7 +1976,7 @@ async def test_revert_blocked_for_non_reversible_missing_original_field(monkeypa
     ctx = get_app_context()
     audit_id = f"audit-nonreversible-{uuid.uuid4()}"
     suggestion_id = f"suggestion-nonreversible-{uuid.uuid4()}"
-    ctx.services.supabase.save_product_intelligence_audit(
+    ctx.services.supabase.intelligence.save_product_intelligence_audit(
         audit_id=audit_id,
         run_id=None,
         submitted_id=None,
@@ -1996,7 +1996,7 @@ async def test_revert_blocked_for_non_reversible_missing_original_field(monkeypa
         },
         shop_domain=TEST_SHOP_DOMAIN,
     )
-    ctx.services.supabase.save_product_intelligence_suggestions(
+    ctx.services.supabase.intelligence.save_product_intelligence_suggestions(
         audit_id=audit_id,
         suggestions=[
             {

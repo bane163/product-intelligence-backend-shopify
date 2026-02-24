@@ -5,7 +5,7 @@ from typing import Any
 
 from application.domain.product import extract_first_sku
 from application.ports.shopify_port import ShopifyPort
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 REVERT_MODES_KEY = "__revert_modes"
 REVERT_REVERSIBLE_KEY = "__is_reversible"
@@ -363,13 +363,13 @@ def _build_pending_suggestion_from_partial_apply(
 
 async def execute(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     shopify: ShopifyPort,
     suggestion_id: str,
     patch_payload: dict[str, Any] | None = None,
     shop_domain: str | None = None,
 ) -> dict[str, Any]:
-    suggestion = supabase.get_product_intelligence_suggestion(
+    suggestion = supabase.intelligence.get_product_intelligence_suggestion(
         suggestion_id,
         shop_domain=shop_domain,
     )
@@ -398,7 +398,7 @@ async def execute(
     if not isinstance(audit_id, str) or not audit_id:
         raise ValueError("Suggestion is missing audit reference")
 
-    audit = supabase.get_product_intelligence_audit(audit_id, shop_domain=shop_domain)
+    audit = supabase.intelligence.get_product_intelligence_audit(audit_id, shop_domain=shop_domain)
     if not audit:
         raise LookupError("Audit not found for suggestion")
 
@@ -448,7 +448,7 @@ async def execute(
     if shopify_patch_payload:
         await shopify.update_product_from_input({"id": gid, **shopify_patch_payload})
 
-    applied = supabase.mark_product_intelligence_suggestion_applied(
+    applied = supabase.intelligence.mark_product_intelligence_suggestion_applied(
         suggestion_id=suggestion_id,
         previous_payload=previous_payload,
         patch_payload=effective_patch_payload,
@@ -461,7 +461,7 @@ async def execute(
             source_suggestion=suggestion,
             remaining_patch_payload=remaining_patch_payload,
         )
-        created_pending = supabase.create_product_intelligence_suggestion(
+        created_pending = supabase.intelligence.create_product_intelligence_suggestion(
             suggestion=pending_copy,
             shop_domain=shop_domain,
         )

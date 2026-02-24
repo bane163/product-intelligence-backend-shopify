@@ -1,6 +1,6 @@
 """Use-case: delete a submitted document via supabase port."""
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 
-def execute(supabase: SupabasePort, submitted_id: str) -> bool:
-    return supabase.delete_submitted_document(submitted_id)
+def execute(supabase: SupabaseNamespacedPort, submitted_id: str) -> bool:
+    return supabase.submitted.delete_submitted_document(submitted_id)

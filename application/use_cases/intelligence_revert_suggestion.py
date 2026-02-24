@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 from application.ports.shopify_port import ShopifyPort
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 from application.use_cases.intelligence_apply_suggestion import (
     REVERT_MODE_CLEAR,
     REVERT_MODE_RESTORE,
@@ -43,12 +43,12 @@ def _clear_value_for_field(field: str) -> Any:
 
 async def execute(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     shopify: ShopifyPort,
     suggestion_id: str,
     shop_domain: str | None = None,
 ) -> dict[str, Any]:
-    suggestion = supabase.get_product_intelligence_suggestion(
+    suggestion = supabase.intelligence.get_product_intelligence_suggestion(
         suggestion_id,
         shop_domain=shop_domain,
     )
@@ -77,7 +77,7 @@ async def execute(
     if not isinstance(audit_id, str) or not audit_id:
         raise ValueError("Suggestion is missing audit reference")
 
-    audit = supabase.get_product_intelligence_audit(audit_id, shop_domain=shop_domain)
+    audit = supabase.intelligence.get_product_intelligence_audit(audit_id, shop_domain=shop_domain)
     if not audit:
         raise LookupError("Audit not found for suggestion")
 
@@ -156,7 +156,7 @@ async def execute(
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            reverted = supabase.mark_product_intelligence_suggestion_pending(
+            reverted = supabase.intelligence.mark_product_intelligence_suggestion_pending(
                 suggestion_id=suggestion_id,
                 shop_domain=shop_domain,
             )

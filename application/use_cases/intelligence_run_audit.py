@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from application.ports.supabase_port import SupabasePort
+from application.ports.supabase_port import SupabaseNamespacedPort
 
 
 def _to_text(value: Any) -> str:
@@ -268,7 +268,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
 
 async def execute(
     *,
-    supabase: SupabasePort,
+    supabase: SupabaseNamespacedPort,
     products: list[dict[str, Any]],
     submitted_id: str | None = None,
     run_id: str | None = None,
@@ -330,7 +330,7 @@ async def execute(
     }
 
     audit_id = str(uuid.uuid4())
-    audit = supabase.save_product_intelligence_audit(
+    audit = supabase.intelligence.save_product_intelligence_audit(
         audit_id=audit_id,
         run_id=run_id,
         submitted_id=submitted_id,
@@ -348,14 +348,14 @@ async def execute(
             message="Persisted audit metadata",
             payload_preview={"audit_id": audit_id, "run_id": run_id},
         )
-    supabase.save_product_intelligence_findings(audit_id=audit_id, findings=findings, shop_domain=tenant)
+    supabase.intelligence.save_product_intelligence_findings(audit_id=audit_id, findings=findings, shop_domain=tenant)
     if callable(trace_event):
         trace_event(
             phase="findings_persisted",
             message="Persisted intelligence findings",
             payload_preview={"findings_count": len(findings)},
         )
-    normalization_settings = supabase.get_product_intelligence_normalization_settings(
+    normalization_settings = supabase.intelligence.get_product_intelligence_normalization_settings(
         shop_domain=tenant,
     )
     suggestions = await generate_suggestions_execute(
@@ -365,7 +365,7 @@ async def execute(
         normalization_settings=normalization_settings,
         trace_event=trace_event if callable(trace_event) else None,
     )
-    supabase.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions, shop_domain=tenant)
+    supabase.intelligence.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions, shop_domain=tenant)
     if callable(trace_event):
         trace_event(
             phase="suggestions_persisted",

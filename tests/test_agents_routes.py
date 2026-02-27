@@ -949,6 +949,203 @@ async def test_submit_products_auto_updates_when_id_present(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_submit_products_uses_submitted_document_when_submitted_id_provided(
+    monkeypatch,
+):
+    created_payloads: list[dict[str, Any]] = []
+
+    async def fake_create_product_from_input(self, product):
+        created_payloads.append(dict(product))
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {
+                        "id": "gid://shopify/Product/404",
+                        "title": product.get("title"),
+                    },
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fake_create_product_from_input,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        seed_response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "products_json": json.dumps([{"title": "Stored Demo"}]),
+                "import_mode": "auto",
+                "document_name": "stored-demo.xlsx",
+            },
+        )
+        assert seed_response.status_code == 200
+        submitted_id = seed_response.json()["submitted_id"]
+        assert submitted_id
+
+        created_payloads.clear()
+
+        submit_response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "submitted_id": submitted_id,
+                "import_mode": "auto",
+            },
+        )
+        assert submit_response.status_code == 200
+        body = submit_response.json()
+        assert body["success_count"] == 1
+        assert created_payloads and created_payloads[0]["title"] == "Stored Demo"
+
+
+@pytest.mark.asyncio
+async def test_submit_products_uses_draft_when_draft_id_provided(monkeypatch):
+    created_payloads: list[dict[str, Any]] = []
+
+    async def fake_create_product_from_input(self, product):
+        created_payloads.append(dict(product))
+        return {
+            "data": {
+                "productCreate": {
+                    "product": {
+                        "id": "gid://shopify/Product/405",
+                        "title": product.get("title"),
+                    },
+                    "userErrors": [],
+                }
+            }
+        }
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fake_create_product_from_input,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        draft_response = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Draft Source Demo"}]),
+                "run_id": "run-draft-source",
+                "import_mode": "auto",
+                "draft_name": "draft-source.xlsx",
+            },
+        )
+        assert draft_response.status_code == 200
+        draft_id = draft_response.json()["draft_id"]
+        assert draft_id
+
+        created_payloads.clear()
+
+        submit_response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "draft_id": draft_id,
+                "import_mode": "auto",
+            },
+        )
+        assert submit_response.status_code == 200
+        body = submit_response.json()
+        assert body["success_count"] == 1
+        assert created_payloads and created_payloads[0]["title"] == "Draft Source Demo"
+
+
+@pytest.mark.asyncio
+async def test_submit_products_rejects_unknown_draft_id(monkeypatch):
+    async def fail_create_product_from_input(self, product):
+        _ = (self, product)
+        raise AssertionError(
+            "create_product_from_input should not be called for unknown draft_id"
+        )
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fail_create_product_from_input,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "draft_id": "missing-draft-id",
+                "import_mode": "auto",
+            },
+        )
+        assert response.status_code == 400
+        assert "Draft not found" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_submit_products_rejects_unknown_submitted_id(monkeypatch):
+    async def fail_create_product_from_input(self, product):
+        _ = (self, product)
+        raise AssertionError(
+            "create_product_from_input should not be called for unknown submitted_id"
+        )
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fail_create_product_from_input,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "submitted_id": "missing-submitted-id",
+                "import_mode": "auto",
+            },
+        )
+        assert response.status_code == 400
+        assert "Submitted document not found" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_submit_products_requires_products_source(monkeypatch):
+    async def fail_create_product_from_input(self, product):
+        _ = (self, product)
+        raise AssertionError(
+            "create_product_from_input should not be called without products source"
+        )
+
+    import api.agents.submit as submit_api
+
+    monkeypatch.setattr(
+        submit_api.ShopifyClient,
+        "create_product_from_input",
+        fail_create_product_from_input,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/submit-products",
+            data={"import_mode": "auto"},
+        )
+        assert response.status_code == 400
+        assert "No products provided" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_submit_products_ai_enhancements_applies_audit_suggestions(monkeypatch):
     created_payloads: list[dict[str, Any]] = []
     option_payloads: list[dict[str, Any]] = []

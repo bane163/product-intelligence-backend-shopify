@@ -182,10 +182,11 @@ async def execute(
     supabase: SupabaseNamespacedPort,
     shopify: ShopifyPort,
     tracing: TracingPort,
-    products_json: str,
+    products_json: str | None = None,
     import_mode: str = "auto",
     run_id: str | None = None,
     draft_id: str | None = None,
+    submitted_id: str | None = None,
     document_name: str | None = None,
     shop_domain: str | None = None,
     shop_access_token: str | None = None,
@@ -244,7 +245,52 @@ async def execute(
             pass
         raise RuntimeError(message)
 
-    products = parse_products_json(products_json)
+    submitted_document: dict[str, Any] | None = None
+    draft_document: dict[str, Any] | None = None
+    products: list[dict[str, Any]] = []
+    submitted_source_id = (
+        submitted_id.strip()
+        if isinstance(submitted_id, str) and submitted_id.strip()
+        else None
+    )
+    draft_source_id = (
+        draft_id.strip() if isinstance(draft_id, str) and draft_id.strip() else None
+    )
+    if submitted_source_id:
+        submitted_document = supabase.submitted.get_submitted_document(
+            submitted_source_id
+        )
+        if not isinstance(submitted_document, dict):
+            fail_submit("Submitted document not found")
+        stored_products = submitted_document.get("products")
+        if not isinstance(stored_products, list):
+            fail_submit("Submitted document has invalid products payload")
+        products = [item for item in stored_products if isinstance(item, dict)]
+        if not draft_id:
+            inferred_draft_id = submitted_document.get("draft_id")
+            if isinstance(inferred_draft_id, str) and inferred_draft_id.strip():
+                draft_id = inferred_draft_id.strip()
+        if not document_name:
+            inferred_name = submitted_document.get("name")
+            if isinstance(inferred_name, str) and inferred_name.strip():
+                document_name = inferred_name.strip()
+    elif draft_source_id:
+        draft_document = supabase.drafts.get_product_draft(draft_source_id)
+        if not isinstance(draft_document, dict):
+            fail_submit("Draft not found")
+        stored_products = draft_document.get("products")
+        if not isinstance(stored_products, list):
+            fail_submit("Draft has invalid products payload")
+        products = [item for item in stored_products if isinstance(item, dict)]
+        draft_id = draft_source_id
+        if not document_name:
+            inferred_name = draft_document.get("draft_name") or draft_document.get(
+                "first_product_title"
+            )
+            if isinstance(inferred_name, str) and inferred_name.strip():
+                document_name = inferred_name.strip()
+    elif isinstance(products_json, str) and products_json.strip():
+        products = parse_products_json(products_json)
     if not products:
         fail_submit("No products provided")
 
@@ -310,6 +356,13 @@ async def execute(
             "shop_domain": tenant,
             "has_token": bool(shop_access_token),
             "ai_enhancements_enabled": bool(enable_ai_enhancements),
+            "source": (
+                "submitted_document"
+                if submitted_source_id
+                else "draft"
+                if draft_source_id
+                else "products_json"
+            ),
         },
     )
 

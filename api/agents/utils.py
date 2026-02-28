@@ -33,11 +33,20 @@ def normalize_shop_domain(value: Any) -> str | None:
 
 
 def resolve_shop_domain(request: Request, candidate: Any = None) -> str | None:
-    header_shop = normalize_shop_domain(request.headers.get("x-shop-domain"))
-    body_shop = normalize_shop_domain(candidate)
-    if header_shop and body_shop and header_shop != body_shop:
+    sources = [
+        normalize_shop_domain(request.headers.get("x-shop-domain")),
+        normalize_shop_domain(request.headers.get("x-shopify-shop-domain")),
+        normalize_shop_domain(candidate),
+        normalize_shop_domain(request.query_params.get("shop_domain")),
+        normalize_shop_domain(request.query_params.get("shop")),
+    ]
+    resolved = [value for value in sources if value]
+    if not resolved:
+        return None
+    first = resolved[0]
+    if any(value != first for value in resolved[1:]):
         raise HTTPException(status_code=403, detail="shop_domain mismatch")
-    return header_shop or body_shop
+    return first
 
 
 def require_shop_domain(request: Request, candidate: Any = None) -> str:

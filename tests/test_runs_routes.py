@@ -116,3 +116,51 @@ async def test_run_control_resume_retry_cancel(monkeypatch):
         assert retry_response.status_code == 200
         assert retry_response.json()["run"]["status"] == "queued"
         assert retry_response.json()["run"]["attempt"] == 3
+
+
+@pytest.mark.asyncio
+async def test_workflow_snapshot_returns_run_draft_and_events(monkeypatch):
+    ctx = get_app_context()
+
+    def fake_get_run(run_id: str, *, shop_domain=None):
+        if run_id != "run-snap" or shop_domain != "test-shop.myshopify.com":
+            return None
+        return {"run_id": run_id, "status": "running", "shop_domain": shop_domain}
+
+    def fake_get_product_draft(draft_id: str, *, shop_domain=None):
+        if draft_id != "draft-snap" or shop_domain != "test-shop.myshopify.com":
+            return None
+        return {
+            "draft_id": draft_id,
+            "extraction_run_id": "run-snap",
+            "shop_domain": shop_domain,
+        }
+
+    def fake_get_run_history(run_id: str, *, shop_domain=None):
+        if run_id != "run-snap" or shop_domain != "test-shop.myshopify.com":
+            return {"run": None, "events": [], "messages": []}
+        return {
+            "run": {"run_id": run_id, "status": "running", "shop_domain": shop_domain},
+            "events": [
+                {"run_id": run_id, "seq": 1, "phase": "workflow_start"},
+                {"run_id": run_id, "seq": 2, "phase": "extract_complete"},
+            ],
+            "messages": [],
+        }
+
+    monkeypatch.setattr(ctx.services.supabase, "get_run", fake_get_run)
+    monkeypatch.setattr(ctx.services.supabase, "get_product_draft", fake_get_product_draft)
+    monkeypatch.setattr(ctx.services.supabase, "get_run_history", fake_get_run_history)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.get(
+            "/agents/runs/run-snap/snapshot?draft_id=draft-snap",
+            headers={"x-shop-domain": "test-shop.myshopify.com"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run"]["run_id"] == "run-snap"
+    assert body["draft"]["draft_id"] == "draft-snap"
+    assert [event["seq"] for event in body["events"]] == [1, 2]

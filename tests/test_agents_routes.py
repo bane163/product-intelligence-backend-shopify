@@ -1257,14 +1257,15 @@ async def test_submit_products_legacy_ai_flag_does_not_mutate_draft(monkeypatch)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         created_draft = await ac.post(
             "/agents/product-drafts",
-            data={
-                "products_json": json.dumps([{"title": "Drafted Product"}]),
-                "run_id": "run-sync-draft",
-                "import_mode": "auto",
-                "draft_name": "draft-sync.xlsx",
-                "output_file_id": "old-output-file",
-                "output_filename": "old-output.xlsx",
-            },
+                data={
+                    "products_json": json.dumps([{"title": "Drafted Product"}]),
+                    "run_id": "run-sync-draft",
+                    "import_mode": "auto",
+                    "shop_domain": "store.myshopify.com",
+                    "draft_name": "draft-sync.xlsx",
+                    "output_file_id": "old-output-file",
+                    "output_filename": "old-output.xlsx",
+                },
         )
         assert created_draft.status_code == 200
         draft_id = created_draft.json()["draft_id"]
@@ -1909,10 +1910,12 @@ async def test_submit_offload_returns_explicit_error_when_lifecycle_persistence_
 async def test_list_and_get_product_draft():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        tenant_header = {"x-shop-domain": "test-shop.myshopify.com"}
         payload = {
             "products_json": json.dumps([{"title": "Draft A"}]),
             "run_id": "run-a",
             "import_mode": "create",
+            "shop_domain": tenant_header["x-shop-domain"],
             "input_file_id": "input-file-a",
             "input_filename": "draft-input.xlsx",
         }
@@ -1920,7 +1923,7 @@ async def test_list_and_get_product_draft():
         assert created.status_code == 200
         draft_id = created.json()["draft_id"]
 
-        listed = await ac.get("/agents/product-drafts")
+        listed = await ac.get("/agents/product-drafts", headers=tenant_header)
         assert listed.status_code == 200
         drafts = listed.json()["drafts"]
         assert any(d.get("draft_id") == draft_id for d in drafts)
@@ -1944,6 +1947,46 @@ async def test_list_and_get_product_draft():
         resume_again = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
         assert resume_again.status_code == 200
         assert resume_again.json()["file_id"] == resume_body["file_id"]
+
+
+@pytest.mark.asyncio
+async def test_product_drafts_list_requires_shop_domain_header():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.get("/agents/product-drafts")
+    assert response.status_code == 400
+    assert "shop_domain" in response.text
+
+
+@pytest.mark.asyncio
+async def test_product_drafts_list_accepts_shop_query_param():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        created = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Query Shop Draft"}]),
+                "run_id": "run-query-shop",
+                "import_mode": "auto",
+                "shop_domain": "query-shop.myshopify.com",
+            },
+        )
+        assert created.status_code == 200
+        draft_id = created.json()["draft_id"]
+
+        listed = await ac.get("/agents/product-drafts?shop=query-shop.myshopify.com")
+        assert listed.status_code == 200
+        draft_ids = [item.get("draft_id") for item in listed.json()["drafts"]]
+        assert draft_id in draft_ids
+
+
+@pytest.mark.asyncio
+async def test_submitted_documents_list_requires_shop_domain_header():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.get("/agents/submitted-documents")
+    assert response.status_code == 400
+    assert "shop_domain" in response.text
 
 
 @pytest.mark.asyncio
@@ -1996,10 +2039,12 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        tenant_header = {"x-shop-domain": "test-shop.myshopify.com"}
         draft_payload = {
             "products_json": json.dumps([{"title": "Submitted Draft Product"}]),
             "run_id": "run-submit",
             "import_mode": "create",
+            "shop_domain": tenant_header["x-shop-domain"],
             "draft_name": "submitted-draft.xlsx",
             "input_file_id": "input-file-preview",
             "input_filename": "submitted-source.xlsx",
@@ -2014,6 +2059,7 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
             "run_id": "run-submit-1",
             "draft_id": draft_id,
             "document_name": "submitted-draft.xlsx",
+            "shop_domain": tenant_header["x-shop-domain"],
         }
         submitted = await ac.post("/agents/submit-products", data=submit_payload)
         assert submitted.status_code == 200
@@ -2021,12 +2067,18 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
         assert submitted_body["success_count"] == 1
         assert submitted_body["submitted_id"]
 
-        drafts_after_submit = await ac.get("/agents/product-drafts")
+        drafts_after_submit = await ac.get(
+            "/agents/product-drafts",
+            headers=tenant_header,
+        )
         assert drafts_after_submit.status_code == 200
         draft_ids = [d.get("draft_id") for d in drafts_after_submit.json()["drafts"]]
         assert draft_id not in draft_ids
 
-        submitted_list = await ac.get("/agents/submitted-documents")
+        submitted_list = await ac.get(
+            "/agents/submitted-documents",
+            headers=tenant_header,
+        )
         assert submitted_list.status_code == 200
         items = submitted_list.json()["submitted_documents"]
         assert any(

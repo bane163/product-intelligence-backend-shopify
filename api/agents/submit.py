@@ -36,6 +36,7 @@ def _save_submit_draft_state(
     *,
     ctx: AppContext,
     draft_id: str,
+    shop_domain: str | None,
     fallback_run_id: str | None,
     fallback_name: str | None,
     submit_status: str | None,
@@ -45,7 +46,11 @@ def _save_submit_draft_state(
     from application.use_cases.drafts.get_product_draft import execute as get_draft_execute
     from application.use_cases.drafts.save_product_draft import execute as save_draft_execute
 
-    existing = get_draft_execute(supabase=ctx.supabase, draft_id=draft_id)
+    existing = get_draft_execute(
+        supabase=ctx.supabase,
+        draft_id=draft_id,
+        shop_domain=shop_domain,
+    )
     if not isinstance(existing, dict):
         return
     save_draft_execute(
@@ -54,6 +59,7 @@ def _save_submit_draft_state(
         run_id=_optional_str(existing, "run_id") or fallback_run_id,
         import_mode=_optional_str(existing, "import_mode") or "auto",
         draft_name=_optional_str(existing, "draft_name") or fallback_name,
+        shop_domain=_optional_str(existing, "shop_domain") or shop_domain,
         input_file_id=_optional_str(existing, "input_file_id"),
         input_filename=_optional_str(existing, "input_filename"),
         output_file_id=_optional_str(existing, "output_file_id"),
@@ -87,6 +93,7 @@ async def _run_submit_in_background(
         _save_submit_draft_state(
             ctx=ctx,
             draft_id=draft_id,
+            shop_domain=shop_domain,
             fallback_run_id=run_id,
             fallback_name=document_name,
             submit_status="running",
@@ -116,6 +123,7 @@ async def _run_submit_in_background(
             _save_submit_draft_state(
                 ctx=ctx,
                 draft_id=draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=run_id,
                 fallback_name=document_name,
                 submit_status="succeeded" if submit_succeeded else "failed",
@@ -127,6 +135,7 @@ async def _run_submit_in_background(
             _save_submit_draft_state(
                 ctx=ctx,
                 draft_id=draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=run_id,
                 fallback_name=document_name,
                 submit_status="failed",
@@ -164,7 +173,9 @@ async def submit_products_to_shopify(
         effective_run_id = run_id or str(uuid.uuid4())
         if not resolved_draft_id and submitted_id:
             submitted_document = get_submitted_execute(
-                supabase=ctx.supabase, submitted_id=submitted_id
+                supabase=ctx.supabase,
+                submitted_id=submitted_id,
+                shop_domain=shop_domain,
             )
             if isinstance(submitted_document, dict):
                 inferred_draft_id = submitted_document.get("draft_id")
@@ -181,6 +192,7 @@ async def submit_products_to_shopify(
                     run_id=effective_run_id,
                     import_mode=import_mode,
                     draft_name=document_name,
+                    shop_domain=shop_domain,
                     products=products,
                     extraction_status="succeeded",
                     extraction_run_id=None,
@@ -200,6 +212,7 @@ async def submit_products_to_shopify(
             _save_submit_draft_state(
                 ctx=ctx,
                 draft_id=resolved_draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=effective_run_id,
                 fallback_name=document_name,
                 submit_status="queued",

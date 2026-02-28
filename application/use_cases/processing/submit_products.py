@@ -144,6 +144,7 @@ async def execute(
     submitted_document: dict[str, Any] | None = None
     draft_document: dict[str, Any] | None = None
     products: list[dict[str, Any]] = []
+    tenant = normalize_shop_domain(shop_domain)
     submitted_source_id = (
         submitted_id.strip()
         if isinstance(submitted_id, str) and submitted_id.strip()
@@ -154,7 +155,8 @@ async def execute(
     )
     if submitted_source_id:
         submitted_document = supabase.submitted.get_submitted_document(
-            submitted_source_id
+            submitted_source_id,
+            shop_domain=tenant,
         )
         if not isinstance(submitted_document, dict):
             fail_submit("Submitted document not found")
@@ -171,7 +173,10 @@ async def execute(
             if isinstance(inferred_name, str) and inferred_name.strip():
                 document_name = inferred_name.strip()
     elif draft_source_id:
-        draft_document = supabase.drafts.get_product_draft(draft_source_id)
+        draft_document = supabase.drafts.get_product_draft(
+            draft_source_id,
+            shop_domain=tenant,
+        )
         if not isinstance(draft_document, dict):
             fail_submit("Draft not found")
         stored_products = draft_document.get("products")
@@ -192,8 +197,6 @@ async def execute(
 
     variant_operations_by_index = _collect_variant_operations_by_index(products)
     submit_products = [_strip_internal_submit_fields(item) for item in products]
-    tenant = normalize_shop_domain(shop_domain)
-
     emit_and_persist(
         phase="submit_products_loaded",
         message="Loaded products for submit",
@@ -388,7 +391,7 @@ async def execute(
     if status == "success":
         inferred_name = document_name
         if not inferred_name and draft_id:
-            draft = supabase.drafts.get_product_draft(draft_id)
+            draft = supabase.drafts.get_product_draft(draft_id, shop_domain=tenant)
             if draft:
                 inferred_name = draft.get("draft_name") or draft.get(
                     "first_product_title"
@@ -401,6 +404,7 @@ async def execute(
             draft_id=draft_id,
             name=str(inferred_name),
             import_mode="auto",
+            shop_domain=tenant,
             product_count=len(submit_products),
             products=submit_products,
         )

@@ -162,6 +162,34 @@ async def get_llm_run_history(
     return history
 
 
+@router.get("/runs/{run_id}/snapshot", summary="Get workflow snapshot for realtime")
+async def get_workflow_snapshot(
+    run_id: str,
+    request: Request,
+    draft_id: str | None = None,
+    after_seq: int = 0,
+    event_limit: int = 200,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.runs.get_workflow_snapshot import (
+        execute as get_snapshot_execute,
+    )
+
+    tenant = require_shop_domain(request, shop_domain)
+    snapshot = get_snapshot_execute(
+        supabase=ctx.supabase,
+        run_id=run_id,
+        shop_domain=tenant,
+        draft_id=draft_id,
+        after_seq=after_seq,
+        event_limit=event_limit,
+    )
+    if snapshot.get("run") is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return snapshot
+
+
 @router.post("/runs/{run_id}/{operation}", summary="Control run lifecycle")
 async def control_llm_run(
     run_id: str,

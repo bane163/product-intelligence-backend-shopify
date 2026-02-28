@@ -86,6 +86,7 @@ class SupabasePort(Protocol):
         run_id: str | None,
         import_mode: str,
         draft_name: str | None,
+        shop_domain: str | None = None,
         input_file_id: str | None = None,
         input_filename: str | None = None,
         output_file_id: str | None = None,
@@ -107,11 +108,16 @@ class SupabasePort(Protocol):
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None: ...
+    def get_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
 
-    def delete_product_draft(self, draft_id: str) -> bool: ...
+    def delete_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> bool: ...
 
     def save_submitted_document(
         self,
@@ -121,6 +127,7 @@ class SupabasePort(Protocol):
         draft_id: str | None,
         name: str,
         import_mode: str,
+        shop_domain: str | None = None,
         product_count: int,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
@@ -132,11 +139,16 @@ class SupabasePort(Protocol):
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None: ...
+    def get_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
 
-    def delete_submitted_document(self, submitted_id: str) -> bool: ...
+    def delete_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> bool: ...
 
     def save_product_intelligence_audit(
         self,
@@ -366,6 +378,7 @@ class SupabaseDraftsNamespacePort(Protocol):
         run_id: str | None,
         import_mode: str,
         draft_name: str | None,
+        shop_domain: str | None = None,
         input_file_id: str | None = None,
         input_filename: str | None = None,
         output_file_id: str | None = None,
@@ -387,11 +400,16 @@ class SupabaseDraftsNamespacePort(Protocol):
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None: ...
+    def get_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
 
-    def delete_product_draft(self, draft_id: str) -> bool: ...
+    def delete_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> bool: ...
 
 
 class SupabaseSubmittedNamespacePort(Protocol):
@@ -403,6 +421,7 @@ class SupabaseSubmittedNamespacePort(Protocol):
         draft_id: str | None,
         name: str,
         import_mode: str,
+        shop_domain: str | None = None,
         product_count: int,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
@@ -414,11 +433,16 @@ class SupabaseSubmittedNamespacePort(Protocol):
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None: ...
+    def get_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
 
-    def delete_submitted_document(self, submitted_id: str) -> bool: ...
+    def delete_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> bool: ...
 
 
 class SupabaseIntelligenceNamespacePort(Protocol):

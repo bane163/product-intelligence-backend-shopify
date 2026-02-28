@@ -33,6 +33,22 @@ def _normalize_error_text(value: str) -> str:
     )
 
 
+def _normalize_shop_domain(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _matches_shop_domain(record: dict[str, Any], shop_domain: str | None) -> bool:
+    if not shop_domain:
+        return True
+    record_shop_domain = _normalize_shop_domain(record.get("shop_domain"))
+    if not record_shop_domain:
+        return False
+    return record_shop_domain == shop_domain
+
+
 def _is_missing_column_error(exc: Exception, *, table: str, column: str) -> bool:
     table_name = table.lower().split(".")[-1]
     column_name = column.lower()
@@ -81,6 +97,7 @@ class SupabaseDraftsMixin:
         run_id: str | None,
         import_mode: str,
         draft_name: str | None,
+        shop_domain: str | None = None,
         input_file_id: str | None = None,
         input_filename: str | None = None,
         output_file_id: str | None = None,
@@ -95,6 +112,7 @@ class SupabaseDraftsMixin:
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         now = self._utc_now()
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
         first_title = ""
         if products and isinstance(products[0], dict):
             first_title = str(products[0].get("title") or "")
@@ -103,6 +121,7 @@ class SupabaseDraftsMixin:
             "run_id": run_id,
             "import_mode": import_mode,
             "draft_name": draft_name,
+            "shop_domain": normalized_shop_domain,
             "input_file_id": input_file_id,
             "input_filename": input_filename,
             "output_file_id": output_file_id,
@@ -166,6 +185,7 @@ class SupabaseDraftsMixin:
                     compat_payload.pop("submit_status", None)
                     compat_payload.pop("submit_run_id", None)
                     compat_payload.pop("submit_error", None)
+                    compat_payload.pop("shop_domain", None)
                     compat_payload.pop("extraction_progress", None)
                     client.table("product_drafts").upsert(
                         compat_payload, on_conflict="draft_id"
@@ -184,56 +204,110 @@ class SupabaseDraftsMixin:
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         db_drafts: list[dict[str, Any]] = []
         submitted_draft_ids: set[str] = set()
         db_drafts_loaded = False
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
         client = self._get_supabase_client()
         if client:
             try:
-                res = (
-                    client.table("product_drafts")
-                    .select("*")
-                    .order("created_at", desc=True)
-                    .limit(1000)
-                    .execute()
-                )
+                query = client.table("product_drafts").select("*")
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                res = query.order("created_at", desc=True).limit(1000).execute()
                 db_drafts = res.data or []
                 db_drafts_loaded = True
-            except Exception:
-                LOG.exception("Failed listing product drafts")
+            except Exception as exc:
+                if normalized_shop_domain and _is_missing_column_error(
+                    exc, table="product_drafts", column="shop_domain"
+                ):
+                    try:
+                        res = (
+                            client.table("product_drafts")
+                            .select("*")
+                            .order("created_at", desc=True)
+                            .limit(1000)
+                            .execute()
+                        )
+                        db_drafts = res.data or []
+                        db_drafts_loaded = True
+                    except Exception:
+                        LOG.exception("Failed listing product drafts")
+                else:
+                    LOG.exception("Failed listing product drafts")
             try:
-                submitted_res = (
-                    client.table("submitted_documents")
-                    .select("draft_id")
-                    .limit(1000)
-                    .execute()
+                submitted_query = client.table("submitted_documents").select(
+                    "draft_id,shop_domain"
                 )
+                if normalized_shop_domain:
+                    submitted_query = submitted_query.eq(
+                        "shop_domain", normalized_shop_domain
+                    )
+                submitted_res = submitted_query.limit(1000).execute()
                 for item in submitted_res.data or []:
+                    if not _matches_shop_domain(item, normalized_shop_domain):
+                        continue
                     draft_id = item.get("draft_id")
                     if draft_id:
                         submitted_draft_ids.add(str(draft_id))
-            except Exception:
-                LOG.debug(
-                    "Submitted documents table unavailable for draft filtering",
-                    exc_info=True,
-                )
+            except Exception as exc:
+                if _is_missing_column_error(
+                    exc, table="submitted_documents", column="shop_domain"
+                ):
+                    try:
+                        submitted_res = (
+                            client.table("submitted_documents")
+                            .select("draft_id")
+                            .limit(1000)
+                            .execute()
+                        )
+                        for item in submitted_res.data or []:
+                            draft_id = item.get("draft_id")
+                            if draft_id:
+                                submitted_draft_ids.add(str(draft_id))
+                    except Exception:
+                        LOG.debug(
+                            "Submitted documents table unavailable for draft filtering",
+                            exc_info=True,
+                        )
+                else:
+                    LOG.debug(
+                        "Submitted documents table unavailable for draft filtering",
+                        exc_info=True,
+                    )
 
         if db_drafts_loaded:
             drafts_map: dict[str, dict[str, Any]] = {
                 str(item.get("draft_id")): item
                 for item in db_drafts
                 if item.get("draft_id")
+                and _matches_shop_domain(item, normalized_shop_domain)
             }
+            for memory_draft in self.product_drafts.values():
+                if not isinstance(memory_draft, dict):
+                    continue
+                if not _matches_shop_domain(memory_draft, normalized_shop_domain):
+                    continue
+                draft_id = memory_draft.get("draft_id")
+                if not draft_id:
+                    continue
+                key = str(draft_id)
+                drafts_map[key] = {**drafts_map.get(key, {}), **memory_draft}
         else:
             drafts_map = {
                 str(item.get("draft_id") or key): item
                 for key, item in self.product_drafts.items()
+                if _matches_shop_domain(item, normalized_shop_domain)
             }
-            for item in self.submitted_documents.values():
-                draft_id = item.get("draft_id")
-                if draft_id:
-                    submitted_draft_ids.add(str(draft_id))
+
+        for item in self.submitted_documents.values():
+            if not _matches_shop_domain(item, normalized_shop_domain):
+                continue
+            draft_id = item.get("draft_id")
+            if draft_id:
+                submitted_draft_ids.add(str(draft_id))
 
         drafts = [
             item
@@ -263,43 +337,104 @@ class SupabaseDraftsMixin:
             drafts.sort(key=lambda item: item.get("created_at") or "", reverse=reverse)
         return drafts[offset : offset + limit]
 
-    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None:
+    def get_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None:
         memory_draft = self.product_drafts.get(draft_id)
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
+        if memory_draft and not _matches_shop_domain(memory_draft, normalized_shop_domain):
+            memory_draft = None
         client = self._get_supabase_client()
         if client:
             try:
-                res = (
-                    client.table("product_drafts")
-                    .select("*")
-                    .eq("draft_id", draft_id)
-                    .limit(1)
-                    .execute()
-                )
+                query = client.table("product_drafts").select("*").eq("draft_id", draft_id)
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                res = query.limit(1).execute()
                 rows = res.data or []
                 if rows:
+                    row = rows[0]
+                    if not _matches_shop_domain(row, normalized_shop_domain):
+                        return memory_draft
                     if memory_draft:
-                        return {**rows[0], **memory_draft}
-                    return rows[0]
-            except Exception:
-                LOG.exception("Failed fetching product draft %s", draft_id)
+                        return {**row, **memory_draft}
+                    return row
+            except Exception as exc:
+                if normalized_shop_domain and _is_missing_column_error(
+                    exc, table="product_drafts", column="shop_domain"
+                ):
+                    try:
+                        res = (
+                            client.table("product_drafts")
+                            .select("*")
+                            .eq("draft_id", draft_id)
+                            .limit(1)
+                            .execute()
+                        )
+                        rows = res.data or []
+                        if rows:
+                            row = rows[0]
+                            if not _matches_shop_domain(row, normalized_shop_domain):
+                                return memory_draft
+                            if memory_draft:
+                                return {**row, **memory_draft}
+                            return row
+                    except Exception:
+                        LOG.exception("Failed fetching product draft %s", draft_id)
+                else:
+                    LOG.exception("Failed fetching product draft %s", draft_id)
 
         return memory_draft
 
-    def delete_product_draft(self, draft_id: str) -> bool:
+    def delete_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> bool:
         deleted = False
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
+        if normalized_shop_domain and not self.get_product_draft(
+            draft_id,
+            shop_domain=normalized_shop_domain,
+        ):
+            return False
         client = self._get_supabase_client()
         if client:
             try:
-                res = (
-                    client.table("product_drafts")
-                    .delete()
-                    .eq("draft_id", draft_id)
-                    .execute()
-                )
-                deleted = bool(res.data)
-            except Exception:
-                LOG.exception("Failed deleting product draft %s", draft_id)
-        if draft_id in self.product_drafts:
+                query = client.table("product_drafts").delete().eq("draft_id", draft_id)
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                res = query.execute()
+                deleted_rows = [
+                    row
+                    for row in (res.data or [])
+                    if isinstance(row, dict)
+                    and _matches_shop_domain(row, normalized_shop_domain)
+                ]
+                deleted = bool(deleted_rows)
+            except Exception as exc:
+                if normalized_shop_domain and _is_missing_column_error(
+                    exc, table="product_drafts", column="shop_domain"
+                ):
+                    try:
+                        res = (
+                            client.table("product_drafts")
+                            .delete()
+                            .eq("draft_id", draft_id)
+                            .execute()
+                        )
+                        deleted_rows = [
+                            row
+                            for row in (res.data or [])
+                            if isinstance(row, dict)
+                            and _matches_shop_domain(row, normalized_shop_domain)
+                        ]
+                        deleted = bool(deleted_rows)
+                    except Exception:
+                        LOG.exception("Failed deleting product draft %s", draft_id)
+                else:
+                    LOG.exception("Failed deleting product draft %s", draft_id)
+        if draft_id in self.product_drafts and (
+            _matches_shop_domain(self.product_drafts[draft_id], normalized_shop_domain)
+        ):
             del self.product_drafts[draft_id]
             deleted = True
         return deleted
@@ -312,16 +447,19 @@ class SupabaseDraftsMixin:
         draft_id: str | None,
         name: str,
         import_mode: str,
+        shop_domain: str | None = None,
         product_count: int,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         now = self._utc_now()
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
         payload = {
             "submitted_id": submitted_id,
             "run_id": run_id,
             "draft_id": draft_id,
             "name": name,
             "import_mode": import_mode,
+            "shop_domain": normalized_shop_domain,
             "product_count": product_count,
             "products": products,
             "submitted_at": now,
@@ -340,6 +478,7 @@ class SupabaseDraftsMixin:
                 try:
                     compat_payload = dict(payload)
                     compat_payload.pop("draft_id", None)
+                    compat_payload.pop("shop_domain", None)
                     client.table("submitted_documents").upsert(
                         compat_payload, on_conflict="submitted_id"
                     ).execute()
@@ -358,27 +497,62 @@ class SupabaseDraftsMixin:
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         db_docs: list[dict[str, Any]] = []
         db_docs_loaded = False
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
         client = self._get_supabase_client()
         if client:
             try:
-                res = (
-                    client.table("submitted_documents")
-                    .select("*")
-                    .limit(1000)
-                    .execute()
-                )
+                query = client.table("submitted_documents").select("*")
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                res = query.limit(1000).execute()
                 db_docs = res.data or []
                 db_docs_loaded = True
-            except Exception:
-                LOG.exception("Failed listing submitted documents")
+            except Exception as exc:
+                if normalized_shop_domain and _is_missing_column_error(
+                    exc, table="submitted_documents", column="shop_domain"
+                ):
+                    try:
+                        res = (
+                            client.table("submitted_documents")
+                            .select("*")
+                            .limit(1000)
+                            .execute()
+                        )
+                        db_docs = res.data or []
+                        db_docs_loaded = True
+                    except Exception:
+                        LOG.exception("Failed listing submitted documents")
+                else:
+                    LOG.exception("Failed listing submitted documents")
 
         if db_docs_loaded:
-            docs = [item for item in db_docs if item.get("submitted_id")]
+            docs_map = {
+                str(item.get("submitted_id")): item
+                for item in db_docs
+                if item.get("submitted_id")
+                and _matches_shop_domain(item, normalized_shop_domain)
+            }
+            for memory_doc in self.submitted_documents.values():
+                if not isinstance(memory_doc, dict):
+                    continue
+                if not _matches_shop_domain(memory_doc, normalized_shop_domain):
+                    continue
+                submitted_id = memory_doc.get("submitted_id")
+                if not submitted_id:
+                    continue
+                key = str(submitted_id)
+                docs_map[key] = {**docs_map.get(key, {}), **memory_doc}
+            docs = list(docs_map.values())
         else:
-            docs = list(self.submitted_documents.values())
+            docs = [
+                item
+                for item in self.submitted_documents.values()
+                if _matches_shop_domain(item, normalized_shop_domain)
+            ]
         for doc in docs:
             preview_file_id = doc.get("preview_file_id")
             resolved_preview = (
@@ -389,7 +563,10 @@ class SupabaseDraftsMixin:
             if not resolved_preview:
                 draft_id = doc.get("draft_id")
                 if isinstance(draft_id, str) and draft_id:
-                    linked_draft = self.get_product_draft(draft_id)
+                    linked_draft = self.get_product_draft(
+                        draft_id,
+                        shop_domain=normalized_shop_domain,
+                    )
                     if isinstance(linked_draft, dict):
                         for key in ("output_file_id", "input_file_id"):
                             candidate = linked_draft.get(key)
@@ -418,39 +595,112 @@ class SupabaseDraftsMixin:
             )
         return docs[offset : offset + limit]
 
-    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None:
+    def get_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None:
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
         client = self._get_supabase_client()
         if client:
             try:
-                res = (
+                query = (
                     client.table("submitted_documents")
                     .select("*")
                     .eq("submitted_id", submitted_id)
-                    .limit(1)
-                    .execute()
                 )
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                res = query.limit(1).execute()
                 rows = res.data or []
                 if rows:
-                    return rows[0]
-            except Exception:
-                LOG.exception("Failed fetching submitted document %s", submitted_id)
-        return self.submitted_documents.get(submitted_id)
+                    row = rows[0]
+                    if _matches_shop_domain(row, normalized_shop_domain):
+                        return row
+            except Exception as exc:
+                if normalized_shop_domain and _is_missing_column_error(
+                    exc, table="submitted_documents", column="shop_domain"
+                ):
+                    try:
+                        res = (
+                            client.table("submitted_documents")
+                            .select("*")
+                            .eq("submitted_id", submitted_id)
+                            .limit(1)
+                            .execute()
+                        )
+                        rows = res.data or []
+                        if rows:
+                            row = rows[0]
+                            if _matches_shop_domain(row, normalized_shop_domain):
+                                return row
+                    except Exception:
+                        LOG.exception(
+                            "Failed fetching submitted document %s", submitted_id
+                        )
+                else:
+                    LOG.exception("Failed fetching submitted document %s", submitted_id)
+        document = self.submitted_documents.get(submitted_id)
+        if document and not _matches_shop_domain(document, normalized_shop_domain):
+            return None
+        return document
 
-    def delete_submitted_document(self, submitted_id: str) -> bool:
+    def delete_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> bool:
         deleted = False
+        normalized_shop_domain = _normalize_shop_domain(shop_domain)
+        if normalized_shop_domain and not self.get_submitted_document(
+            submitted_id,
+            shop_domain=normalized_shop_domain,
+        ):
+            return False
         client = self._get_supabase_client()
         if client:
             try:
-                res = (
+                query = (
                     client.table("submitted_documents")
                     .delete()
                     .eq("submitted_id", submitted_id)
-                    .execute()
                 )
-                deleted = bool(res.data)
-            except Exception:
-                LOG.exception("Failed deleting submitted document %s", submitted_id)
-        if submitted_id in self.submitted_documents:
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                res = query.execute()
+                deleted_rows = [
+                    row
+                    for row in (res.data or [])
+                    if isinstance(row, dict)
+                    and _matches_shop_domain(row, normalized_shop_domain)
+                ]
+                deleted = bool(deleted_rows)
+            except Exception as exc:
+                if normalized_shop_domain and _is_missing_column_error(
+                    exc, table="submitted_documents", column="shop_domain"
+                ):
+                    try:
+                        res = (
+                            client.table("submitted_documents")
+                            .delete()
+                            .eq("submitted_id", submitted_id)
+                            .execute()
+                        )
+                        deleted_rows = [
+                            row
+                            for row in (res.data or [])
+                            if isinstance(row, dict)
+                            and _matches_shop_domain(row, normalized_shop_domain)
+                        ]
+                        deleted = bool(deleted_rows)
+                    except Exception:
+                        LOG.exception(
+                            "Failed deleting submitted document %s", submitted_id
+                        )
+                else:
+                    LOG.exception("Failed deleting submitted document %s", submitted_id)
+        if submitted_id in self.submitted_documents and (
+            _matches_shop_domain(
+                self.submitted_documents[submitted_id],
+                normalized_shop_domain,
+            )
+        ):
             del self.submitted_documents[submitted_id]
             deleted = True
         return deleted

@@ -13,8 +13,13 @@ def _optional_str(data: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def execute(supabase: SupabaseNamespacedPort, draft_id: str) -> dict[str, str]:
-    draft = supabase.drafts.get_product_draft(draft_id)
+def execute(
+    supabase: SupabaseNamespacedPort,
+    draft_id: str,
+    *,
+    shop_domain: str | None = None,
+) -> dict[str, str]:
+    draft = supabase.drafts.get_product_draft(draft_id, shop_domain=shop_domain)
     if not draft:
         raise LookupError("Draft not found")
     products_raw = draft.get("products")
@@ -60,6 +65,7 @@ def execute(supabase: SupabaseNamespacedPort, draft_id: str) -> dict[str, str]:
         run_id=_optional_str(draft, "run_id"),
         import_mode=_optional_str(draft, "import_mode") or "auto",
         draft_name=_optional_str(draft, "draft_name"),
+        shop_domain=shop_domain,
         input_file_id=_optional_str(draft, "input_file_id"),
         input_filename=_optional_str(draft, "input_filename"),
         output_file_id=file_id,

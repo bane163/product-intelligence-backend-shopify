@@ -72,6 +72,7 @@ def _save_draft_state(
     *,
     ctx: AppContext,
     draft_id: str,
+    shop_domain: str | None = None,
     fallback_run_id: str | None,
     fallback_import_mode: str = "auto",
     fallback_name: str | None = None,
@@ -87,13 +88,21 @@ def _save_draft_state(
     submit_run_id: str | None = None,
     submit_error: str | None = None,
 ) -> None:
-    existing = get_draft_execute(supabase=ctx.supabase, draft_id=draft_id) or {}
+    existing = (
+        get_draft_execute(
+            supabase=ctx.supabase,
+            draft_id=draft_id,
+            shop_domain=shop_domain,
+        )
+        or {}
+    )
     save_draft_execute(
         supabase=ctx.supabase,
         draft_id=draft_id,
         run_id=_optional_str_field(existing, "run_id") or fallback_run_id,
         import_mode=_optional_str_field(existing, "import_mode") or fallback_import_mode,
         draft_name=_optional_str_field(existing, "draft_name") or fallback_name,
+        shop_domain=_optional_str_field(existing, "shop_domain") or shop_domain,
         input_file_id=_optional_str_field(existing, "input_file_id") or fallback_input_file_id,
         input_filename=_optional_str_field(existing, "input_filename")
         or fallback_input_filename,
@@ -188,6 +197,7 @@ class OffloadWorker:
             _save_draft_state(
                 ctx=self.ctx,
                 draft_id=draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=run_id,
                 fallback_name=input_name,
                 fallback_input_file_id=file_id,
@@ -238,6 +248,7 @@ class OffloadWorker:
             _save_draft_state(
                 ctx=self.ctx,
                 draft_id=draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=run_id,
                 fallback_name=input_name,
                 fallback_input_file_id=file_id,
@@ -274,6 +285,7 @@ class OffloadWorker:
             _save_draft_state(
                 ctx=self.ctx,
                 draft_id=draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=run_id,
                 fallback_name=document_name,
                 submit_status="running",
@@ -311,6 +323,7 @@ class OffloadWorker:
             _save_draft_state(
                 ctx=self.ctx,
                 draft_id=draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=run_id,
                 fallback_name=document_name,
                 submit_status="succeeded" if submit_succeeded else "failed",
@@ -341,6 +354,7 @@ class OffloadWorker:
             _save_draft_state(
                 ctx=self.ctx,
                 draft_id=draft_id,
+                shop_domain=_optional_str(job.get("shop_domain")),
                 fallback_run_id=run_id,
                 extraction_status="failed",
                 extraction_run_id=run_id,
@@ -351,6 +365,7 @@ class OffloadWorker:
             _save_draft_state(
                 ctx=self.ctx,
                 draft_id=draft_id,
+                shop_domain=_optional_str(job.get("shop_domain")),
                 fallback_run_id=run_id,
                 submit_status="failed",
                 submit_run_id=run_id,

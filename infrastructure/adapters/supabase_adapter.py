@@ -158,6 +158,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         run_id: str | None,
         import_mode: str,
         draft_name: str | None,
+        shop_domain: str | None = None,
         input_file_id: str | None = None,
         input_filename: str | None = None,
         output_file_id: str | None = None,
@@ -176,6 +177,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             run_id=run_id,
             import_mode=import_mode,
             draft_name=draft_name,
+            shop_domain=shop_domain,
             input_file_id=input_file_id,
             input_filename=input_filename,
             output_file_id=output_file_id,
@@ -197,14 +199,26 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._service.list_product_drafts(limit, offset, search, sort_by, sort_dir)
+        return self._service.list_product_drafts(
+            limit,
+            offset,
+            search,
+            sort_by,
+            sort_dir,
+            shop_domain,
+        )
 
-    def get_product_draft(self, draft_id: str) -> dict[str, Any] | None:
-        return self._service.get_product_draft(draft_id)
+    def get_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None:
+        return self._service.get_product_draft(draft_id, shop_domain=shop_domain)
 
-    def delete_product_draft(self, draft_id: str) -> bool:
-        return self._service.delete_product_draft(draft_id)
+    def delete_product_draft(
+        self, draft_id: str, *, shop_domain: str | None = None
+    ) -> bool:
+        return self._service.delete_product_draft(draft_id, shop_domain=shop_domain)
 
     def save_submitted_document(
         self,
@@ -214,6 +228,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         draft_id: str | None,
         name: str,
         import_mode: str,
+        shop_domain: str | None = None,
         product_count: int,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -223,6 +238,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             draft_id=draft_id,
             name=name,
             import_mode=import_mode,
+            shop_domain=shop_domain,
             product_count=product_count,
             products=products,
         )
@@ -234,16 +250,32 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         search: str | None = None,
         sort_by: str = "date",
         sort_dir: str = "desc",
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         return self._service.list_submitted_documents(
-            limit, offset, search, sort_by, sort_dir
+            limit,
+            offset,
+            search,
+            sort_by,
+            sort_dir,
+            shop_domain,
         )
 
-    def get_submitted_document(self, submitted_id: str) -> dict[str, Any] | None:
-        return self._service.get_submitted_document(submitted_id)
+    def get_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None:
+        return self._service.get_submitted_document(
+            submitted_id,
+            shop_domain=shop_domain,
+        )
 
-    def delete_submitted_document(self, submitted_id: str) -> bool:
-        return self._service.delete_submitted_document(submitted_id)
+    def delete_submitted_document(
+        self, submitted_id: str, *, shop_domain: str | None = None
+    ) -> bool:
+        return self._service.delete_submitted_document(
+            submitted_id,
+            shop_domain=shop_domain,
+        )
 
     def save_product_intelligence_audit(
         self,

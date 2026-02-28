@@ -76,7 +76,7 @@ def _resolved_draft_name(
 
 
 def _find_active_import_draft_for_file(
-    *, ctx: AppContext, file_id: str
+    *, ctx: AppContext, file_id: str, shop_domain: str | None = None
 ) -> dict[str, Any] | None:
     from application.use_cases.drafts.list_product_drafts import execute as list_drafts_execute
 
@@ -88,7 +88,12 @@ def _find_active_import_draft_for_file(
             return False
         return bool(_optional_str(draft, "draft_id"))
 
-    drafts = list_drafts_execute(supabase=ctx.supabase, limit=1000, offset=0)
+    drafts = list_drafts_execute(
+        supabase=ctx.supabase,
+        limit=1000,
+        offset=0,
+        shop_domain=shop_domain,
+    )
     for draft in drafts:
         if isinstance(draft, dict) and _is_matching_active_draft(draft):
             return draft
@@ -106,6 +111,7 @@ def _save_draft_state(
     *,
     ctx: AppContext,
     draft_id: str,
+    shop_domain: str | None = None,
     fallback_run_id: str | None,
     fallback_import_mode: str = "auto",
     fallback_name: str | None = None,
@@ -124,7 +130,14 @@ def _save_draft_state(
     from application.use_cases.drafts.get_product_draft import execute as get_draft_execute
     from application.use_cases.drafts.save_product_draft import execute as save_draft_execute
 
-    existing = get_draft_execute(supabase=ctx.supabase, draft_id=draft_id) or {}
+    existing = (
+        get_draft_execute(
+            supabase=ctx.supabase,
+            draft_id=draft_id,
+            shop_domain=shop_domain,
+        )
+        or {}
+    )
     existing_run_id = _optional_str(existing, "run_id")
     existing_import_mode = _optional_str(existing, "import_mode")
     existing_draft_name = _optional_str(existing, "draft_name")
@@ -138,6 +151,7 @@ def _save_draft_state(
     existing_submit_status = _optional_str(existing, "submit_status")
     existing_submit_run_id = _optional_str(existing, "submit_run_id")
     existing_submit_error = _optional_str(existing, "submit_error")
+    existing_shop_domain = _optional_str(existing, "shop_domain")
     resolved_draft_name = _resolved_draft_name(
         draft_id=draft_id,
         existing_draft_name=existing_draft_name,
@@ -152,6 +166,7 @@ def _save_draft_state(
         run_id=existing_run_id or fallback_run_id,
         import_mode=existing_import_mode or fallback_import_mode,
         draft_name=resolved_draft_name,
+        shop_domain=existing_shop_domain or shop_domain,
         input_file_id=existing_input_file_id or fallback_input_file_id,
         input_filename=existing_input_filename or fallback_input_filename,
         output_file_id=output_file_id if output_file_id is not None else existing_output_file_id,
@@ -201,6 +216,7 @@ async def _run_import_in_background(
     _save_draft_state(
         ctx=ctx,
         draft_id=draft_id,
+        shop_domain=shop_domain,
         fallback_run_id=run_id,
         fallback_name=input_name,
         fallback_input_file_id=file_id,
@@ -243,6 +259,7 @@ async def _run_import_in_background(
         _save_draft_state(
             ctx=ctx,
             draft_id=draft_id,
+            shop_domain=shop_domain,
             fallback_run_id=run_id,
             fallback_name=input_name,
             fallback_input_file_id=file_id,
@@ -258,6 +275,7 @@ async def _run_import_in_background(
         _save_draft_state(
             ctx=ctx,
             draft_id=draft_id,
+            shop_domain=shop_domain,
             fallback_run_id=run_id,
             fallback_name=input_name,
             fallback_input_file_id=file_id,
@@ -463,7 +481,11 @@ async def process_excel(
                 status_code=400,
                 detail="Offloaded imports require file_id from /agents/upload",
             )
-        active_draft = _find_active_import_draft_for_file(ctx=ctx, file_id=file_id)
+        active_draft = _find_active_import_draft_for_file(
+            ctx=ctx,
+            file_id=file_id,
+            shop_domain=shop_domain,
+        )
         active_draft_id = _optional_str(active_draft, "draft_id")
         if active_draft and active_draft_id:
             active_run_id = _first_non_empty_str(
@@ -481,6 +503,7 @@ async def process_excel(
                 _save_draft_state(
                     ctx=ctx,
                     draft_id=active_draft_id,
+                    shop_domain=shop_domain,
                     fallback_run_id=active_run_id,
                     fallback_import_mode=(
                         _first_non_empty_str(_optional_str(active_draft, "import_mode"))
@@ -505,6 +528,7 @@ async def process_excel(
             _save_draft_state(
                 ctx=ctx,
                 draft_id=draft_id,
+                shop_domain=shop_domain,
                 fallback_run_id=effective_run_id,
                 fallback_import_mode="auto",
                 fallback_name=input_name,

@@ -5,8 +5,16 @@ from ai.models import ProductsList
 from application.ports.supabase_port import SupabaseNamespacedPort
 
 
-def execute(supabase: SupabaseNamespacedPort, submitted_id: str) -> dict[str, str]:
-    document = supabase.submitted.get_submitted_document(submitted_id)
+def execute(
+    supabase: SupabaseNamespacedPort,
+    submitted_id: str,
+    *,
+    shop_domain: str | None = None,
+) -> dict[str, str]:
+    document = supabase.submitted.get_submitted_document(
+        submitted_id,
+        shop_domain=shop_domain,
+    )
     if not document:
         raise LookupError("Submitted document not found")
     products = document.get("products")

@@ -79,6 +79,20 @@ Worker environment variables (set in `.env` as needed; compose defaults are used
 - `OFFLOAD_LEASE_SECONDS` (default: `300`)
 - `OFFLOAD_POLL_SECONDS` (default: `2.0`)
 
+### Realtime Workflow Updates (Supabase)
+
+For frontend progress updates, use Supabase Realtime subscriptions on:
+- `product_drafts` (draft extraction/submit lifecycle)
+- `llm_runs` (run status)
+- `llm_run_events` (phase-by-phase workflow events)
+
+Recommended client flow:
+1. Fetch `/agents/runs/{run_id}/snapshot` (with `x-shop-domain`; optional `draft_id`, `after_seq`, `event_limit`) for initial state.
+2. Start realtime subscriptions scoped to `shop_domain` + relevant `run_id`/`draft_id`.
+3. On reconnect, call snapshot again with `after_seq` (last seen event sequence) to backfill any missed events.
+
+Mutations still go through backend APIs (`/agents/import`, `/agents/submit-products`); realtime is read-only push.
+
 ### How to Stop
 
 To shut down all services (Docker containers and Ollama), run:

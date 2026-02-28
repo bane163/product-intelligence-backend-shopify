@@ -1,5 +1,6 @@
 import os
 from io import BytesIO
+from typing import Any
 from openpyxl import Workbook
 from openpyxl.styles import Protection
 import csv
@@ -318,24 +319,82 @@ def _product_to_rows(product: ProductInput) -> list[list[str]]:
     return rows
 
 
-def _append_ai_enhancements_sheet(workbook: Workbook, products: list[ProductInput]) -> None:
+_PATCH_FIELD_LABELS = {
+    "title": "title",
+    "body_html": "body_html",
+    "vendor": "vendor",
+    "product_type": "product_type",
+    "product_category": "product_category",
+    "seo_title": "seo_title",
+    "seo_description": "seo_description",
+    "tags": "tags",
+}
+
+
+def _append_ai_enhancements_sheet(
+    workbook: Workbook,
+    products: list[ProductInput],
+    applied_suggestions: list[dict[str, Any]] | None = None,
+) -> None:
     worksheet = workbook.create_sheet("AI Enhancements")
     worksheet.append(["Handle", "Title", "Attribute", "Value", "Type"])
     wrote_rows = False
-    for product in products:
-        handle = (product.handle or "").strip() or _slugify_handle(product.title)
-        title = product.title
-        for metafield in product.metafields or []:
-            worksheet.append(
-                [
-                    handle,
-                    title,
-                    f"metafield:{metafield.namespace}.{metafield.key}",
-                    metafield.value,
-                    metafield.type or "single_line_text_field",
-                ]
-            )
-            wrote_rows = True
+
+    if applied_suggestions:
+        product_map: dict[int, ProductInput] = {}
+        for idx, p in enumerate(products):
+            product_map[idx] = p
+
+        for suggestion in applied_suggestions:
+            if not isinstance(suggestion, dict):
+                continue
+            patch = suggestion.get("patch_payload")
+            if not isinstance(patch, dict):
+                continue
+            try:
+                pidx = int(suggestion.get("product_index", -1))
+            except (TypeError, ValueError):
+                continue
+            product = product_map.get(pidx)
+            if product is None:
+                continue
+            handle = (product.handle or "").strip() or _slugify_handle(product.title)
+            title = product.title
+
+            for field_key, label in _PATCH_FIELD_LABELS.items():
+                value = patch.get(field_key)
+                if value is None:
+                    continue
+                if isinstance(value, list):
+                    value = ", ".join(str(v) for v in value)
+                worksheet.append([handle, title, label, str(value), "enrichment"])
+                wrote_rows = True
+
+            for mf in patch.get("metafields") or []:
+                if not isinstance(mf, dict):
+                    continue
+                ns = mf.get("namespace", "")
+                key = mf.get("key", "")
+                val = mf.get("value", "")
+                mf_type = mf.get("type") or "single_line_text_field"
+                worksheet.append([handle, title, f"metafield:{ns}.{key}", str(val), mf_type])
+                wrote_rows = True
+    else:
+        for product in products:
+            handle = (product.handle or "").strip() or _slugify_handle(product.title)
+            title = product.title
+            for metafield in product.metafields or []:
+                worksheet.append(
+                    [
+                        handle,
+                        title,
+                        f"metafield:{metafield.namespace}.{metafield.key}",
+                        metafield.value,
+                        metafield.type or "single_line_text_field",
+                    ]
+                )
+                wrote_rows = True
+
     if not wrote_rows:
         worksheet.append(["", "", "No AI-only attributes captured", "", ""])
     _protect_header_row(worksheet)
@@ -384,7 +443,10 @@ def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
     return xlsx_path
 
 
-def create_excel_bytes(products_list: ProductsList) -> bytes:
+def create_excel_bytes(
+    products_list: ProductsList,
+    applied_suggestions: list[dict[str, Any]] | None = None,
+) -> bytes:
     """Return XLSX bytes for the given ProductsList without writing to disk."""
     wb = Workbook()
     ws = wb.active
@@ -394,7 +456,7 @@ def create_excel_bytes(products_list: ProductsList) -> bytes:
         for row in _product_to_rows(product):
             ws.append(row)
     _protect_header_row(ws)
-    _append_ai_enhancements_sheet(wb, products_list.products)
+    _append_ai_enhancements_sheet(wb, products_list.products, applied_suggestions)
 
     output = BytesIO()
     wb.save(output)

@@ -172,6 +172,7 @@ async def execute(
             enrichment_suggestions_count = 0
             enrichment_duration_ms: int | None = None
             enrichment_warning: str | None = None
+            applied_suggestions: list[dict] = []
             raw_products = result.get("products")
             products = (
                 [item for item in raw_products if isinstance(item, dict)]
@@ -208,6 +209,7 @@ async def execute(
                             trace_event=trace_event,
                         )
                         enrichment_suggestions_count = len(suggestions)
+                        applied_suggestions = suggestions
                         enriched_products, variant_operations_by_index = (
                             apply_suggestions_to_products(
                                 products=products,
@@ -264,7 +266,10 @@ async def execute(
                         parsed_products = ProductsList.model_validate(
                             {"products": enriched_products}
                         )
-                        refreshed_output_bytes = create_excel_bytes(parsed_products)
+                        refreshed_output_bytes = create_excel_bytes(
+                            parsed_products,
+                            applied_suggestions=applied_suggestions or None,
+                        )
                         refreshed_file_id = str(uuid.uuid4())
                         existing_filename = result.get("filename")
                         if isinstance(existing_filename, str) and existing_filename.strip():

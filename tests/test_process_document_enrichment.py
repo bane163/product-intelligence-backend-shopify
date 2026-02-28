@@ -308,3 +308,96 @@ async def test_process_document_enrichment_failure_is_non_fatal(monkeypatch):
     assert "vendor" not in result["result"]["products"][0]
     assert result["result"]["enrichment_applied"] is False
     assert "Synthetic enrichment failure" in result["result"]["enrichment_warning"]
+
+
+@pytest.mark.asyncio
+async def test_process_document_workbook_ai_enhancements_shows_all_enriched_fields(monkeypatch):
+    """The AI Enhancements sheet must list ALL fields changed by enrichment,
+    not just metafields.  Non-metafield patches (vendor, seo_title, tags, etc.)
+    should appear alongside metafield patches."""
+
+    async def fake_generate_suggestions_execute(
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
+    ):
+        _ = supabase, products, shop_domain, normalization_settings, trace_event
+        return [
+            {
+                "product_index": 0,
+                "patch_payload": {
+                    "vendor": "Enriched Vendor",
+                    "seo_title": "Better SEO Title",
+                    "tags": "tag-a, tag-b",
+                    "metafields": [
+                        {
+                            "namespace": "extractor",
+                            "key": "color_hint",
+                            "value": "blue",
+                            "type": "single_line_text_field",
+                        }
+                    ],
+                },
+            }
+        ]
+
+    monkeypatch.setattr(
+        process_document_uc,
+        "generate_suggestions_execute",
+        fake_generate_suggestions_execute,
+        raising=False,
+    )
+
+    supabase = _FakeSupabase(
+        model_config={
+            "base_url": "http://localhost:11434/v1/",
+            "model_id": "deepseek-r1:8b",
+            "api_key": "secret",
+            "provider": "ollama",
+        }
+    )
+    llm = _FakeLLM(
+        payload={
+            "file_id": "pre-enrichment-file",
+            "filename": "catalog-products.xlsx",
+            "products": [{"title": "Demo Product"}],
+        }
+    )
+    tracing = _FakeTracing()
+
+    result = await process_document_uc.execute(
+        supabase=supabase,
+        llm=llm,
+        tracing=tracing,
+        ctx=SimpleNamespace(),
+        file_bytes=b"sheet-bytes",
+        input_name="catalog.xlsx",
+        input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        run_id="run-ai-enhancements-sheet",
+        shop_domain="store.myshopify.com",
+        write_to_file=True,
+    )
+
+    saved = supabase.file.saved_files[0]
+    workbook = load_workbook(BytesIO(saved["content"]))
+    ai_sheet = workbook["AI Enhancements"]
+
+    # Collect all data rows (skip header)
+    rows = []
+    for row in ai_sheet.iter_rows(min_row=2, values_only=True):
+        attr = row[2]  # Attribute column
+        if attr and attr != "No AI-only attributes captured":
+            rows.append({"attribute": attr, "value": row[3], "type": row[4]})
+
+    attributes = [r["attribute"] for r in rows]
+    # Non-metafield enrichments must appear
+    assert "vendor" in attributes, f"vendor missing from AI Enhancements: {attributes}"
+    assert "seo_title" in attributes, f"seo_title missing from AI Enhancements: {attributes}"
+    assert "tags" in attributes, f"tags missing from AI Enhancements: {attributes}"
+    # Metafield enrichments must still appear
+    assert "metafield:extractor.color_hint" in attributes, (
+        f"metafield missing from AI Enhancements: {attributes}"
+    )

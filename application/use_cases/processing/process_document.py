@@ -246,6 +246,50 @@ async def execute(
                 result["enrichment_duration_ms"] = enrichment_duration_ms
             if enrichment_warning:
                 result["enrichment_warning"] = enrichment_warning
+            if (
+                write_to_file
+                and enrichment_applied
+                and isinstance(result.get("products"), list)
+            ):
+                try:
+                    from ai.excel_writer import create_excel_bytes
+                    from ai.models import ProductsList
+
+                    enriched_products = [
+                        item
+                        for item in result["products"]
+                        if isinstance(item, dict)
+                    ]
+                    if enriched_products:
+                        parsed_products = ProductsList.model_validate(
+                            {"products": enriched_products}
+                        )
+                        refreshed_output_bytes = create_excel_bytes(parsed_products)
+                        refreshed_file_id = str(uuid.uuid4())
+                        existing_filename = result.get("filename")
+                        if isinstance(existing_filename, str) and existing_filename.strip():
+                            base_name = os.path.splitext(os.path.basename(existing_filename))[0]
+                            refreshed_filename = f"{base_name or 'import-products'}.xlsx"
+                        elif input_name:
+                            base_name = os.path.splitext(os.path.basename(input_name))[0]
+                            refreshed_filename = f"{base_name or 'import-products'}-products.xlsx"
+                        else:
+                            refreshed_filename = "import-products.xlsx"
+                        supabase.file.save_file(
+                            refreshed_file_id,
+                            name=refreshed_filename,
+                            content=refreshed_output_bytes,
+                            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            file_origin="workflow_output",
+                        )
+                        result["file_id"] = refreshed_file_id
+                        result["filename"] = refreshed_filename
+                except Exception as exc:
+                    emit_and_persist(
+                        phase="import_output_refresh_skipped",
+                        message=f"Import output refresh skipped: {exc}",
+                        level="warning",
+                    )
         emit_and_persist(phase="workflow_done", message="Document workflow completed")
     except Exception as exc:
         emit_and_persist(

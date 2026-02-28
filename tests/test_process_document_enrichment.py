@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from openpyxl import load_workbook
 
 import application.use_cases.processing.process_document as process_document_uc
 
@@ -66,6 +68,31 @@ class _FakeSupabase:
     def __init__(self, model_config: dict | None = None) -> None:
         self.runs = _FakeRuns()
         self.llm_configs = _FakeLLMConfigs(model_config)
+        self.file = _FakeFileStorage()
+
+
+class _FakeFileStorage:
+    def __init__(self) -> None:
+        self.saved_files: list[dict] = []
+
+    def save_file(
+        self,
+        file_id: str,
+        name: str,
+        content: bytes,
+        *,
+        content_type: str,
+        file_origin: str,
+    ) -> None:
+        self.saved_files.append(
+            {
+                "file_id": file_id,
+                "name": name,
+                "content": content,
+                "content_type": content_type,
+                "file_origin": file_origin,
+            }
+        )
 
 
 class _FakeTracing:
@@ -161,6 +188,77 @@ async def test_process_document_enriches_products_during_import(monkeypatch):
     assert result["result"]["products"][0]["vendor"] == "Enriched Vendor"
     assert result["result"]["enrichment_applied"] is True
     assert result["result"]["enrichment_suggestions_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_document_refreshes_workbook_output_after_enrichment(monkeypatch):
+    async def fake_generate_suggestions_execute(
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
+    ):
+        _ = supabase, products, shop_domain, normalization_settings, trace_event
+        return [
+            {
+                "product_index": 0,
+                "patch_payload": {"vendor": "Enriched Vendor"},
+            }
+        ]
+
+    monkeypatch.setattr(
+        process_document_uc,
+        "generate_suggestions_execute",
+        fake_generate_suggestions_execute,
+        raising=False,
+    )
+
+    supabase = _FakeSupabase(
+        model_config={
+            "base_url": "http://localhost:11434/v1/",
+            "model_id": "deepseek-r1:8b",
+            "api_key": "secret",
+            "provider": "ollama",
+        }
+    )
+    llm = _FakeLLM(
+        payload={
+            "file_id": "pre-enrichment-file",
+            "filename": "catalog-products.xlsx",
+            "products": [{"title": "Demo Product"}],
+        }
+    )
+    tracing = _FakeTracing()
+
+    result = await process_document_uc.execute(
+        supabase=supabase,
+        llm=llm,
+        tracing=tracing,
+        ctx=SimpleNamespace(),
+        file_bytes=b"sheet-bytes",
+        input_name="catalog.xlsx",
+        input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        run_id="run-import-refresh-output",
+        shop_domain="store.myshopify.com",
+        write_to_file=True,
+    )
+
+    payload = result["result"]
+    assert payload["products"][0]["vendor"] == "Enriched Vendor"
+    assert payload["file_id"] != "pre-enrichment-file"
+    assert len(supabase.file.saved_files) == 1
+    saved = supabase.file.saved_files[0]
+    assert saved["file_id"] == payload["file_id"]
+    assert saved["name"] == payload["filename"]
+    finalized_extra = supabase.runs.finalized[-1][1]["extra_fields"]
+    assert finalized_extra["output_file_id"] == payload["file_id"]
+    assert finalized_extra["output_filename"] == payload["filename"]
+    workbook = load_workbook(BytesIO(saved["content"]))
+    worksheet = workbook["Products"]
+    headers = {str(cell.value): index + 1 for index, cell in enumerate(worksheet[1])}
+    assert worksheet.cell(row=2, column=headers["Vendor"]).value == "Enriched Vendor"
 
 
 @pytest.mark.asyncio

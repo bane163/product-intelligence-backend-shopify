@@ -85,7 +85,7 @@ async def test_generate_suggestions_from_llm_payload(monkeypatch):
     assert suggestions[0]["category"] == "seo_readiness"
     assert suggestions[0]["patch_payload"] == {"seo_title": "Better Catalog Product"}
     assert suggestions[0]["shop_domain"] == "store.myshopify.com"
-    assert captured["products"] == products
+    assert captured["products"] == [{"_product_index": 0, **p} for p in products]
     assert captured["model_env"]["OLLAMA_MODEL_ID"] == "deepseek-r1:8b"
 
 
@@ -217,3 +217,93 @@ async def test_product_intelligence_suggestions_trace_payload_uses_image_uris(mo
     assert response.value == {"suggestions": []}
     request_trace = next(item for item in traces if item.get("phase") == "llm_request")
     assert request_trace["payload_preview"]["image_uris_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_receives_products_with_explicit_index_annotations(monkeypatch):
+    """Products sent to the LLM must include _product_index so the model
+    can reliably map suggestions back to the correct product."""
+    captured = {}
+
+    async def fake_run(*, products, model_env, trace_event=None):
+        captured["products"] = products
+        return SimpleNamespace(value={"suggestions": []}, text="")
+
+    monkeypatch.setattr(
+        "application.use_cases.intelligence_generate_suggestions.run_product_intelligence_suggestions",
+        fake_run,
+    )
+    supabase = _FakeSupabase(
+        {"base_url": "http://localhost:11434/v1/", "model_id": "deepseek-r1:8b", "api_key": "s"}
+    )
+    products = [
+        {"title": "Product A"},
+        {"title": "Product B"},
+        {"title": "Product C"},
+    ]
+    await execute(supabase=supabase, products=products, shop_domain="store.myshopify.com")
+
+    sent = captured["products"]
+    assert len(sent) == 3
+    for idx, item in enumerate(sent):
+        assert item["_product_index"] == idx, (
+            f"Product at position {idx} should have _product_index={idx}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_multi_product_llm_suggestions_preserve_distinct_indices(monkeypatch):
+    """LLM suggestions targeting different products must keep their distinct
+    product_index values through the persistence layer."""
+
+    async def fake_run(*, products, model_env, trace_event=None):
+        return SimpleNamespace(
+            value={
+                "suggestions": [
+                    {
+                        "product_index": 0,
+                        "product_title": "Product A",
+                        "category": "seo_readiness",
+                        "severity": "low",
+                        "message": "Improve SEO for A",
+                        "patch_payload": {"seo_title": "Better A"},
+                    },
+                    {
+                        "product_index": 1,
+                        "product_title": "Product B",
+                        "category": "seo_readiness",
+                        "severity": "low",
+                        "message": "Improve SEO for B",
+                        "patch_payload": {"seo_title": "Better B"},
+                    },
+                    {
+                        "product_index": 2,
+                        "product_title": "Product C",
+                        "category": "completeness",
+                        "severity": "medium",
+                        "message": "Add vendor for C",
+                        "patch_payload": {"vendor": "Acme"},
+                    },
+                ]
+            },
+            text="",
+        )
+
+    monkeypatch.setattr(
+        "application.use_cases.intelligence_generate_suggestions.run_product_intelligence_suggestions",
+        fake_run,
+    )
+    supabase = _FakeSupabase(
+        {"base_url": "http://localhost:11434/v1/", "model_id": "deepseek-r1:8b", "api_key": "s"}
+    )
+    products = [
+        {"title": "Product A"},
+        {"title": "Product B"},
+        {"title": "Product C"},
+    ]
+    suggestions = await execute(supabase=supabase, products=products, shop_domain="store.myshopify.com")
+
+    llm_suggestions = [s for s in suggestions if not s["category"].startswith("normalization_")]
+    assert len(llm_suggestions) == 3
+    indices = [s["product_index"] for s in llm_suggestions]
+    assert indices == [0, 1, 2], f"Expected distinct indices [0,1,2], got {indices}"

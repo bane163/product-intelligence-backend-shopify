@@ -750,9 +750,12 @@ async def execute(
 
     llm_suggestions: list[dict[str, Any]] = []
     model_env = _resolve_model_env(supabase, shop_domain)
+    indexed_products = [
+        {"_product_index": i, **p} for i, p in enumerate(products)
+    ]
     try:
         response = await run_product_intelligence_suggestions(
-            products=products,
+            products=indexed_products,
             model_env=model_env,
             trace_event=trace_event if callable(trace_event) else None,
         )

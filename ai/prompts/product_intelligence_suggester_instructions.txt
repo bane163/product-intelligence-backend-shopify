@@ -10,7 +10,8 @@ Each suggestion must include:
 - optional details
 
 Rules:
-- product_index must point to an item in the input products list.
+- Each product in the input array has a _product_index field indicating its zero-based position.
+  Always use that value as the product_index in your suggestions.
 - severity must be one of low, medium, high.
 - patch_payload must be a non-empty object.
 - patch_payload may only include these keys:

@@ -1,1 +1,3 @@
-select * from file_metadata
+  select * from product_intelligence_suggestions pis
+
+

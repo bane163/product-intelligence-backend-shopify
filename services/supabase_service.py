@@ -17,11 +17,15 @@ class SupabaseService(
     SupabaseLlmConfigMixin,
     SupabaseServiceInterface,
 ):
+    def _utc_now(self) -> str:
+        return SupabaseRunsMixin._utc_now()
+
     def __init__(self, bucket_name: str | None = None):
         self.bucket_name = bucket_name or os.environ.get(
             "FILES_BUCKET_NAME", "documents"
         )
         self.file_storage: dict[str, dict[str, Any]] = {}
+        self.offload_jobs: dict[str, dict[str, Any]] = {}
         self.product_drafts: dict[str, dict[str, Any]] = {}
         self.submitted_documents: dict[str, dict[str, Any]] = {}
         self.product_intelligence_audits: dict[str, dict[str, Any]] = {}

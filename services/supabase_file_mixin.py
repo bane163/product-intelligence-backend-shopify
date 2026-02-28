@@ -1,5 +1,10 @@
 import logging
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from storage3._sync.file_api import SyncBucketProxy
+    from supabase._sync.client import SyncClient
 
 from .supabase_constants import (
     FILE_ORIGIN_DRAFT_RESUME,
@@ -13,11 +18,15 @@ LOG = logging.getLogger(__name__)
 
 
 class SupabaseFileMixin:
+    # Provided by the concrete service (`SupabaseService.__init__`).
+    bucket_name: str
+    file_storage: dict[str, dict[str, Any]]
+
     @staticmethod
     def _thumbnail_path(file_id: str) -> str:
         return f"thumbnails/{file_id}.png"
 
-    def _try_get_bucket(self):
+    def _try_get_bucket(self) -> "SyncBucketProxy | None":
         try:
             from supabase_client import get_storage
         except Exception:
@@ -32,7 +41,7 @@ class SupabaseFileMixin:
             LOG.exception("Supabase storage unavailable; using in-memory storage")
             return None
 
-    def _get_supabase_client(self):
+    def _get_supabase_client(self) -> "SyncClient | None":
         try:
             from supabase_client import get_supabase
 
@@ -40,6 +49,10 @@ class SupabaseFileMixin:
         except Exception:
             LOG.debug("Supabase client unavailable", exc_info=True)
             return None
+
+    def _utc_now(self) -> str:
+        """Stub for typing — actual implementation provided by `SupabaseRunsMixin`."""
+        raise NotImplementedError("_utc_now must be provided by the host class")
 
     @staticmethod
     def _normalize_file_origin(value: Any) -> str | None:
@@ -65,37 +78,41 @@ class SupabaseFileMixin:
 
     @classmethod
     def _normalize_file_row_origin(cls, row: dict[str, Any]) -> str:
-        return (
-            cls._normalize_file_origin(row.get("file_origin"))
-            or cls._infer_file_origin_from_filename(row.get("filename"))
-        )
+        return cls._normalize_file_origin(
+            row.get("file_origin")
+        ) or cls._infer_file_origin_from_filename(row.get("filename"))
 
     @classmethod
     def _dedupe_and_filter_document_rows(
-        cls, rows: list[dict[str, Any]]
+        cls, rows: Sequence[Mapping[str, Any]]
     ) -> list[dict[str, Any]]:
         deduped: dict[str, dict[str, Any]] = {}
         for item in rows:
-            storage_path = str(item.get("storage_path") or item.get("file_id") or "").strip()
+            storage_path = str(
+                item.get("storage_path") or item.get("file_id") or ""
+            ).strip()
             if not storage_path:
                 continue
             current = deduped.get(storage_path)
             if current is None:
-                deduped[storage_path] = item
+                deduped[storage_path] = dict(item)
                 continue
             current_created = str(current.get("created_at") or "")
             candidate_created = str(item.get("created_at") or "")
             if candidate_created >= current_created:
-                deduped[storage_path] = item
+                deduped[storage_path] = dict(item)
 
         visible_rows: list[dict[str, Any]] = []
         for item in deduped.values():
-            if cls._normalize_file_row_origin(item) != FILE_ORIGIN_MERCHANT_UPLOAD:
+            item_dict = dict(item)
+            if cls._normalize_file_row_origin(item_dict) != FILE_ORIGIN_MERCHANT_UPLOAD:
                 continue
             visible_rows.append(
                 {
-                    **item,
-                    "file_id": str(item.get("storage_path") or item.get("file_id") or ""),
+                    **item_dict,
+                    "file_id": str(
+                        item_dict.get("storage_path") or item_dict.get("file_id") or ""
+                    ),
                 }
             )
         visible_rows.sort(
@@ -113,7 +130,9 @@ class SupabaseFileMixin:
         content_type: str | None = None,
         file_origin: str | None = None,
     ) -> None:
-        normalized_origin = self._normalize_file_origin(file_origin) or self._infer_file_origin_from_filename(name)
+        normalized_origin = self._normalize_file_origin(
+            file_origin
+        ) or self._infer_file_origin_from_filename(name)
         bucket = self._try_get_bucket()
         if bucket is None:
             self.file_storage[file_id] = {
@@ -195,7 +214,13 @@ class SupabaseFileMixin:
                     .limit(db_limit)
                     .execute()
                 )
-                rows = self._dedupe_and_filter_document_rows(res.data or [])
+                raw_rows = res.data or []
+                normalized_rows = [
+                    cast(Mapping[str, Any], row)
+                    for row in raw_rows
+                    if isinstance(row, Mapping)
+                ]
+                rows = self._dedupe_and_filter_document_rows(normalized_rows)
                 return rows[offset : offset + limit]
         except Exception:
             LOG.exception("Failed listing files from DB")
@@ -251,7 +276,14 @@ class SupabaseFileMixin:
             return None
 
         try:
-            content = data.read() if hasattr(data, "read") else data
+            if data is None:
+                return None
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                content = bytes(data)
+            elif hasattr(data, "read"):
+                content = data.read()
+            else:
+                content = data
         except Exception:
             LOG.exception("Failed to read downloaded data for %s", file_id)
             return None
@@ -272,12 +304,20 @@ class SupabaseFileMixin:
                     .execute()
                 )
                 rows = res.data or []
-                if rows:
-                    meta = rows[0]
-                    name = meta.get("filename", name)
-                    content_type = meta.get("content_type", content_type)
-                    file_origin = self._normalize_file_row_origin(meta)
-                    thumbnail_storage_path = meta.get("thumbnail_storage_path")
+                primary_meta = next(
+                    (
+                        cast(Mapping[str, Any], row)
+                        for row in rows
+                        if isinstance(row, Mapping)
+                    ),
+                    None,
+                )
+                if primary_meta is not None:
+                    meta_dict = dict(primary_meta)
+                    name = meta_dict.get("filename", name)
+                    content_type = meta_dict.get("content_type", content_type)
+                    file_origin = self._normalize_file_row_origin(meta_dict)
+                    thumbnail_storage_path = meta_dict.get("thumbnail_storage_path")
         except Exception:
             LOG.debug("DB metadata fetch failed for %s", file_id, exc_info=True)
 
@@ -386,7 +426,11 @@ class SupabaseFileMixin:
 
         try:
             data = bucket.download(thumbnail_path)
-            return data.read() if hasattr(data, "read") else data
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                return bytes(data)
+            if hasattr(data, "read"):
+                return data.read()
+            return data
         except Exception:
             LOG.debug(
                 "Failed downloading thumbnail %s for %s",
@@ -416,15 +460,23 @@ class SupabaseFileMixin:
                     .execute()
                 )
                 existing_rows = existing.data or []
-                if existing_rows:
-                    thumbnail_path = existing_rows[0].get("thumbnail_storage_path")
+                candidate = next(
+                    (
+                        cast(Mapping[str, Any], row)
+                        for row in existing_rows
+                        if isinstance(row, Mapping)
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    thumbnail_path = candidate.get("thumbnail_storage_path")
                 client.table("file_metadata").delete().eq(
                     "storage_path", file_id
                 ).execute()
         except Exception:
             LOG.warning("Failed deleting metadata for %s", file_id, exc_info=True)
 
-        if thumbnail_path:
+        if isinstance(thumbnail_path, str):
             try:
                 bucket.remove([thumbnail_path])
             except Exception:

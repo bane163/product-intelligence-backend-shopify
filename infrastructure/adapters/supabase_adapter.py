@@ -119,6 +119,38 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]:
         return self._service.get_run_history(run_id, shop_domain=shop_domain)
 
+    def enqueue_offload_job(
+        self,
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ) -> dict[str, Any] | None:
+        return self._service.enqueue_offload_job(
+            job_id, fields, require_persistent_queue=require_persistent_queue
+        )
+
+    def claim_next_offload_job(
+        self,
+        *,
+        queue_name: str = "default",
+        worker_id: str,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any] | None:
+        return self._service.claim_next_offload_job(
+            queue_name=queue_name,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+        )
+
+    def update_offload_job(
+        self, job_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        return self._service.update_offload_job(job_id, fields)
+
+    def get_offload_job(self, job_id: str) -> dict[str, Any] | None:
+        return self._service.get_offload_job(job_id)
+
     def save_product_draft(
         self,
         *,
@@ -130,6 +162,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         input_filename: str | None = None,
         output_file_id: str | None = None,
         output_filename: str | None = None,
+        extraction_status: str | None = None,
+        extraction_run_id: str | None = None,
+        extraction_error: str | None = None,
+        submit_status: str | None = None,
+        submit_run_id: str | None = None,
+        submit_error: str | None = None,
+        require_lifecycle_columns: bool = False,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self._service.save_product_draft(
@@ -141,6 +180,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             input_filename=input_filename,
             output_file_id=output_file_id,
             output_filename=output_filename,
+            extraction_status=extraction_status,
+            extraction_run_id=extraction_run_id,
+            extraction_error=extraction_error,
+            submit_status=submit_status,
+            submit_run_id=submit_run_id,
+            submit_error=submit_error,
+            require_lifecycle_columns=require_lifecycle_columns,
             products=products,
         )
 

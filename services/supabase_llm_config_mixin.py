@@ -3,7 +3,7 @@ import os
 import uuid
 from base64 import urlsafe_b64encode
 from hashlib import sha256
-from typing import Any
+from typing import Any, Optional
 
 from cryptography.fernet import Fernet
 
@@ -11,6 +11,16 @@ LOG = logging.getLogger(__name__)
 
 
 class SupabaseLlmConfigMixin:
+    def _get_supabase_client(self) -> Optional[Any]:
+        """Stub for typing — actual implementation provided by host class (e.g. SupabaseFileMixin)."""
+        raise NotImplementedError(
+            "_get_supabase_client must be implemented by the host class"
+        )
+
+    def _utc_now(self) -> str:
+        """Stub for typing — actual implementation provided by `SupabaseRunsMixin`."""
+        raise NotImplementedError("_utc_now must be provided by the host class")
+
     @staticmethod
     def _mask_api_key(raw_key: str | None) -> str | None:
         if not raw_key:

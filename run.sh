@@ -23,11 +23,11 @@ else
   echo "⚠️ npx not available; skipping Supabase start"
 fi
 
-# Run the backend and its dependencies
-docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml up -d shopify-backend
+# Run the backend, worker, and dependencies
+docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml up -d shopify-backend offload-worker
 
-echo "✅ Backend started! You can attach the VS Code debugger now."
-echo "📝 Use 'docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml logs -f shopify-backend' to see logs."
+echo "✅ Backend and worker started! You can attach the VS Code debugger now."
+echo "📝 Use 'docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml logs -f shopify-backend offload-worker' to see logs."
 
 # Start the LLM model if requested
 if [ "$RUN_LLM" = true ]; then

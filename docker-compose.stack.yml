@@ -50,6 +50,31 @@ services:
     networks:
       - collabora-net
 
+  offload-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: offload-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - SUPABASE_URL=http://host.docker.internal:54321
+      - COLLABORA_URL=http://collabora:9980
+      - OFFLOAD_QUEUE_NAME=${OFFLOAD_QUEUE_NAME:-offload}
+      - OFFLOAD_WORKER_ID=${OFFLOAD_WORKER_ID:-offload-worker}
+      - OFFLOAD_LEASE_SECONDS=${OFFLOAD_LEASE_SECONDS:-300}
+      - OFFLOAD_POLL_SECONDS=${OFFLOAD_POLL_SECONDS:-2.0}
+    volumes:
+      - ./:/app
+      - /app/.venv
+    depends_on:
+      shopify-backend:
+        condition: service_started
+    command: [ "uv", "run", "python", "offload_worker.py" ]
+    networks:
+      - collabora-net
+
 networks:
   collabora-net:
     driver: bridge

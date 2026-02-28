@@ -51,6 +51,10 @@ class SupabaseDomainAccessors:
                 "list_runs",
                 "get_run",
                 "get_run_history",
+                "enqueue_offload_job",
+                "claim_next_offload_job",
+                "update_offload_job",
+                "get_offload_job",
             ),
             aliases={
                 "create_or_update": "create_or_update_run",
@@ -60,6 +64,10 @@ class SupabaseDomainAccessors:
                 "list": "list_runs",
                 "get": "get_run",
                 "history": "get_run_history",
+                "enqueue": "enqueue_offload_job",
+                "claim_next": "claim_next_offload_job",
+                "update_job": "update_offload_job",
+                "get_job": "get_offload_job",
             },
         )
         self.drafts = SupabaseNamespace(

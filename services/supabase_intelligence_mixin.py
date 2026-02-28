@@ -1,6 +1,6 @@
 import logging
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from .supabase_constants import NORMALIZATION_CATEGORY_KEYS
 
@@ -8,6 +8,12 @@ LOG = logging.getLogger(__name__)
 
 
 class SupabaseIntelligenceMixin:
+    def _get_supabase_client(self) -> Optional[Any]:
+        """Stub for typing — actual implementation provided by host class (e.g. SupabaseFileMixin)."""
+        raise NotImplementedError(
+            "_get_supabase_client must be implemented by the host class"
+        )
+
     def save_product_intelligence_audit(
         self,
         *,
@@ -51,6 +57,10 @@ class SupabaseIntelligenceMixin:
                 LOG.exception("Failed saving product intelligence audit %s", audit_id)
         self.product_intelligence_audits[audit_id] = payload
         return payload
+
+    def _utc_now(self) -> str:
+        """Stub for typing — actual implementation provided by `SupabaseRunsMixin`."""
+        raise NotImplementedError("_utc_now must be provided by the host class")
 
     def save_product_intelligence_findings(
         self,

@@ -35,6 +35,16 @@ def test_runs_namespace_alias_maps_history_method():
     assert target.calls[0][0] == "get_run_history"
 
 
+def test_runs_namespace_alias_maps_queue_enqueue_method():
+    target = _FakeSupabaseTarget()
+    domains = SupabaseDomainAccessors(target)
+
+    result = domains.runs.enqueue("job-1", {"job_type": "document_import"})
+
+    assert result == "enqueue_offload_job"
+    assert target.calls[0][0] == "enqueue_offload_job"
+
+
 def test_namespace_rejects_unsupported_method_name():
     target = _FakeSupabaseTarget()
     domains = SupabaseDomainAccessors(target)

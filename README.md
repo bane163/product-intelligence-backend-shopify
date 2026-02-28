@@ -56,13 +56,28 @@ helper script.
    ```bash
    ./run.sh --llm
    ```
-   _This script runs `docker-compose` and optionally starts the LLM._
+   _This script runs `docker-compose` (API + offload worker) and optionally starts the LLM._
 
 3. The backend will be available at: `http://localhost:8000`
    - **Swagger UI**: `http://localhost:8000/docs`
    - **Collabora**: `http://localhost:9980` (running as a sidecar service)
    - **LLM**: Starts `ollama run kimi-k2-thinking:cloud` (only if the `--llm`
      flag is passed).
+
+### Offload Queue Worker
+
+`./run.sh` and `./build.sh` start the durable offload worker (`offload-worker`) alongside the API.
+To run it manually outside Docker:
+
+```bash
+uv run python offload_worker.py
+```
+
+Worker environment variables (set in `.env` as needed; compose defaults are used if omitted):
+- `OFFLOAD_QUEUE_NAME` (default: `offload`)
+- `OFFLOAD_WORKER_ID` (default: `<hostname>-<pid>`)
+- `OFFLOAD_LEASE_SECONDS` (default: `300`)
+- `OFFLOAD_POLL_SECONDS` (default: `2.0`)
 
 ### How to Stop
 

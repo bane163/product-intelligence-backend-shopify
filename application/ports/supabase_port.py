@@ -57,6 +57,28 @@ class SupabasePort(Protocol):
 
     def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]: ...
 
+    def enqueue_offload_job(
+        self,
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ) -> dict[str, Any] | None: ...
+
+    def claim_next_offload_job(
+        self,
+        *,
+        queue_name: str = "default",
+        worker_id: str,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any] | None: ...
+
+    def update_offload_job(
+        self, job_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    def get_offload_job(self, job_id: str) -> dict[str, Any] | None: ...
+
     def save_product_draft(
         self,
         *,
@@ -68,6 +90,13 @@ class SupabasePort(Protocol):
         input_filename: str | None = None,
         output_file_id: str | None = None,
         output_filename: str | None = None,
+        extraction_status: str | None = None,
+        extraction_run_id: str | None = None,
+        extraction_error: str | None = None,
+        submit_status: str | None = None,
+        submit_run_id: str | None = None,
+        submit_error: str | None = None,
+        require_lifecycle_columns: bool = False,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
 
@@ -306,6 +335,28 @@ class SupabaseRunsNamespacePort(Protocol):
 
     def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]: ...
 
+    def enqueue_offload_job(
+        self,
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ) -> dict[str, Any] | None: ...
+
+    def claim_next_offload_job(
+        self,
+        *,
+        queue_name: str = "default",
+        worker_id: str,
+        lease_seconds: int = 300,
+    ) -> dict[str, Any] | None: ...
+
+    def update_offload_job(
+        self, job_id: str, fields: dict[str, Any]
+    ) -> dict[str, Any] | None: ...
+
+    def get_offload_job(self, job_id: str) -> dict[str, Any] | None: ...
+
 
 class SupabaseDraftsNamespacePort(Protocol):
     def save_product_draft(
@@ -319,6 +370,13 @@ class SupabaseDraftsNamespacePort(Protocol):
         input_filename: str | None = None,
         output_file_id: str | None = None,
         output_filename: str | None = None,
+        extraction_status: str | None = None,
+        extraction_run_id: str | None = None,
+        extraction_error: str | None = None,
+        submit_status: str | None = None,
+        submit_run_id: str | None = None,
+        submit_error: str | None = None,
+        require_lifecycle_columns: bool = False,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
 

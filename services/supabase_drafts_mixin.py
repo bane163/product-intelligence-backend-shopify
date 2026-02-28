@@ -1,10 +1,79 @@
 import logging
-from typing import Any
+from typing import Any, Optional
 
 LOG = logging.getLogger(__name__)
 
 
+def _iter_exception_texts(exc: Exception) -> list[str]:
+    candidates: list[str] = []
+    for value in (
+        str(exc),
+        repr(exc),
+        getattr(exc, "message", None),
+        getattr(exc, "details", None),
+        getattr(exc, "hint", None),
+    ):
+        if value:
+            candidates.append(str(value))
+    for arg in getattr(exc, "args", ()) or ():
+        if isinstance(arg, dict):
+            for key in ("message", "details", "hint", "code"):
+                value = arg.get(key)
+                if value:
+                    candidates.append(str(value))
+            candidates.append(str(arg))
+        elif arg:
+            candidates.append(str(arg))
+    return candidates
+
+
+def _normalize_error_text(value: str) -> str:
+    return " ".join(
+        value.lower().replace('"', "").replace("'", "").replace("`", "").split()
+    )
+
+
+def _is_missing_column_error(exc: Exception, *, table: str, column: str) -> bool:
+    table_name = table.lower().split(".")[-1]
+    column_name = column.lower()
+    missing_markers = ("could not find", "does not exist", "not found", "missing")
+    for text in _iter_exception_texts(exc):
+        message = _normalize_error_text(text)
+        if column_name not in message:
+            continue
+        if not any(marker in message for marker in missing_markers):
+            continue
+        if f"{table_name}.{column_name}" in message:
+            return True
+        if f"{column_name} column" in message and (
+            table_name in message or "schema cache" in message
+        ):
+            return True
+        if f"column {column_name}" in message:
+            return True
+    return False
+
+
 class SupabaseDraftsMixin:
+    # Provided by the concrete service (`SupabaseService.__init__`).
+    product_drafts: dict[str, dict[str, Any]]
+    submitted_documents: dict[str, dict[str, Any]]
+
+    def _get_supabase_client(self) -> Optional[Any]:
+        """Stub for static typing.
+
+        Concrete service classes (e.g. `SupabaseService`) typically provide
+        `_get_supabase_client` (see `SupabaseFileMixin`). This stub exists so
+        type checkers know the attribute is available on `self`.
+        """
+        raise NotImplementedError(
+            "_get_supabase_client must be implemented by the host class"
+        )
+
+    def _utc_now(self) -> str:
+        """Stub for typing — actual implementation provided by `SupabaseRunsMixin`."""
+        raise NotImplementedError("_utc_now must be provided by the host class")
+
     def save_product_draft(
         self,
         *,
@@ -16,6 +85,13 @@ class SupabaseDraftsMixin:
         input_filename: str | None = None,
         output_file_id: str | None = None,
         output_filename: str | None = None,
+        extraction_status: str | None = None,
+        extraction_run_id: str | None = None,
+        extraction_error: str | None = None,
+        submit_status: str | None = None,
+        submit_run_id: str | None = None,
+        submit_error: str | None = None,
+        require_lifecycle_columns: bool = False,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         now = self._utc_now()
@@ -31,6 +107,12 @@ class SupabaseDraftsMixin:
             "input_filename": input_filename,
             "output_file_id": output_file_id,
             "output_filename": output_filename,
+            "extraction_status": extraction_status,
+            "extraction_run_id": extraction_run_id,
+            "extraction_error": extraction_error,
+            "submit_status": submit_status,
+            "submit_run_id": submit_run_id,
+            "submit_error": submit_error,
             "products": products,
             "product_count": len(products),
             "first_product_title": first_title,
@@ -44,8 +126,32 @@ class SupabaseDraftsMixin:
                     payload, on_conflict="draft_id"
                 ).execute()
                 return payload
-            except Exception:
-                LOG.exception("Failed saving product draft %s", draft_id)
+            except Exception as exc:
+                if _is_missing_column_error(
+                    exc, table="product_drafts", column="draft_name"
+                ):
+                    try:
+                        compat_payload = dict(payload)
+                        compat_payload.pop("draft_name", None)
+                        client.table("product_drafts").upsert(
+                            compat_payload, on_conflict="draft_id"
+                        ).execute()
+                        return payload
+                    except Exception as draft_name_exc:
+                        LOG.exception(
+                            "Retry without product_drafts.draft_name failed for draft %s",
+                            draft_id,
+                        )
+                        if require_lifecycle_columns:
+                            raise RuntimeError(
+                                "Draft lifecycle persistence failed (product_drafts)"
+                            ) from draft_name_exc
+                else:
+                    LOG.exception("Failed saving product draft %s", draft_id)
+                    if require_lifecycle_columns:
+                        raise RuntimeError(
+                            "Draft lifecycle persistence failed (product_drafts)"
+                        ) from exc
                 try:
                     compat_payload = dict(payload)
                     compat_payload.pop("first_product_title", None)
@@ -54,6 +160,13 @@ class SupabaseDraftsMixin:
                     compat_payload.pop("input_filename", None)
                     compat_payload.pop("output_file_id", None)
                     compat_payload.pop("output_filename", None)
+                    compat_payload.pop("extraction_status", None)
+                    compat_payload.pop("extraction_run_id", None)
+                    compat_payload.pop("extraction_error", None)
+                    compat_payload.pop("submit_status", None)
+                    compat_payload.pop("submit_run_id", None)
+                    compat_payload.pop("submit_error", None)
+                    compat_payload.pop("extraction_progress", None)
                     client.table("product_drafts").upsert(
                         compat_payload, on_conflict="draft_id"
                     ).execute()
@@ -263,9 +376,7 @@ class SupabaseDraftsMixin:
                 LOG.exception("Failed listing submitted documents")
 
         if db_docs_loaded:
-            docs = [
-                item for item in db_docs if item.get("submitted_id")
-            ]
+            docs = [item for item in db_docs if item.get("submitted_id")]
         else:
             docs = list(self.submitted_documents.values())
         for doc in docs:

@@ -22,8 +22,8 @@ fi
 
 echo "🔨 Rebuilding Shopify backend container..."
 echo "♻️ Refreshing backend anonymous volumes so dependency changes are applied..."
-docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml up -d --build --force-recreate --renew-anon-volumes shopify-backend
-echo "✅ Backend rebuilt and started."
+docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml up -d --build --force-recreate --renew-anon-volumes shopify-backend offload-worker
+echo "✅ Backend and worker rebuilt and started."
 echo "💡 Dependency updates (like new Python packages) require running this build script."
 
 if [ "$RUN_LLM" = true ]; then

@@ -1418,6 +1418,585 @@ async def test_import_ignores_freeform_prompt_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_import_offload_returns_queued_with_draft_tracking(monkeypatch):
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+    process_calls = 0
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        payload = dict(kwargs)
+        payload.pop("require_lifecycle_columns", None)
+        return original_save_product_draft(**payload)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        _ = require_persistent_queue
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    async def fake_process_document_execute(**kwargs):
+        nonlocal process_calls
+        process_calls += 1
+        _ = kwargs
+        return {
+            "run_id": "run-import-offload",
+            "result": {"products": [{"title": "Queued Product"}]},
+        }
+
+    import application.use_cases.processing.process_document as process_document_uc
+
+    monkeypatch.setattr(process_document_uc, "execute", fake_process_document_execute)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "offload.xlsx",
+                    io.BytesIO(b"offload"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-offload", "offload": "true"},
+        )
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["run_id"] == "run-import-offload"
+        assert body["file_id"] == file_id
+        assert isinstance(body.get("draft_id"), str) and body["draft_id"]
+        assert len(queued_jobs) == 1
+        assert queued_jobs[0]["job_type"] == "document_import"
+        assert queued_jobs[0]["run_id"] == "run-import-offload"
+        assert queued_jobs[0]["draft_id"] == body["draft_id"]
+        assert queued_jobs[0]["file_id"] == file_id
+        assert queued_jobs[0]["status"] == "queued"
+        assert queued_jobs[0]["payload"]["extraction_mode"] == "per_sheet"
+        assert (
+            queued_jobs[0]["payload"]["input_content_type"]
+            == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert process_calls == 0
+
+        detail = await ac.get(f"/agents/product-drafts/{body['draft_id']}")
+        assert detail.status_code == 200
+        draft = detail.json()["draft"]
+        assert draft["draft_name"] == "offload.xlsx"
+        assert draft["extraction_run_id"] == "run-import-offload"
+        assert draft["extraction_status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_import_offload_reuses_active_draft_for_same_file(monkeypatch):
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        payload = dict(kwargs)
+        payload.pop("require_lifecycle_columns", None)
+        return original_save_product_draft(**payload)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        _ = require_persistent_queue
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "offload-reuse.xlsx",
+                    io.BytesIO(b"offload-reuse"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+
+        first = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-reuse-1", "offload": "true"},
+        )
+        assert first.status_code == 202
+        first_body = first.json()
+
+        second = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-reuse-2", "offload": "true"},
+        )
+        assert second.status_code == 202
+        second_body = second.json()
+
+        assert second_body["draft_id"] == first_body["draft_id"]
+        assert second_body["run_id"] == first_body["run_id"]
+        assert second_body["status"] == "queued"
+        assert len(queued_jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_import_offload_reuse_backfills_missing_draft_name(monkeypatch):
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        payload = dict(kwargs)
+        payload.pop("require_lifecycle_columns", None)
+        return original_save_product_draft(**payload)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        _ = require_persistent_queue
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "offload-reuse-naming.xlsx",
+                    io.BytesIO(b"offload-reuse-naming"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+
+        first = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-reuse-name-1", "offload": "true"},
+        )
+        assert first.status_code == 202
+        first_body = first.json()
+
+        original_save_product_draft(
+            draft_id=first_body["draft_id"],
+            run_id=first_body["run_id"],
+            import_mode="auto",
+            draft_name="",
+            input_file_id=file_id,
+            input_filename="offload-reuse-naming.xlsx",
+            extraction_status="queued",
+            extraction_run_id=first_body["run_id"],
+            extraction_error=None,
+            submit_status=None,
+            submit_run_id=None,
+            submit_error=None,
+            products=[],
+        )
+
+        second = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-reuse-name-2", "offload": "true"},
+        )
+        assert second.status_code == 202
+        second_body = second.json()
+
+        assert second_body["draft_id"] == first_body["draft_id"]
+        assert second_body["run_id"] == first_body["run_id"]
+        assert len(queued_jobs) == 1
+
+        detail = await ac.get(f"/agents/product-drafts/{first_body['draft_id']}")
+        assert detail.status_code == 200
+        draft = detail.json()["draft"]
+        assert draft["draft_name"] == "offload-reuse-naming.xlsx"
+        assert draft["draft_name"].strip()
+        assert draft["draft_name"].lower() != "untitled"
+
+
+@pytest.mark.asyncio
+async def test_import_offload_uses_deterministic_name_when_source_filename_missing(
+    monkeypatch,
+):
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        payload = dict(kwargs)
+        payload.pop("require_lifecycle_columns", None)
+        return original_save_product_draft(**payload)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        _ = require_persistent_queue
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    file_id = f"blank-name-{uuid.uuid4()}"
+    ctx.services.supabase.save_file(
+        file_id=file_id,
+        name="",
+        content=b"offload",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-no-name", "offload": "true"},
+        )
+        assert response.status_code == 202
+        body = response.json()
+
+        detail = await ac.get(f"/agents/product-drafts/{body['draft_id']}")
+        assert detail.status_code == 200
+        draft = detail.json()["draft"]
+        assert draft["draft_name"] == f"draft-{body['draft_id'][:8]}.xlsx"
+        assert draft["draft_name"].strip()
+        assert draft["draft_name"].lower() != "untitled"
+        assert len(queued_jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_offload_returns_queued_with_draft_tracking(monkeypatch):
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+    submit_calls = 0
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        payload = dict(kwargs)
+        payload.pop("require_lifecycle_columns", None)
+        return original_save_product_draft(**payload)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        _ = require_persistent_queue
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    async def fake_submit_execute(**kwargs):
+        nonlocal submit_calls
+        submit_calls += 1
+        _ = kwargs
+        return {"submitted_id": "submitted-offload"}
+
+    import application.use_cases.processing.submit_products as submit_uc
+
+    monkeypatch.setattr(submit_uc, "execute", fake_submit_execute)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        created = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Queued Draft Product"}]),
+                "run_id": "run-submit-base",
+                "import_mode": "auto",
+                "draft_name": "Queued Draft",
+            },
+        )
+        assert created.status_code == 200
+        draft_id = created.json()["draft_id"]
+
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "draft_id": draft_id,
+                "run_id": "run-submit-offload",
+                "offload": "true",
+                "import_mode": "auto",
+                "products_json": json.dumps([{"title": "Inline Product"}]),
+                "shop_access_token": "shpat_test_token",
+                "enable_ai_enhancements": "true",
+                "document_name": "queued-submit.xlsx",
+            },
+        )
+        assert response.status_code == 202
+        body = response.json()
+        assert body["status"] == "queued"
+        assert body["draft_id"] == draft_id
+        assert body["run_id"] == "run-submit-offload"
+        assert len(queued_jobs) == 1
+        assert queued_jobs[0]["job_type"] == "shopify_submit"
+        assert queued_jobs[0]["run_id"] == "run-submit-offload"
+        assert queued_jobs[0]["draft_id"] == draft_id
+        assert queued_jobs[0]["status"] == "queued"
+        assert queued_jobs[0]["payload"]["products_json"] == json.dumps(
+            [{"title": "Inline Product"}]
+        )
+        assert queued_jobs[0]["payload"]["shop_access_token"] == "shpat_test_token"
+        assert queued_jobs[0]["payload"]["enable_ai_enhancements"] is True
+        assert submit_calls == 0
+
+        detail = await ac.get(f"/agents/product-drafts/{draft_id}")
+        assert detail.status_code == 200
+        draft = detail.json()["draft"]
+        assert draft["submit_run_id"] == "run-submit-offload"
+        assert draft["submit_status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_import_offload_returns_explicit_error_when_queue_persistence_fails(
+    monkeypatch,
+):
+    ctx = get_app_context()
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        payload = dict(kwargs)
+        payload.pop("require_lifecycle_columns", None)
+        return original_save_product_draft(**payload)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        _ = (job_id, fields)
+        assert require_persistent_queue is True
+        raise RuntimeError("offload_jobs table missing")
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "offload-failfast.xlsx",
+                    io.BytesIO(b"offload"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-failfast", "offload": "true"},
+        )
+        assert response.status_code == 500
+        assert "offload_jobs table missing" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_import_offload_returns_explicit_error_when_lifecycle_persistence_fails(
+    monkeypatch,
+):
+    ctx = get_app_context()
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        if kwargs.get("require_lifecycle_columns"):
+            raise RuntimeError("product_drafts lifecycle columns missing")
+        return original_save_product_draft(**kwargs)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "offload-lifecycle-failfast.xlsx",
+                    io.BytesIO(b"offload"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import",
+            data={"file_id": file_id, "run_id": "run-import-lifecycle-failfast", "offload": "true"},
+        )
+        assert response.status_code == 500
+        assert "lifecycle columns missing" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_submit_offload_returns_explicit_error_when_lifecycle_persistence_fails(
+    monkeypatch,
+):
+    ctx = get_app_context()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        created = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Failfast Draft"}]),
+                "run_id": "run-submit-failfast-base",
+                "import_mode": "auto",
+                "draft_name": "Failfast Draft",
+            },
+        )
+        assert created.status_code == 200
+        draft_id = created.json()["draft_id"]
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        if kwargs.get("require_lifecycle_columns"):
+            raise RuntimeError("product_drafts lifecycle columns missing")
+        return original_save_product_draft(**kwargs)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "draft_id": draft_id,
+                "run_id": "run-submit-failfast",
+                "offload": "true",
+                "import_mode": "auto",
+                "document_name": "failfast-submit.xlsx",
+            },
+        )
+        assert response.status_code == 500
+        assert "lifecycle columns missing" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_list_and_get_product_draft():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:

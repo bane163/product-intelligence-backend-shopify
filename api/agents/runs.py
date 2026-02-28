@@ -82,9 +82,7 @@ async def stream_events(
     )
 
     tenant = require_shop_domain(request, shop_domain)
-    run = get_run_execute(
-        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
-    )
+    run = get_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
@@ -136,9 +134,7 @@ async def get_llm_run(
     from application.use_cases.runs.get_run import execute as get_run_execute
 
     tenant = require_shop_domain(request, shop_domain)
-    run = get_run_execute(
-        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
-    )
+    run = get_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return {"run": run}
@@ -181,9 +177,7 @@ async def control_llm_run(
     resume_token = str(payload.get("resume_token") or "").strip()
     tenant = require_shop_domain(request, shop_domain or payload.get("shop_domain"))
 
-    run = get_run_execute(
-        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
-    )
+    run = get_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
 
@@ -203,7 +197,7 @@ async def control_llm_run(
                 "status": "cancelled",
                 "ended_at": now,
                 "failure_code": "cancelled_by_operator",
-                "failure_message": "Run cancelled by operator",
+                "failure_message": "Run cancelled",
                 "resume_token": None,
             }
         )
@@ -212,7 +206,7 @@ async def control_llm_run(
             run_id=run_id,
             shop_domain=tenant,
             phase="run_cancelled",
-            message="Run cancelled by operator",
+            message="Run cancelled",
             metadata={"operation": normalized_operation, "attempt": current_attempt},
         )
         ctx.services.tracing.complete_run(run_id)
@@ -285,9 +279,7 @@ async def control_llm_run(
         )
 
     ctx.supabase.runs.create_or_update_run(run_id, updates)
-    updated = get_run_execute(
-        supabase=ctx.supabase, run_id=run_id, shop_domain=tenant
-    )
+    updated = get_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
     if not updated:
         raise HTTPException(status_code=500, detail="Failed to update run")
 

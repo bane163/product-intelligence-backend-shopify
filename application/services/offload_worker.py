@@ -269,7 +269,6 @@ class OffloadWorker:
         document_name = _optional_str(payload.get("document_name"))
         products_json = _optional_str(payload.get("products_json"))
         shop_access_token = _optional_str(payload.get("shop_access_token"))
-        enable_ai_enhancements = _parse_bool(payload.get("enable_ai_enhancements"))
 
         if draft_id:
             _save_draft_state(
@@ -302,7 +301,6 @@ class OffloadWorker:
             document_name=document_name,
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
-            enable_ai_enhancements=enable_ai_enhancements,
         )
         submit_succeeded = bool(
             isinstance(result, dict)

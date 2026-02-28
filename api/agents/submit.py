@@ -80,7 +80,6 @@ async def _run_submit_in_background(
     document_name: str | None,
     shop_domain: str | None,
     shop_access_token: str | None,
-    enable_ai_enhancements: bool,
 ) -> None:
     from application.use_cases.processing.submit_products import execute as submit_execute
 
@@ -107,7 +106,6 @@ async def _run_submit_in_background(
             document_name=document_name,
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
-            enable_ai_enhancements=enable_ai_enhancements,
         )
         submit_succeeded = bool(
             isinstance(result, dict)
@@ -152,7 +150,6 @@ async def submit_products_to_shopify(
     document_name: str | None = Form(None),
     shop_domain: str | None = Form(None),
     shop_access_token: str | None = Form(None),
-    enable_ai_enhancements: bool = Form(False),
     offload: bool = Form(False),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
@@ -217,7 +214,6 @@ async def submit_products_to_shopify(
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "attempt": 1,
                     "shop_domain": shop_domain,
-                    "ai_enhancements_enabled": bool(enable_ai_enhancements),
                 },
             )
             ctx.supabase.runs.enqueue_offload_job(
@@ -235,7 +231,6 @@ async def submit_products_to_shopify(
                         "document_name": document_name,
                         "products_json": products_json,
                         "shop_access_token": shop_access_token,
-                        "enable_ai_enhancements": bool(enable_ai_enhancements),
                         "has_shop_access_token": bool(shop_access_token),
                     },
                 },
@@ -268,7 +263,6 @@ async def submit_products_to_shopify(
             document_name=document_name,
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
-            enable_ai_enhancements=enable_ai_enhancements,
         )
         return result
     except RuntimeError as exc:

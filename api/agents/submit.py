@@ -9,7 +9,9 @@ from fastapi import APIRouter, Depends, Form, HTTPException
 from fastapi.responses import JSONResponse
 
 from app_context import AppContext, get_ctx
-from shopify import ShopifyClient  # kept for route-level monkeypatch compatibility in tests
+from shopify import (
+    ShopifyClient,
+)  # kept for route-level monkeypatch compatibility in tests
 from .utils import parse_products_json
 
 router = APIRouter()
@@ -43,8 +45,12 @@ def _save_submit_draft_state(
     submit_run_id: str | None,
     submit_error: str | None,
 ) -> None:
-    from application.use_cases.drafts.get_product_draft import execute as get_draft_execute
-    from application.use_cases.drafts.save_product_draft import execute as save_draft_execute
+    from application.use_cases.drafts.get_product_draft import (
+        execute as get_draft_execute,
+    )
+    from application.use_cases.drafts.save_product_draft import (
+        execute as save_draft_execute,
+    )
 
     existing = get_draft_execute(
         supabase=ctx.supabase,
@@ -75,80 +81,6 @@ def _save_submit_draft_state(
     )
 
 
-async def _run_submit_in_background(
-    *,
-    ctx: AppContext,
-    run_id: str,
-    products_json: str | None,
-    import_mode: str,
-    draft_id: str | None,
-    submitted_id: str | None,
-    document_name: str | None,
-    shop_domain: str | None,
-    shop_access_token: str | None,
-) -> None:
-    from application.use_cases.processing.submit_products import execute as submit_execute
-
-    if draft_id:
-        _save_submit_draft_state(
-            ctx=ctx,
-            draft_id=draft_id,
-            shop_domain=shop_domain,
-            fallback_run_id=run_id,
-            fallback_name=document_name,
-            submit_status="running",
-            submit_run_id=run_id,
-            submit_error=None,
-        )
-    try:
-        result = await submit_execute(
-            supabase=ctx.supabase,
-            shopify=ctx.services.shopify,
-            tracing=ctx.services.tracing,
-            products_json=products_json,
-            import_mode=import_mode,
-            run_id=run_id,
-            draft_id=draft_id,
-            submitted_id=submitted_id,
-            document_name=document_name,
-            shop_domain=shop_domain,
-            shop_access_token=shop_access_token,
-        )
-        submit_succeeded = bool(
-            isinstance(result, dict)
-            and isinstance(result.get("submitted_id"), str)
-            and result.get("submitted_id")
-        )
-        if draft_id:
-            _save_submit_draft_state(
-                ctx=ctx,
-                draft_id=draft_id,
-                shop_domain=shop_domain,
-                fallback_run_id=run_id,
-                fallback_name=document_name,
-                submit_status="succeeded" if submit_succeeded else "failed",
-                submit_run_id=run_id,
-                submit_error=None if submit_succeeded else "Submit did not complete",
-            )
-    except Exception as exc:
-        if draft_id:
-            _save_submit_draft_state(
-                ctx=ctx,
-                draft_id=draft_id,
-                shop_domain=shop_domain,
-                fallback_run_id=run_id,
-                fallback_name=document_name,
-                submit_status="failed",
-                submit_run_id=run_id,
-                submit_error=str(exc),
-            )
-        LOG.exception(
-            "Background submit failed for run_id=%s draft_id=%s",
-            run_id,
-            draft_id,
-        )
-
-
 @router.post("/submit-products", summary="Submit extracted products to Shopify")
 async def submit_products_to_shopify(
     products_json: str | None = Form(None),
@@ -162,8 +94,12 @@ async def submit_products_to_shopify(
     offload: bool = Form(False),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
-    from application.use_cases.processing.submit_products import execute as submit_execute
-    from application.use_cases.drafts.save_product_draft import execute as save_draft_execute
+    from application.use_cases.processing.submit_products import (
+        execute as submit_execute,
+    )
+    from application.use_cases.drafts.save_product_draft import (
+        execute as save_draft_execute,
+    )
     from application.use_cases.submitted.get_submitted_document import (
         execute as get_submitted_execute,
     )

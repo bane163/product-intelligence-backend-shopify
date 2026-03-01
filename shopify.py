@@ -1,14 +1,23 @@
-import json
 import logging
 import os
-from typing import Any, Dict, Optional, List
 import asyncio
 import pathlib
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
 
 import token_store
+from application.domain.shopify_product_normalization import (
+    build_product_payload,
+    build_product_set_identifier,
+    build_product_set_input,
+    build_product_set_jsonl,
+    normalize_product_options,
+    normalize_tags,
+    normalize_variant_ids,
+    normalize_variant_inputs,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -223,67 +232,11 @@ class ShopifyClient:
 
     @staticmethod
     def _normalize_tags(tags: Any, *, allow_empty: bool = False) -> list[str] | None:
-        if tags is None:
-            return None
-        if isinstance(tags, list):
-            normalized = [str(tag).strip() for tag in tags if str(tag).strip()]
-            if normalized:
-                return normalized
-            return [] if allow_empty else None
-        if isinstance(tags, str):
-            normalized = [part.strip() for part in tags.split(",") if part.strip()]
-            if normalized:
-                return normalized
-            return [] if allow_empty else None
-        return None
+        return normalize_tags(tags, allow_empty=allow_empty)
 
     @staticmethod
     def _build_product_payload(product: Dict[str, Any], *, include_id: bool) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {}
-        clearable_string_fields = {"vendor", "body_html", "product_type"}
-        mapping = {
-            "id": "id",
-            "title": "title",
-            "handle": "handle",
-            "body_html": "descriptionHtml",
-            "vendor": "vendor",
-            "product_type": "productType",
-            "status": "status",
-        }
-        for source_key, target_key in mapping.items():
-            if source_key == "id" and not include_id:
-                continue
-            if source_key not in product:
-                continue
-            value = product.get(source_key)
-            if value is None:
-                continue
-            if value == "" and source_key not in clearable_string_fields:
-                continue
-            payload[target_key] = value
-        tags = ShopifyClient._normalize_tags(
-            product.get("tags"),
-            allow_empty="tags" in product,
-        )
-        if tags is not None:
-            payload["tags"] = tags
-        if "productType" not in payload and "product_category" in product:
-            fallback_type = product.get("product_category")
-            if fallback_type is not None:
-                payload["productType"] = fallback_type
-        seo_title = product.get("seo_title")
-        seo_description = product.get("seo_description")
-        if (
-            "seo_title" in product
-            or "seo_description" in product
-            or seo_title not in (None, "")
-            or seo_description not in (None, "")
-        ):
-            payload["seo"] = {
-                "title": str(seo_title or ""),
-                "description": str(seo_description or ""),
-            }
-        return payload
+        return build_product_payload(product, include_id=include_id)
 
     @staticmethod
     def _extract_metafields_inputs(product: Dict[str, Any], owner_id: str) -> list[Dict[str, str]]:
@@ -317,17 +270,36 @@ class ShopifyClient:
         mutation = _load_graphql("metafieldsSet.graphql")
         return await self.graphql(mutation, {"metafields": metafields})
 
-    async def create_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
-        mutation = _load_graphql("productCreate.graphql")
-        product_payload = self._build_product_payload(product, include_id=False)
+    async def _run_product_mutation_from_input(
+        self,
+        *,
+        mutation_file: str,
+        response_key: str,
+        product: Dict[str, Any],
+        include_id: bool,
+    ) -> Dict[str, Any]:
+        mutation = _load_graphql(mutation_file)
+        product_payload = self._build_product_payload(product, include_id=include_id)
         response = await self.graphql(mutation, {"product": product_payload})
-        created = response.get("data", {}).get("productCreate", {}).get("product", {})
-        owner_id = created.get("id") if isinstance(created, dict) else None
+        result_product = (
+            response.get("data", {}).get(response_key, {}).get("product", {})
+            if isinstance(response, dict)
+            else {}
+        )
+        owner_id = result_product.get("id") if isinstance(result_product, dict) else None
         if isinstance(owner_id, str) and owner_id:
             metafields = self._extract_metafields_inputs(product, owner_id)
             if metafields:
                 await self.set_product_metafields(owner_id, metafields)
         return response
+
+    async def create_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._run_product_mutation_from_input(
+            mutation_file="productCreate.graphql",
+            response_key="productCreate",
+            product=product,
+            include_id=False,
+        )
 
     async def get_product(self, gid: str) -> Dict[str, Any]:
         query = _load_graphql("productQuery.graphql")
@@ -358,65 +330,38 @@ class ShopifyClient:
     async def create_product_options(
         self, product_id: str, options: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        if not options:
-            return {"data": {"productOptionsCreate": {"product": None, "userErrors": []}}}
-        mutation = _load_graphql("productOptionsCreate.graphql")
-        normalized_options: List[Dict[str, Any]] = []
-        for option in options:
-            if not isinstance(option, dict):
-                continue
-            name = str(option.get("name") or "").strip()
-            raw_values = option.get("values")
-            values = [str(item).strip() for item in raw_values if str(item).strip()] if isinstance(raw_values, list) else []
-            if not name or not values:
-                continue
-            normalized_options.append({"name": name, "values": [{"name": value} for value in values]})
+        normalized_options = normalize_product_options(options)
         if not normalized_options:
-            return {"data": {"productOptionsCreate": {"product": None, "userErrors": []}}}
-        return await self.graphql(mutation, {"productId": product_id, "options": normalized_options})
+            return {
+                "data": {"productOptionsCreate": {"product": None, "userErrors": []}}
+            }
+        mutation = _load_graphql("productOptionsCreate.graphql")
+        return await self.graphql(
+            mutation, {"productId": product_id, "options": normalized_options}
+        )
 
     async def bulk_create_product_variants(
         self, product_id: str, variants: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        if not variants:
-            return {"data": {"productVariantsBulkCreate": {"productVariants": [], "userErrors": []}}}
-        mutation = _load_graphql("productVariantsBulkCreate.graphql")
-        normalized_variants: List[Dict[str, Any]] = []
-        for item in variants:
-            if not isinstance(item, dict):
-                continue
-            option_values = item.get("option_values")
-            if not isinstance(option_values, list):
-                option_values = []
-            normalized_option_values: List[Dict[str, str]] = []
-            for option in option_values:
-                if not isinstance(option, dict):
-                    continue
-                option_name = str(option.get("option_name") or option.get("optionName") or "").strip()
-                name = str(option.get("name") or option.get("value") or "").strip()
-                if option_name and name:
-                    normalized_option_values.append({"optionName": option_name, "name": name})
-            if not normalized_option_values:
-                continue
-            payload: Dict[str, Any] = {"optionValues": normalized_option_values}
-            sku = str(item.get("sku") or "").strip()
-            if sku:
-                payload["sku"] = sku
-            price = item.get("price")
-            if price not in (None, ""):
-                payload["price"] = str(price)
-            inventory_quantity = item.get("inventory_quantity")
-            if isinstance(inventory_quantity, int):
-                payload["inventoryQuantities"] = [{"availableQuantity": inventory_quantity}]
-            normalized_variants.append(payload)
+        normalized_variants = normalize_variant_inputs(variants)
         if not normalized_variants:
-            return {"data": {"productVariantsBulkCreate": {"productVariants": [], "userErrors": []}}}
-        return await self.graphql(mutation, {"productId": product_id, "variants": normalized_variants})
+            return {
+                "data": {
+                    "productVariantsBulkCreate": {
+                        "productVariants": [],
+                        "userErrors": [],
+                    }
+                }
+            }
+        mutation = _load_graphql("productVariantsBulkCreate.graphql")
+        return await self.graphql(
+            mutation, {"productId": product_id, "variants": normalized_variants}
+        )
 
     async def bulk_delete_product_variants(
         self, product_id: str, variant_ids: List[str]
     ) -> Dict[str, Any]:
-        normalized_ids = [str(item).strip() for item in variant_ids if str(item).strip()]
+        normalized_ids = normalize_variant_ids(variant_ids)
         if not normalized_ids:
             return {"data": {"productVariantsBulkDelete": {"userErrors": []}}}
         mutation = _load_graphql("productVariantsBulkDelete.graphql")
@@ -434,36 +379,38 @@ class ShopifyClient:
         return await self.graphql(mutation, {"product": input_payload})
 
     async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
-        mutation = _load_graphql("productUpdate.graphql")
-        product_payload = self._build_product_payload(product, include_id=True)
-        response = await self.graphql(mutation, {"product": product_payload})
-        updated = response.get("data", {}).get("productUpdate", {}).get("product", {})
-        owner_id = updated.get("id") if isinstance(updated, dict) else None
-        if isinstance(owner_id, str) and owner_id:
-            metafields = self._extract_metafields_inputs(product, owner_id)
-            if metafields:
-                await self.set_product_metafields(owner_id, metafields)
-        return response
+        return await self._run_product_mutation_from_input(
+            mutation_file="productUpdate.graphql",
+            response_key="productUpdate",
+            product=product,
+            include_id=True,
+        )
+
+    async def _find_product_id_by_query(
+        self, *, query_text: str, entity_label: str, value: str
+    ) -> str | None:
+        query = _load_graphql("productByHandle.graphql")
+        resp = await self.graphql(query, {"query": query_text})
+        nodes = resp.get("data", {}).get("products", {}).get("nodes", [])
+        if not nodes:
+            return None
+        if len(nodes) > 1:
+            raise RuntimeError(f"Multiple products matched {entity_label} '{value}'")
+        return nodes[0].get("id")
 
     async def find_product_id_by_handle(self, handle: str) -> str | None:
-        query = _load_graphql("productByHandle.graphql")
-        resp = await self.graphql(query, {"query": f"handle:{handle}"})
-        nodes = resp.get("data", {}).get("products", {}).get("nodes", [])
-        if not nodes:
-            return None
-        if len(nodes) > 1:
-            raise RuntimeError(f"Multiple products matched handle '{handle}'")
-        return nodes[0].get("id")
+        return await self._find_product_id_by_query(
+            query_text=f"handle:{handle}",
+            entity_label="handle",
+            value=handle,
+        )
 
     async def find_product_id_by_sku(self, sku: str) -> str | None:
-        query = _load_graphql("productByHandle.graphql")
-        resp = await self.graphql(query, {"query": f"sku:{sku}"})
-        nodes = resp.get("data", {}).get("products", {}).get("nodes", [])
-        if not nodes:
-            return None
-        if len(nodes) > 1:
-            raise RuntimeError(f"Multiple products matched SKU '{sku}'")
-        return nodes[0].get("id")
+        return await self._find_product_id_by_query(
+            query_text=f"sku:{sku}",
+            entity_label="SKU",
+            value=sku,
+        )
 
     async def delete_product(self, gid: str) -> Dict[str, Any]:
         mutation = _load_graphql("productDelete.graphql")
@@ -673,54 +620,14 @@ class ShopifyClient:
     @staticmethod
     def build_product_set_jsonl(products: List[Dict[str, Any]]) -> str:
         """Build JSONL content for bulkOperationRunMutation with productSet."""
-        lines: List[str] = []
-        for product in products:
-            input_payload = ShopifyClient._build_product_set_input(product)
-            identifier = ShopifyClient._build_product_set_identifier(product)
-            line: Dict[str, Any] = {"input": input_payload}
-            if identifier:
-                line["identifier"] = identifier
-            lines.append(json.dumps(line, ensure_ascii=False))
-        return "\n".join(lines)
+        return build_product_set_jsonl(products)
 
     @staticmethod
     def _build_product_set_input(product: Dict[str, Any]) -> Dict[str, Any]:
         """Build a ProductSetInput dict from internal product format."""
-        payload: Dict[str, Any] = {}
-        mapping = {
-            "title": "title",
-            "handle": "handle",
-            "body_html": "descriptionHtml",
-            "vendor": "vendor",
-            "product_type": "productType",
-            "status": "status",
-        }
-        for source_key, target_key in mapping.items():
-            value = product.get(source_key)
-            if value is not None and value != "":
-                payload[target_key] = value
-        tags = ShopifyClient._normalize_tags(
-            product.get("tags"),
-            allow_empty="tags" in product,
-        )
-        if tags is not None:
-            payload["tags"] = tags
-        seo_title = product.get("seo_title")
-        seo_description = product.get("seo_description")
-        if seo_title or seo_description:
-            payload["seo"] = {
-                "title": str(seo_title or ""),
-                "description": str(seo_description or ""),
-            }
-        return payload
+        return build_product_set_input(product)
 
     @staticmethod
     def _build_product_set_identifier(product: Dict[str, Any]) -> Dict[str, str] | None:
         """Build a ProductSetIdentifiers dict for upsert matching."""
-        gid = product.get("id") or product.get("shopify_gid")
-        if isinstance(gid, str) and gid.strip():
-            return {"id": gid.strip()}
-        handle = product.get("handle")
-        if isinstance(handle, str) and handle.strip():
-            return {"handle": handle.strip()}
-        return None
+        return build_product_set_identifier(product)

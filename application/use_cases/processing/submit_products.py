@@ -1,9 +1,10 @@
 import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import perf_counter
-from typing import Any
+from typing import Any, Callable
 from application.domain.product_intelligence_patching import VARIANT_OPERATIONS_FIELD
 from application.ports.shopify_port import ShopifyPort
 from application.ports.supabase_port import SupabaseNamespacedPort
@@ -17,6 +18,122 @@ from api.agents.utils import normalize_shop_domain, parse_products_json
 from shopify import ShopifyClient
 
 LOG = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _SubmitSourceContext:
+    products: list[dict[str, Any]]
+    source: str
+    tenant: str | None
+    draft_id: str | None
+    document_name: str | None
+    submitted_document: dict[str, Any] | None
+    draft_document: dict[str, Any] | None
+    submitted_source_id: str | None
+    draft_source_id: str | None
+
+
+def _normalize_optional_string(value: Any) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def _extract_document_products(
+    document: dict[str, Any],
+    *,
+    invalid_payload_error: str,
+    fail_submit: Callable[[str], None],
+) -> list[dict[str, Any]]:
+    stored_products = document.get("products")
+    if not isinstance(stored_products, list):
+        fail_submit(invalid_payload_error)
+    return [item for item in stored_products if isinstance(item, dict)]
+
+
+def _resolve_submit_source(
+    *,
+    supabase: SupabaseNamespacedPort,
+    products_json: str | None,
+    submitted_id: str | None,
+    draft_id: str | None,
+    document_name: str | None,
+    shop_domain: str | None,
+    fail_submit: Callable[[str], None],
+) -> _SubmitSourceContext:
+    tenant = normalize_shop_domain(shop_domain)
+    submitted_source_id = _normalize_optional_string(submitted_id)
+    draft_source_id = _normalize_optional_string(draft_id)
+    resolved_draft_id = draft_source_id
+    resolved_document_name = _normalize_optional_string(document_name)
+    submitted_document: dict[str, Any] | None = None
+    draft_document: dict[str, Any] | None = None
+    products: list[dict[str, Any]] = []
+    source = "products_json"
+
+    if submitted_source_id:
+        source = "submitted_document"
+        submitted_document = supabase.submitted.get_submitted_document(
+            submitted_source_id,
+            shop_domain=tenant,
+        )
+        if not isinstance(submitted_document, dict):
+            fail_submit("Submitted document not found")
+        products = _extract_document_products(
+            submitted_document,
+            invalid_payload_error="Submitted document has invalid products payload",
+            fail_submit=fail_submit,
+        )
+        if not resolved_draft_id:
+            resolved_draft_id = _normalize_optional_string(
+                submitted_document.get("draft_id")
+            )
+        if not resolved_document_name:
+            resolved_document_name = _normalize_optional_string(
+                submitted_document.get("name")
+            )
+        if not tenant:
+            tenant = normalize_shop_domain(submitted_document.get("shop_domain"))
+    elif draft_source_id:
+        source = "draft"
+        draft_document = supabase.drafts.get_product_draft(
+            draft_source_id,
+            shop_domain=tenant,
+        )
+        if not isinstance(draft_document, dict):
+            fail_submit("Draft not found")
+        products = _extract_document_products(
+            draft_document,
+            invalid_payload_error="Draft has invalid products payload",
+            fail_submit=fail_submit,
+        )
+        resolved_draft_id = draft_source_id
+        if not resolved_document_name:
+            resolved_document_name = _normalize_optional_string(
+                draft_document.get("draft_name")
+                or draft_document.get("first_product_title")
+            )
+        if not tenant:
+            tenant = normalize_shop_domain(draft_document.get("shop_domain"))
+    elif isinstance(products_json, str) and products_json.strip():
+        products = parse_products_json(products_json)
+
+    if not products:
+        fail_submit("No products provided")
+
+    return _SubmitSourceContext(
+        products=products,
+        source=source,
+        tenant=tenant,
+        draft_id=resolved_draft_id,
+        document_name=resolved_document_name,
+        submitted_document=submitted_document,
+        draft_document=draft_document,
+        submitted_source_id=submitted_source_id,
+        draft_source_id=draft_source_id,
+    )
 
 
 def _strip_internal_submit_fields(product: dict[str, Any]) -> dict[str, Any]:
@@ -104,6 +221,45 @@ async def _download_bulk_results(
     return results
 
 
+def _build_success_result_row(
+    *,
+    index: int,
+    title: str,
+    shopify_product_id: Any | None = None,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "index": index,
+        "title": title,
+        "status": "success",
+        "mode": "productSet",
+        "errors": [],
+    }
+    if shopify_product_id is not None:
+        row["shopify_product_id"] = shopify_product_id
+    return row
+
+
+def _build_failed_result_row(
+    *,
+    index: int,
+    title: str,
+    message: str | None = None,
+    errors: list[Any] | None = None,
+    shopify_product_id: Any | None = None,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "index": index,
+        "title": title,
+        "status": "failed",
+        "errors": errors
+        if isinstance(errors, list) and errors
+        else [{"field": None, "message": message or "Unknown submit error"}],
+    }
+    if shopify_product_id is not None:
+        row["shopify_product_id"] = shopify_product_id
+    return row
+
+
 async def execute(
     supabase: SupabaseNamespacedPort,
     shopify: ShopifyPort,
@@ -167,67 +323,21 @@ async def execute(
             pass
         raise RuntimeError(message)
 
-    submitted_document: dict[str, Any] | None = None
-    draft_document: dict[str, Any] | None = None
-    products: list[dict[str, Any]] = []
-    tenant = normalize_shop_domain(shop_domain)
-    submitted_source_id = (
-        submitted_id.strip()
-        if isinstance(submitted_id, str) and submitted_id.strip()
-        else None
+    source_context = _resolve_submit_source(
+        supabase=supabase,
+        products_json=products_json,
+        submitted_id=submitted_id,
+        draft_id=draft_id,
+        document_name=document_name,
+        shop_domain=shop_domain,
+        fail_submit=fail_submit,
     )
-    draft_source_id = (
-        draft_id.strip() if isinstance(draft_id, str) and draft_id.strip() else None
-    )
-    if submitted_source_id:
-        submitted_document = supabase.submitted.get_submitted_document(
-            submitted_source_id,
-            shop_domain=tenant,
-        )
-        if not isinstance(submitted_document, dict):
-            fail_submit("Submitted document not found")
-        stored_products = submitted_document.get("products")
-        if not isinstance(stored_products, list):
-            fail_submit("Submitted document has invalid products payload")
-        products = [item for item in stored_products if isinstance(item, dict)]
-        if not draft_id:
-            inferred_draft_id = submitted_document.get("draft_id")
-            if isinstance(inferred_draft_id, str) and inferred_draft_id.strip():
-                draft_id = inferred_draft_id.strip()
-        if not document_name:
-            inferred_name = submitted_document.get("name")
-            if isinstance(inferred_name, str) and inferred_name.strip():
-                document_name = inferred_name.strip()
-        if not tenant:
-            inferred_tenant = normalize_shop_domain(submitted_document.get("shop_domain"))
-            if inferred_tenant:
-                tenant = inferred_tenant
-    elif draft_source_id:
-        draft_document = supabase.drafts.get_product_draft(
-            draft_source_id,
-            shop_domain=tenant,
-        )
-        if not isinstance(draft_document, dict):
-            fail_submit("Draft not found")
-        stored_products = draft_document.get("products")
-        if not isinstance(stored_products, list):
-            fail_submit("Draft has invalid products payload")
-        products = [item for item in stored_products if isinstance(item, dict)]
-        draft_id = draft_source_id
-        if not document_name:
-            inferred_name = draft_document.get("draft_name") or draft_document.get(
-                "first_product_title"
-            )
-            if isinstance(inferred_name, str) and inferred_name.strip():
-                document_name = inferred_name.strip()
-        if not tenant:
-            inferred_tenant = normalize_shop_domain(draft_document.get("shop_domain"))
-            if inferred_tenant:
-                tenant = inferred_tenant
-    elif isinstance(products_json, str) and products_json.strip():
-        products = parse_products_json(products_json)
-    if not products:
-        fail_submit("No products provided")
+    products = source_context.products
+    tenant = source_context.tenant
+    draft_id = source_context.draft_id
+    document_name = source_context.document_name
+    submitted_source_id = source_context.submitted_source_id
+    draft_source_id = source_context.draft_source_id
 
     submit_client = shopify
     # Use request-scoped credentials when provided, and also when tenant can be
@@ -240,13 +350,7 @@ async def execute(
 
     variant_operations_by_index = _collect_variant_operations_by_index(products)
     submit_products = [_strip_internal_submit_fields(item) for item in products]
-    source = (
-        "submitted_document"
-        if submitted_source_id
-        else "draft"
-        if draft_source_id
-        else "products_json"
-    )
+    source = source_context.source
     client_type = type(submit_client).__name__
     client_shop = tenant
     if not client_shop:
@@ -281,15 +385,13 @@ async def execute(
     )
 
     results: list[dict[str, Any]] = []
-    success_count = 0
-
     # ── Bulk operation flow via productSet ──────────────────────────────
     try:
         emit_and_persist(
             phase="submit_bulk_build",
             message=f"Building JSONL for {len(submit_products)} products",
         )
-        jsonl_data = ShopifyClient.build_product_set_jsonl(submit_products)
+        jsonl_data = submit_client.build_product_set_jsonl(submit_products)
 
         emit_and_persist(
             phase="submit_bulk_upload",
@@ -386,15 +488,15 @@ async def execute(
                     user_errors = product_set.get("userErrors", [])
                     product_data = product_set.get("product", {})
                     if user_errors:
-                        results.append({
-                            "index": index,
-                            "title": title,
-                            "status": "failed",
-                            "shopify_product_id": product_data.get("id"),
-                            "errors": user_errors,
-                        })
+                        results.append(
+                            _build_failed_result_row(
+                                index=index,
+                                title=title,
+                                errors=user_errors,
+                                shopify_product_id=product_data.get("id"),
+                            )
+                        )
                     else:
-                        success_count += 1
                         created_id = product_data.get("id", "")
                         # Apply variant operations if any
                         variant_ops = variant_operations_by_index.get(index, [])
@@ -412,41 +514,40 @@ async def execute(
                                     level="warning",
                                     error=str(var_exc),
                                 )
-                        results.append({
-                            "index": index,
-                            "title": product_data.get("title", title),
-                            "status": "success",
-                            "mode": "productSet",
-                            "shopify_product_id": created_id,
-                            "errors": [],
-                        })
+                        results.append(
+                            _build_success_result_row(
+                                index=index,
+                                title=product_data.get("title", title),
+                                shopify_product_id=created_id,
+                            )
+                        )
                 else:
-                    results.append({
-                        "index": index,
-                        "title": title,
-                        "status": "failed",
-                        "errors": [{"field": None, "message": "No result from bulk operation"}],
-                    })
+                    results.append(
+                        _build_failed_result_row(
+                            index=index,
+                            title=title,
+                            message="No result from bulk operation",
+                        )
+                    )
         elif bulk_status == "COMPLETED":
             # Completed but no result URL — assume all succeeded
             for index, product in enumerate(submit_products):
-                success_count += 1
-                results.append({
-                    "index": index,
-                    "title": product.get("title", f"Product {index}"),
-                    "status": "success",
-                    "mode": "productSet",
-                    "errors": [],
-                })
+                results.append(
+                    _build_success_result_row(
+                        index=index,
+                        title=product.get("title", f"Product {index}"),
+                    )
+                )
         else:
             error_code = final_status.get("errorCode", "UNKNOWN")
             for index, product in enumerate(submit_products):
-                results.append({
-                    "index": index,
-                    "title": product.get("title", f"Product {index}"),
-                    "status": "failed",
-                    "errors": [{"field": None, "message": f"Bulk operation {bulk_status}: {error_code}"}],
-                })
+                results.append(
+                    _build_failed_result_row(
+                        index=index,
+                        title=product.get("title", f"Product {index}"),
+                        message=f"Bulk operation {bulk_status}: {error_code}",
+                    )
+                )
     except Exception as exc:
         LOG.exception(
             "submit_bulk_exception run_id=%s draft_id=%s tenant=%s",
@@ -461,12 +562,13 @@ async def execute(
             error=str(exc),
         )
         for index, product in enumerate(submit_products):
-            results.append({
-                "index": index,
-                "title": product.get("title", f"Product {index}"),
-                "status": "failed",
-                "errors": [{"field": None, "message": str(exc)}],
-            })
+            results.append(
+                _build_failed_result_row(
+                    index=index,
+                    title=product.get("title", f"Product {index}"),
+                    message=str(exc),
+                )
+            )
 
     successful_indexes: list[int] = []
     seen_indexes: set[int] = set()

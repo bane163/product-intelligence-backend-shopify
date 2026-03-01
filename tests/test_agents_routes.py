@@ -936,6 +936,58 @@ async def test_submit_products_auto_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_submit_products_uses_shopify_port_jsonl_builder(monkeypatch):
+    from infrastructure.adapters.shopify_adapter import ShopifyAdapter
+    import shopify as shopify_module
+
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {"id": "gid://shopify/Product/250", "title": "Demo"},
+                "userErrors": [],
+            }
+        }
+    }])
+
+    captured: dict[str, Any] = {"called": False, "count": 0}
+
+    def fake_build_product_set_jsonl(products: list[dict[str, Any]]) -> str:
+        captured["called"] = True
+        captured["count"] = len(products)
+        return '{"input":{"title":"Demo"}}'
+
+    def fail_concrete_client_jsonl_builder(products: list[dict[str, Any]]) -> str:
+        _ = products
+        raise AssertionError("submit should use the ShopifyPort JSONL builder")
+
+    monkeypatch.setattr(
+        ShopifyAdapter,
+        "build_product_set_jsonl",
+        staticmethod(fake_build_product_set_jsonl),
+    )
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "build_product_set_jsonl",
+        staticmethod(fail_concrete_client_jsonl_builder),
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "products_json": json.dumps([{"title": "Demo"}]),
+                "import_mode": "auto",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success_count"] == 1
+        assert captured["called"] is True
+        assert captured["count"] == 1
+
+
+@pytest.mark.asyncio
 async def test_submit_products_partial_success_creates_submitted_document(monkeypatch):
     _patch_bulk_submit(monkeypatch, [
         {

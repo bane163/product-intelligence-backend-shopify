@@ -56,3 +56,21 @@ Status legend: `todo` | `in_progress` | `done`
 - **Area:** Backend
 - **Likely files:** `application/use_cases/**`, `application/services/**`, shared utility extraction targets
 - **Details:** Extracted `resolve_shopify_client` to shared `api/agents/utils.py`, removed duplicate from submit.py and intelligence.py. Removed dead `_process_shopify_submit` from offload worker + 2 associated tests.
+
+## 11) Disable Submit to Shopify for already submitted documents
+- **Status:** `todo`
+- **Area:** Frontend
+- **Likely files:** `extractor-v3/app/features/imports/hooks/useImportWorkflow.ts`, `extractor-v3/app/routes/app.excel-upload.tsx`, `extractor-v3/app/components/ExcelSteps/Confirmation.tsx`
+- **Details:** Prevent submit button from rendering/enabling when viewing a read-only submitted document to avoid duplicate submissions.
+
+## 12) Navigate to submitted tab after submit success
+- **Status:** `todo`
+- **Area:** Frontend
+- **Likely files:** `extractor-v3/app/features/imports/hooks/useImportWorkflow.ts`, `extractor-v3/app/routes/app._index.tsx`
+- **Details:** Ensure successful submission navigates user to `/app/documents?tab=submitted` (already triggered?) and update navigation logic if needed for clarity.
+
+## 13) Redesign Step 4 (Review source) screen
+- **Status:** `todo`
+- **Area:** Frontend
+- **Likely files:** `extractor-v3/app/components/ExcelSteps/Confirmation.tsx`, `extractor-v3/app/components/ExcelSteps/ExtractedProductsGrid.tsx`
+- **Details:** Reduce the number of rectangle borders, simplify card styling, and align the layout with the desired visual direction for the final review step. Ensure accessibility and responsive spacing.

@@ -73,6 +73,5 @@ class ShopifyAdapter:
             operation_id, poll_interval=poll_interval, timeout=timeout
         )
 
-    @staticmethod
-    def build_product_set_jsonl(products: List[Dict[str, Any]]) -> str:
+    def build_product_set_jsonl(self, products: List[Dict[str, Any]]) -> str:
         return _shopify.ShopifyClient.build_product_set_jsonl(products)

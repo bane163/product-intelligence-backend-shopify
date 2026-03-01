@@ -36,6 +36,25 @@ def _strip_markdown_json_fence(text: str) -> str:
     return stripped
 
 
+def _is_openai_file_search_enabled(
+    *,
+    model_provider: str | None,
+    model_env: dict[str, str] | None,
+) -> bool:
+    base_url = str((model_env or {}).get("OLLAMA_CLOUD_URL") or "").strip().lower()
+    if base_url:
+        return "api.openai.com" in base_url
+
+    provider = (model_provider or "").strip().lower()
+    if provider:
+        if provider.startswith("openai"):
+            return True
+        if "ollama" in provider:
+            return False
+
+    return False
+
+
 class LLMService(LLMServiceInterface):
     def __init__(
         self,
@@ -52,6 +71,7 @@ class LLMService(LLMServiceInterface):
         collabora_base_url: Optional[str] = None,
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
+        model_provider: str | None = None,
         *,
         input_name: Optional[str] = None,
         input_content_type: Optional[str] = None,
@@ -83,6 +103,10 @@ class LLMService(LLMServiceInterface):
         requires_visual_context = not is_csv
         normalized_extraction_mode = extraction_mode.strip().lower() or "per_sheet"
         max_sheets = 1 if normalized_extraction_mode == "first_sheet" else 20
+        use_openai_file_search = _is_openai_file_search_enabled(
+            model_provider=model_provider,
+            model_env=model_env,
+        )
 
         def _trace(
             phase: str,
@@ -195,19 +219,29 @@ class LLMService(LLMServiceInterface):
 
         @executor(id="handle_products_response")
         async def handle_products_response(
-            response: AgentRunResponse, ctx: WorkflowContext[ProductsList, ProductsList]
+            response: Any, ctx: WorkflowContext[ProductsList, ProductsList]
         ) -> None:
-            if isinstance(response.value, ProductsList):
-                products_list = response.value
-            elif response.value is not None:
-                products_list = ProductsList.model_validate(response.value)
+            response_value = (
+                response.get("value")
+                if isinstance(response, dict)
+                else getattr(response, "value", None)
+            )
+            response_text = (
+                response.get("text", "")
+                if isinstance(response, dict)
+                else getattr(response, "text", "")
+            ) or ""
+
+            if isinstance(response_value, ProductsList):
+                products_list = response_value
+            elif response_value is not None:
+                products_list = ProductsList.model_validate(response_value)
             else:
-                raw_text = response.text or ""
                 try:
-                    products_list = ProductsList.model_validate_json(raw_text)
+                    products_list = ProductsList.model_validate_json(response_text)
                 except ValidationError:
                     products_list = ProductsList.model_validate_json(
-                        _strip_markdown_json_fence(raw_text)
+                        _strip_markdown_json_fence(response_text)
                     )
 
             _trace(
@@ -268,12 +302,21 @@ class LLMService(LLMServiceInterface):
             id="agent_collector",
             agent_prompt=agent_prompt,
             model_env=model_env,
-            allow_without_image=is_csv,
+            allow_without_image=is_csv or use_openai_file_search,
             trace_event=trace_event,
+            use_file_search=use_openai_file_search,
+            source_filename=effective_input_name,
+            source_content_type=input_content_type,
+            document_kind=document_format.kind,
+            collabora_base_url=collabora_base_url
+            or os.getenv("COLLABORA_URL", "http://localhost:8080"),
+            convert_document_to_pdf=self.collabora.convert_document_to_pdf_collabora,
         )
 
         builder = WorkflowBuilder().set_start_executor(file_executor)
         builder.add_edge(file_executor, extract_executor)
+        if use_openai_file_search:
+            builder.add_edge(file_executor, agent_collector)
         if requires_visual_context:
             builder.add_edge(file_executor, document_to_png_executor)
             builder.add_edge(document_to_png_executor, agent_collector)
@@ -289,6 +332,7 @@ class LLMService(LLMServiceInterface):
         collabora_base_url: Optional[str] = None,
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
+        model_provider: str | None = None,
         *,
         input_name: Optional[str] = None,
         input_content_type: Optional[str] = None,
@@ -303,6 +347,7 @@ class LLMService(LLMServiceInterface):
             collabora_base_url=collabora_base_url,
             agent_prompt=agent_prompt,
             model_env=model_env,
+            model_provider=model_provider,
             input_name=input_name,
             input_content_type=input_content_type,
             extraction_mode=extraction_mode,

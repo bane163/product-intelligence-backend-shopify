@@ -1,10 +1,13 @@
 import base64
 import json
 import os
-from typing import Any, Callable, Dict
+import uuid
+from types import SimpleNamespace
+from typing import Any, Awaitable, Callable, Dict
 
 from agent_framework import AgentRunResponse, ChatMessage, TextContent, DataContent
 from agent_framework.openai import OpenAIChatClient
+from openai import AsyncOpenAI
 
 # Use the ProductsList model as a structured response format so the agent
 # returns a JSON object with a 'products' array matching ProductInput.
@@ -107,6 +110,247 @@ def _create_chat_client(model_env: Dict[str, str] | None) -> OpenAIChatClient:
     model_id = env.get("OLLAMA_MODEL_ID", "deepseek-r1:8b")
 
     return OpenAIChatClient(api_key=api_key, base_url=base_url, model_id=model_id)
+
+
+def _extract_openai_response_text(response: Any) -> str:
+    output = getattr(response, "output", None)
+    if not isinstance(output, list):
+        return ""
+
+    chunks: list[str] = []
+    for item in output:
+        item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+        if item_type != "message":
+            continue
+        content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+            if part_type != "output_text":
+                continue
+            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if isinstance(text, str) and text.strip():
+                chunks.append(text)
+    return "\n".join(chunks).strip()
+
+
+def _enforce_openai_strict_object_schema(node: Any) -> Any:
+    if isinstance(node, dict):
+        normalized = {
+            key: _enforce_openai_strict_object_schema(value)
+            for key, value in node.items()
+        }
+        if normalized.get("type") == "object":
+            normalized["additionalProperties"] = False
+            properties = normalized.get("properties")
+            if isinstance(properties, dict):
+                normalized["required"] = list(properties.keys())
+            else:
+                normalized["required"] = []
+        return normalized
+    if isinstance(node, list):
+        return [_enforce_openai_strict_object_schema(item) for item in node]
+    return node
+
+
+def _openai_strict_products_list_schema() -> dict[str, Any]:
+    schema = _enforce_openai_strict_object_schema(ProductsList.model_json_schema())
+    if not isinstance(schema, dict):
+        raise RuntimeError("ProductsList JSON schema must be an object")
+    return schema
+
+
+async def run_agent_on_source_with_file_search(
+    *,
+    source_bytes: bytes,
+    source_filename: str,
+    source_content_type: str,
+    document_kind: str,
+    agent_prompt: str = "Please analyze the document and extract products for Shopify import.",
+    model_env: Dict[str, str] | None = None,
+    trace_event: TraceFn = None,
+    convert_document_to_pdf: Callable[..., Awaitable[bytes]] | None = None,
+    collabora_base_url: str | None = None,
+) -> AgentRunResponse:
+    env = _resolve_model_env(model_env)
+    api_key = env.get("OLLAMA_API_KEY")
+    if not api_key:
+        raise RuntimeError("OLLAMA_API_KEY required to run OpenAI file search")
+
+    model_id = env.get("OLLAMA_MODEL_ID")
+    if not model_id:
+        raise RuntimeError("OLLAMA_MODEL_ID required to run OpenAI file search")
+
+    base_url = env.get("OLLAMA_CLOUD_URL")
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
+
+    upload_bytes = source_bytes
+    upload_content_type = source_content_type or "application/octet-stream"
+    upload_filename = os.path.basename(source_filename or "document.bin") or "document.bin"
+    normalized_kind = (document_kind or "").strip().lower()
+    collabora_runtime_url = collabora_base_url or os.getenv("COLLABORA_URL", "http://localhost:8080")
+
+    if normalized_kind in {"spreadsheet", "spreadsheet_legacy"}:
+        if convert_document_to_pdf is None:
+            raise RuntimeError(
+                "Spreadsheet file search requires convert_document_to_pdf callback"
+            )
+        _trace(
+            trace_event,
+            phase="file_search_preprocess_start",
+            message="Converting spreadsheet to PDF before indexing",
+            payload_preview={"filename": upload_filename, "document_kind": normalized_kind},
+        )
+        upload_bytes = await convert_document_to_pdf(
+            source_bytes,
+            filename=source_filename or "document.xlsx",
+            content_type=upload_content_type,
+            collabora_base_url=collabora_runtime_url,
+        )
+        base_name, _ = os.path.splitext(upload_filename)
+        upload_filename = f"{base_name or 'document'}.pdf"
+        upload_content_type = "application/pdf"
+        _trace(
+            trace_event,
+            phase="file_search_preprocess_done",
+            message="Spreadsheet converted to PDF for indexing",
+            payload_preview={"filename": upload_filename, "bytes": len(upload_bytes)},
+        )
+
+    uploaded_file_id: str | None = None
+    vector_store_id: str | None = None
+    try:
+        _trace(
+            trace_event,
+            phase="file_search_upload_start",
+            message="Uploading source file for vector indexing",
+            payload_preview={"filename": upload_filename, "bytes": len(upload_bytes)},
+        )
+        uploaded_file = await client.files.create(
+            file=(upload_filename, upload_bytes),
+            purpose="user_data",
+        )
+        uploaded_file_id = getattr(uploaded_file, "id", None)
+        if not uploaded_file_id:
+            raise RuntimeError("OpenAI file upload did not return file id")
+
+        vector_store = await client.vector_stores.create(
+            name=f"document-search-{uuid.uuid4().hex[:8]}",
+            expires_after={"anchor": "last_active_at", "days": 1},
+        )
+        vector_store_id = getattr(vector_store, "id", None)
+        if not vector_store_id:
+            raise RuntimeError("OpenAI vector store create did not return id")
+
+        _trace(
+            trace_event,
+            phase="file_search_index_start",
+            message="Indexing uploaded file in vector store",
+            payload_preview={"vector_store_id": vector_store_id, "file_id": uploaded_file_id},
+        )
+        index_result = await client.vector_stores.files.create_and_poll(
+            vector_store_id=vector_store_id,
+            file_id=uploaded_file_id,
+        )
+        index_error = getattr(index_result, "last_error", None)
+        index_status = getattr(index_result, "status", None)
+        if index_error is not None:
+            error_message = getattr(index_error, "message", None) or str(index_error)
+            raise RuntimeError(f"Vector store indexing failed: {error_message}")
+        if index_status and index_status != "completed":
+            raise RuntimeError(f"Vector store indexing incomplete with status={index_status}")
+
+        instructions = (
+            "You are a Shopify catalog extraction assistant. "
+            "Use the file_search tool to inspect the uploaded document and return only valid JSON "
+            'matching this schema: {"products": [ ... ]}.'
+        )
+        prompt = (
+            f"User prompt: {agent_prompt}\n\n"
+            "Use file_search on the indexed document to extract products for Shopify import. "
+            'Respond with JSON only and no markdown in the exact shape {"products":[...]}.\n'
+        )
+
+        _trace(
+            trace_event,
+            phase="file_search_query_start",
+            message="Running OpenAI response with file_search tool",
+            payload_preview={"vector_store_id": vector_store_id},
+        )
+        response = await client.responses.create(
+            model=model_id,
+            instructions=instructions,
+            input=prompt,
+            tools=[{"type": "file_search", "vector_store_ids": [vector_store_id]}],
+            tool_choice="required",
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "products_list",
+                    "schema": _openai_strict_products_list_schema(),
+                    "strict": True,
+                }
+            },
+        )
+        response_text = _extract_openai_response_text(response)
+        if not response_text:
+            raise RuntimeError("OpenAI file_search response contained no output text")
+
+        try:
+            parsed = ProductsList.model_validate_json(response_text)
+        except Exception:
+            parsed = ProductsList.model_validate_json(_strip_markdown_json_fence(response_text))
+
+        _trace(
+            trace_event,
+            phase="file_search_query_done",
+            message="Received structured extraction from file_search",
+            payload_preview={"products": len(parsed.products)},
+        )
+        return SimpleNamespace(
+            value=parsed,
+            text=response_text,
+            usage=getattr(response, "usage", None),
+        )
+    finally:
+        if vector_store_id:
+            try:
+                await client.vector_stores.delete(vector_store_id=vector_store_id)
+                _trace(
+                    trace_event,
+                    phase="file_search_cleanup_vector_store",
+                    message="Deleted temporary vector store",
+                    payload_preview={"vector_store_id": vector_store_id},
+                )
+            except Exception as exc:
+                _trace(
+                    trace_event,
+                    phase="file_search_cleanup_vector_store_error",
+                    message="Failed deleting temporary vector store",
+                    level="warning",
+                    error=str(exc),
+                    payload_preview={"vector_store_id": vector_store_id},
+                )
+
+        if uploaded_file_id:
+            try:
+                await client.files.delete(file_id=uploaded_file_id)
+                _trace(
+                    trace_event,
+                    phase="file_search_cleanup_file",
+                    message="Deleted uploaded file",
+                    payload_preview={"file_id": uploaded_file_id},
+                )
+            except Exception as exc:
+                _trace(
+                    trace_event,
+                    phase="file_search_cleanup_file_error",
+                    message="Failed deleting uploaded file",
+                    level="warning",
+                    error=str(exc),
+                    payload_preview={"file_id": uploaded_file_id},
+                )
 
 
 async def run_agent_on_inputs(

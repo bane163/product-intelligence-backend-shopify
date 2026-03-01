@@ -95,6 +95,7 @@ async def execute(
         )
 
         model_env = None
+        model_provider = None
         if shop_domain:
             active_model = supabase.llm_configs.get_active_llm_model_config(shop_domain)
             if active_model:
@@ -103,6 +104,11 @@ async def execute(
                     "OLLAMA_MODEL_ID": str(active_model.get("model_id") or ""),
                     "OLLAMA_API_KEY": str(active_model.get("api_key") or ""),
                 }
+                model_provider = (
+                    str(active_model.get("provider"))
+                    if active_model.get("provider") is not None
+                    else None
+                )
                 supabase.runs.create_or_update_run(
                     run_id,
                     {
@@ -158,6 +164,7 @@ async def execute(
             collabora_base_url=collabora_url,
             agent_prompt=DEFAULT_IMPORT_AGENT_PROMPT,
             model_env=model_env,
+            model_provider=model_provider,
             input_name=input_name,
             input_content_type=input_content_type,
             extraction_mode=extraction_mode,

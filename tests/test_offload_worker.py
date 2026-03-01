@@ -320,6 +320,82 @@ async def test_run_once_marks_shopify_submit_job_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_once_shopify_submit_failed_uses_count_based_error(monkeypatch):
+    import application.services.offload_worker as offload_worker
+
+    ctx = _build_ctx()
+    run_id = "run-submit-count-failed"
+    draft_id = "draft-submit-count-failed"
+    job_id = "job-submit-count-failed"
+    ctx.supabase.runs.create_or_update_run(
+        run_id,
+        {
+            "status": "queued",
+            "source": "shopify_submit",
+        },
+    )
+    ctx.supabase.drafts.save_product_draft(
+        draft_id=draft_id,
+        run_id=run_id,
+        import_mode="auto",
+        draft_name="Queued Submit",
+        input_file_id=None,
+        input_filename=None,
+        extraction_status="succeeded",
+        extraction_run_id="run-extract",
+        extraction_error=None,
+        submit_status="queued",
+        submit_run_id=run_id,
+        submit_error=None,
+        products=[{"title": "Queued Product 1"}, {"title": "Queued Product 2"}],
+    )
+    ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "shopify_submit",
+            "status": "queued",
+            "run_id": run_id,
+            "draft_id": draft_id,
+            "payload": {"import_mode": "auto"},
+        },
+    )
+
+    async def fake_submit_execute(**kwargs):
+        _ = kwargs
+        return {
+            "submitted_id": None,
+            "success_count": 0,
+            "failed_count": 2,
+            "results": [{"status": "failed", "errors": []}],
+            "error": None,
+        }
+
+    monkeypatch.setattr(
+        offload_worker,
+        "submit_execute",
+        fake_submit_execute,
+    )
+
+    worker = offload_worker.OffloadWorker(
+        ctx=ctx, queue_name="offload", worker_id="worker-1"
+    )
+    processed = await worker.run_once()
+    assert processed is True
+
+    job = ctx.supabase.runs.get_offload_job(job_id)
+    assert job is not None
+    assert job["status"] == "failed"
+    assert "success_count=0" in str(job.get("error", "")).lower()
+    assert "failed_count=2" in str(job.get("error", "")).lower()
+
+    draft = ctx.supabase.drafts.get_product_draft(draft_id)
+    assert draft is not None
+    assert draft["submit_status"] == "failed"
+    assert "success_count=0" in str(draft.get("submit_error", "")).lower()
+
+
+@pytest.mark.asyncio
 async def test_run_once_fails_fast_when_draft_lifecycle_persistence_fails(monkeypatch):
     import application.services.offload_worker as offload_worker
 

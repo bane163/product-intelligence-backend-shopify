@@ -1,3 +1,5 @@
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from time import perf_counter
@@ -12,6 +14,9 @@ from application.use_cases.intelligence_apply_suggestion import (
 )
 
 from api.agents.utils import normalize_shop_domain, parse_products_json
+from shopify import ShopifyClient
+
+LOG = logging.getLogger(__name__)
 
 
 def _strip_internal_submit_fields(product: dict[str, Any]) -> dict[str, Any]:
@@ -76,6 +81,29 @@ async def _apply_variant_operations_for_product(
                 )
 
 
+async def _download_bulk_results(
+    shopify: ShopifyPort, result_url: str
+) -> list[dict[str, Any]]:
+    """Download and parse the JSONL results from a completed bulk operation."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.get(result_url)
+        resp.raise_for_status()
+        text = resp.text.strip()
+    if not text:
+        return []
+    results: list[dict[str, Any]] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if line:
+            try:
+                results.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return results
+
+
 async def execute(
     supabase: SupabaseNamespacedPort,
     shopify: ShopifyPort,
@@ -122,8 +150,6 @@ async def execute(
             "shop_domain": shop_domain,
         },
     )
-    submit_client = shopify
-
     def fail_submit(message: str) -> None:
         emit_and_persist(
             phase="workflow_error",
@@ -172,6 +198,10 @@ async def execute(
             inferred_name = submitted_document.get("name")
             if isinstance(inferred_name, str) and inferred_name.strip():
                 document_name = inferred_name.strip()
+        if not tenant:
+            inferred_tenant = normalize_shop_domain(submitted_document.get("shop_domain"))
+            if inferred_tenant:
+                tenant = inferred_tenant
     elif draft_source_id:
         draft_document = supabase.drafts.get_product_draft(
             draft_source_id,
@@ -190,13 +220,38 @@ async def execute(
             )
             if isinstance(inferred_name, str) and inferred_name.strip():
                 document_name = inferred_name.strip()
+        if not tenant:
+            inferred_tenant = normalize_shop_domain(draft_document.get("shop_domain"))
+            if inferred_tenant:
+                tenant = inferred_tenant
     elif isinstance(products_json, str) and products_json.strip():
         products = parse_products_json(products_json)
     if not products:
         fail_submit("No products provided")
 
+    submit_client = shopify
+    # Use request-scoped credentials when provided, and also when tenant can be
+    # inferred from the source draft/submitted document.
+    if tenant or (isinstance(shop_access_token, str) and shop_access_token.strip()):
+        submit_client = ShopifyClient(
+            shop=tenant,
+            token=shop_access_token.strip() if isinstance(shop_access_token, str) else None,
+        )
+
     variant_operations_by_index = _collect_variant_operations_by_index(products)
     submit_products = [_strip_internal_submit_fields(item) for item in products]
+    source = (
+        "submitted_document"
+        if submitted_source_id
+        else "draft"
+        if draft_source_id
+        else "products_json"
+    )
+    client_type = type(submit_client).__name__
+    client_shop = tenant
+    if not client_shop:
+        inner_client = getattr(submit_client, "_client", None)
+        client_shop = getattr(inner_client, "shop", None)
     emit_and_persist(
         phase="submit_products_loaded",
         message="Loaded products for submit",
@@ -208,186 +263,258 @@ async def execute(
             "variant_operations_count": sum(
                 len(items) for items in variant_operations_by_index.values()
             ),
-            "source": (
-                "submitted_document"
-                if submitted_source_id
-                else "draft"
-                if draft_source_id
-                else "products_json"
-            ),
+            "source": source,
         },
     )
-
-    from application.domain.product import extract_first_sku
+    LOG.info(
+        "submit_start run_id=%s draft_id=%s submitted_id=%s tenant=%s source=%s "
+        "products=%s has_token=%s client=%s client_shop=%s",
+        current_run_id,
+        draft_id,
+        submitted_id,
+        tenant,
+        source,
+        len(submit_products),
+        bool(shop_access_token),
+        client_type,
+        client_shop,
+    )
 
     results: list[dict[str, Any]] = []
     success_count = 0
-    handle_lookup_cache: dict[str, str | None] = {}
-    sku_lookup_cache: dict[str, str | None] = {}
-    for index, product in enumerate(submit_products):
-        item_started_at = perf_counter()
-        title = product.get("title")
-        if not title:
-            emit_and_persist(
-                phase="submit_item_error",
-                message=f"Product at index {index} missing title",
-                level="error",
-                error="Missing title",
-                payload_preview={"index": index},
-            )
-            results.append(
-                {
-                    "index": index,
-                    "title": None,
-                    "status": "failed",
-                    "errors": [{"field": ["title"], "message": "Missing title"}],
-                }
-            )
-            continue
-        try:
-            lookup_started_at = perf_counter()
-            gid = product.get("id") or product.get("shopify_gid")
-            resolve_reason = "id" if gid else None
-            if not gid and product.get("handle"):
-                handle_key = str(product["handle"]).strip().lower()
-                if handle_key in handle_lookup_cache:
-                    gid = handle_lookup_cache[handle_key]
-                else:
-                    gid = await submit_client.find_product_id_by_handle(
-                        str(product["handle"])
-                    )
-                    handle_lookup_cache[handle_key] = gid
-                if gid:
-                    resolve_reason = "handle"
-            if not gid:
-                sku = extract_first_sku(product)
-                if sku:
-                    sku_key = str(sku).strip()
-                    if sku_key in sku_lookup_cache:
-                        gid = sku_lookup_cache[sku_key]
+
+    # ── Bulk operation flow via productSet ──────────────────────────────
+    try:
+        emit_and_persist(
+            phase="submit_bulk_build",
+            message=f"Building JSONL for {len(submit_products)} products",
+        )
+        jsonl_data = ShopifyClient.build_product_set_jsonl(submit_products)
+
+        emit_and_persist(
+            phase="submit_bulk_upload",
+            message="Creating staged upload target",
+        )
+        LOG.info(
+            "submit_bulk_create_staged_upload run_id=%s tenant=%s products=%s",
+            current_run_id,
+            tenant,
+            len(submit_products),
+        )
+        staged_target = await submit_client.create_staged_upload()
+        upload_url = staged_target.get("url", "")
+        upload_params = staged_target.get("parameters", [])
+        resource_url = staged_target.get("resourceUrl", "")
+
+        emit_and_persist(
+            phase="submit_bulk_upload",
+            message="Uploading JSONL to staged target",
+        )
+        LOG.info(
+            "submit_bulk_upload_jsonl run_id=%s has_upload_url=%s params=%s",
+            current_run_id,
+            bool(upload_url),
+            len(upload_params),
+        )
+        await submit_client.upload_to_staged_url(upload_url, upload_params, jsonl_data)
+
+        # The stagedUploadPath is the key from the resourceUrl
+        staged_path = resource_url
+        # Some Shopify staged uploads return the path in a parameter named "key"
+        for param in upload_params:
+            if param.get("name") == "key":
+                staged_path = param.get("value", resource_url)
+                break
+
+        emit_and_persist(
+            phase="submit_bulk_start",
+            message="Starting bulk mutation operation",
+        )
+        LOG.info(
+            "submit_bulk_start_mutation run_id=%s has_staged_path=%s",
+            current_run_id,
+            bool(staged_path),
+        )
+        bulk_op = await submit_client.run_bulk_mutation(staged_path)
+        operation_id = bulk_op.get("id", "")
+
+        emit_and_persist(
+            phase="submit_bulk_polling",
+            message=f"Polling bulk operation {operation_id}",
+            payload_preview={"operation_id": operation_id},
+        )
+        LOG.info(
+            "submit_bulk_polling run_id=%s operation_id=%s",
+            current_run_id,
+            operation_id,
+        )
+        final_status = await submit_client.wait_for_bulk_operation(
+            operation_id, poll_interval=3.0, timeout=600.0
+        )
+
+        bulk_status = final_status.get("status", "UNKNOWN")
+        result_url = final_status.get("url")
+        root_count = final_status.get("rootObjectCount", 0)
+
+        emit_and_persist(
+            phase="submit_bulk_complete",
+            message=f"Bulk operation {bulk_status}: {root_count} root objects",
+            payload_preview={
+                "operation_id": operation_id,
+                "status": bulk_status,
+                "rootObjectCount": root_count,
+                "objectCount": final_status.get("objectCount", 0),
+            },
+        )
+        LOG.info(
+            "submit_bulk_complete run_id=%s operation_id=%s status=%s root_count=%s object_count=%s",
+            current_run_id,
+            operation_id,
+            bulk_status,
+            root_count,
+            final_status.get("objectCount", 0),
+        )
+
+        if bulk_status == "COMPLETED" and result_url:
+            # Download and parse result JSONL
+            bulk_results = await _download_bulk_results(submit_client, result_url)
+            for index, product in enumerate(submit_products):
+                title = product.get("title", f"Product {index}")
+                if index < len(bulk_results):
+                    result_data = bulk_results[index]
+                    product_set = result_data.get("data", {}).get("productSet", {})
+                    user_errors = product_set.get("userErrors", [])
+                    product_data = product_set.get("product", {})
+                    if user_errors:
+                        results.append({
+                            "index": index,
+                            "title": title,
+                            "status": "failed",
+                            "shopify_product_id": product_data.get("id"),
+                            "errors": user_errors,
+                        })
                     else:
-                        gid = await submit_client.find_product_id_by_sku(sku)
-                        sku_lookup_cache[sku_key] = gid
-                    if gid:
-                        resolve_reason = "sku"
-            lookup_duration_ms = int((perf_counter() - lookup_started_at) * 1000)
-
-            if gid:
-                emit_and_persist(
-                    phase="submit_item_mode",
-                    message=f"Resolved update target for '{title}'",
-                    payload_preview={
-                        "index": index,
-                        "title": title,
-                        "mode": "update",
-                        "reason": resolve_reason,
-                        "lookup_duration_ms": lookup_duration_ms,
-                        "shopify_product_id": gid,
-                    },
-                )
-                mutation_started_at = perf_counter()
-                response = await submit_client.update_product_from_input(
-                    {**product, "id": gid}
-                )
-                payload = response.get("data", {}).get("productUpdate", {})
-                mode_used = "update"
-            else:
-                emit_and_persist(
-                    phase="submit_item_mode",
-                    message=f"No existing match found for '{title}', creating",
-                    payload_preview={
-                        "index": index,
-                        "title": title,
-                        "mode": "create",
-                        "lookup_duration_ms": lookup_duration_ms,
-                    },
-                )
-                mutation_started_at = perf_counter()
-                response = await submit_client.create_product_from_input(product)
-                payload = response.get("data", {}).get("productCreate", {})
-                mode_used = "create"
-            mutation_duration_ms = int((perf_counter() - mutation_started_at) * 1000)
-
-            errors = payload.get("userErrors") or []
-            product_data = payload.get("product") or {}
-            if errors:
-                emit_and_persist(
-                    phase="submit_item_error",
-                    message=f"Shopify rejected product '{title}'",
-                    level="error",
-                    error=str(errors),
-                    payload_preview={"index": index, "title": title},
-                )
-                results.append(
-                    {
+                        success_count += 1
+                        created_id = product_data.get("id", "")
+                        # Apply variant operations if any
+                        variant_ops = variant_operations_by_index.get(index, [])
+                        if variant_ops and created_id:
+                            try:
+                                await _apply_variant_operations_for_product(
+                                    shopify=submit_client,
+                                    product_id=created_id,
+                                    operations=variant_ops,
+                                )
+                            except Exception as var_exc:
+                                emit_and_persist(
+                                    phase="submit_item_warning",
+                                    message=f"Variant operations failed for '{title}'",
+                                    level="warning",
+                                    error=str(var_exc),
+                                )
+                        results.append({
+                            "index": index,
+                            "title": product_data.get("title", title),
+                            "status": "success",
+                            "mode": "productSet",
+                            "shopify_product_id": created_id,
+                            "errors": [],
+                        })
+                else:
+                    results.append({
                         "index": index,
                         "title": title,
                         "status": "failed",
-                        "shopify_product_id": product_data.get("id"),
-                        "errors": errors,
-                    }
-                )
-            else:
-                if mode_used == "create":
-                    variant_operations = variant_operations_by_index.get(index) or []
-                    if variant_operations:
-                        created_product_id = str(product_data.get("id") or "").strip()
-                        if not created_product_id:
-                            raise RuntimeError(
-                                "AI enhancements generated variant operations, but Shopify product ID is missing"
-                            )
-                        await _apply_variant_operations_for_product(
-                            shopify=submit_client,
-                            product_id=created_product_id,
-                            operations=variant_operations,
-                        )
+                        "errors": [{"field": None, "message": "No result from bulk operation"}],
+                    })
+        elif bulk_status == "COMPLETED":
+            # Completed but no result URL — assume all succeeded
+            for index, product in enumerate(submit_products):
                 success_count += 1
-                emit_and_persist(
-                    phase="submit_item_success",
-                    message=f"Submitted product '{product_data.get('title', title)}' via {mode_used}",
-                    payload_preview={
-                        "index": index,
-                        "mode": mode_used,
-                        "lookup_duration_ms": lookup_duration_ms,
-                        "mutation_duration_ms": mutation_duration_ms,
-                        "item_duration_ms": int(
-                            (perf_counter() - item_started_at) * 1000
-                        ),
-                        "shopify_product_id": product_data.get("id"),
-                    },
-                )
-                results.append(
-                    {
-                        "index": index,
-                        "title": product_data.get("title", title),
-                        "status": "success",
-                        "mode": mode_used,
-                        "shopify_product_id": product_data.get("id"),
-                        "lookup_duration_ms": lookup_duration_ms,
-                        "mutation_duration_ms": mutation_duration_ms,
-                        "errors": [],
-                    }
-                )
-        except Exception as exc:
-            emit_and_persist(
-                phase="submit_item_error",
-                message=f"Submit failed for product '{title}'",
-                level="error",
-                error=str(exc),
-                payload_preview={"index": index, "title": title},
-            )
-            results.append(
-                {
+                results.append({
                     "index": index,
-                    "title": title,
+                    "title": product.get("title", f"Product {index}"),
+                    "status": "success",
+                    "mode": "productSet",
+                    "errors": [],
+                })
+        else:
+            error_code = final_status.get("errorCode", "UNKNOWN")
+            for index, product in enumerate(submit_products):
+                results.append({
+                    "index": index,
+                    "title": product.get("title", f"Product {index}"),
                     "status": "failed",
-                    "item_duration_ms": int((perf_counter() - item_started_at) * 1000),
-                    "errors": [{"field": None, "message": str(exc)}],
-                }
-            )
+                    "errors": [{"field": None, "message": f"Bulk operation {bulk_status}: {error_code}"}],
+                })
+    except Exception as exc:
+        LOG.exception(
+            "submit_bulk_exception run_id=%s draft_id=%s tenant=%s",
+            current_run_id,
+            draft_id,
+            tenant,
+        )
+        emit_and_persist(
+            phase="submit_bulk_error",
+            message=f"Bulk submit failed: {exc}",
+            level="error",
+            error=str(exc),
+        )
+        for index, product in enumerate(submit_products):
+            results.append({
+                "index": index,
+                "title": product.get("title", f"Product {index}"),
+                "status": "failed",
+                "errors": [{"field": None, "message": str(exc)}],
+            })
 
-    status = "success" if success_count == len(submit_products) else "error"
+    successful_indexes: list[int] = []
+    seen_indexes: set[int] = set()
+    for row in results:
+        if row.get("status") != "success":
+            continue
+        idx = row.get("index")
+        if (
+            isinstance(idx, int)
+            and 0 <= idx < len(submit_products)
+            and idx not in seen_indexes
+        ):
+            seen_indexes.add(idx)
+            successful_indexes.append(idx)
+    success_count = len(successful_indexes)
+    failed_count = max(0, len(submit_products) - success_count)
+    status = "success" if success_count > 0 else "error"
     submitted_id: str | None = None
+    warnings: list[str] = []
+    # Collect the first error message for propagation to the caller
+    error_message: str | None = None
+    if status == "error":
+        for r in results:
+            if r.get("status") != "failed":
+                continue
+            row_errors = r.get("errors")
+            if not isinstance(row_errors, list) or not row_errors:
+                continue
+            first_error = row_errors[0]
+            if isinstance(first_error, dict):
+                message = first_error.get("message")
+                if isinstance(message, str) and message.strip():
+                    error_message = message.strip()
+                    break
+                error_message = json.dumps(first_error, ensure_ascii=False)
+                break
+            if isinstance(first_error, str) and first_error.strip():
+                error_message = first_error.strip()
+                break
+        if not error_message:
+            error_message = (
+                f"No products were submitted successfully "
+                f"(success_count=0, failed_count={failed_count})"
+            )
+    elif failed_count:
+        warnings.append(
+            f"Submitted {success_count} of {len(submit_products)} products; {failed_count} failed"
+        )
     if status == "success":
         inferred_name = document_name
         if not inferred_name and draft_id:
@@ -398,6 +525,7 @@ async def execute(
                 )
         if not inferred_name:
             inferred_name = str(submit_products[0].get("title") or "Submitted document")
+        submitted_products = [submit_products[idx] for idx in successful_indexes]
         submitted = supabase.submitted.save_submitted_document(
             submitted_id=str(uuid.uuid4()),
             run_id=current_run_id,
@@ -405,19 +533,36 @@ async def execute(
             name=str(inferred_name),
             import_mode="auto",
             shop_domain=tenant,
-            product_count=len(submit_products),
-            products=submit_products,
+            product_count=len(submitted_products),
+            products=submitted_products,
         )
         submitted_id = str(submitted.get("submitted_id"))
 
     submit_duration_ms = int((perf_counter() - submit_started_at) * 1000)
-    supabase.runs.finalize_run(current_run_id, status=status, duration_ms=submit_duration_ms)
+    supabase.runs.finalize_run(
+        current_run_id,
+        status=status,
+        duration_ms=submit_duration_ms,
+        error=error_message if status != "success" else None,
+    )
     tracing.complete_run(current_run_id)
+    LOG.info(
+        "submit_complete run_id=%s status=%s success_count=%s failed_count=%s submitted_id=%s error=%s warnings=%s",
+        current_run_id,
+        status,
+        success_count,
+        failed_count,
+        submitted_id,
+        error_message,
+        len(warnings),
+    )
 
     return {
         "success_count": success_count,
+        "failed_count": failed_count,
         "results": results,
         "submitted_id": submitted_id,
         "duration_ms": submit_duration_ms,
-        "warnings": [],
+        "warnings": warnings,
+        "error": error_message,
     }

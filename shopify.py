@@ -1,5 +1,8 @@
+import json
+import logging
 import os
 from typing import Any, Dict, Optional, List
+import asyncio
 import pathlib
 from urllib.parse import urlparse
 
@@ -12,6 +15,7 @@ load_dotenv()
 
 # Path to this module; graphql files are stored in the `graphql/` sibling folder
 ROOT = pathlib.Path(__file__).parent
+LOG = logging.getLogger(__name__)
 
 
 def _load_graphql(name: str) -> str:
@@ -66,18 +70,70 @@ class ShopifyClient:
             else None
         )
 
+    _RETRYABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)
+    _MAX_RETRIES = 3
+    _BACKOFF_BASE = 1.0
+
     async def graphql(
         self, query: str, variables: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        # Ensure the underlying http client exists and we have a token/shop
         await self._ensure_client()
         payload = {"query": query, "variables": variables or {}}
-        # mypy: _client is Optional but _ensure_client() ensures it's set
         assert self._client is not None
         assert self.url is not None
-        resp = await self._client.post(self.url, json=payload)
-        resp.raise_for_status()
-        return resp.json()
+
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                resp = await self._client.post(self.url, json=payload)
+                resp.raise_for_status()
+                body = resp.json()
+                top_level_errors = body.get("errors")
+                if isinstance(top_level_errors, list) and top_level_errors:
+                    messages: list[str] = []
+                    for err in top_level_errors:
+                        if isinstance(err, dict):
+                            msg = err.get("message")
+                            code = (
+                                err.get("extensions", {}).get("code")
+                                if isinstance(err.get("extensions"), dict)
+                                else None
+                            )
+                            if isinstance(msg, str) and msg.strip():
+                                messages.append(
+                                    f"{msg} (code={code})" if code else msg
+                                )
+                    if not messages:
+                        messages = [str(top_level_errors)]
+                    request_id = (
+                        resp.headers.get("x-request-id")
+                        or resp.headers.get("x-request-id".title())
+                    )
+                    if request_id:
+                        messages.append(f"request_id={request_id}")
+                    raise RuntimeError(
+                        "Shopify GraphQL error: " + " | ".join(messages)
+                    )
+                return body
+            except self._RETRYABLE_ERRORS as exc:
+                last_exc = exc
+                if attempt < self._MAX_RETRIES:
+                    LOG.warning(
+                        "Shopify GraphQL retry attempt=%s/%s shop=%s error=%s",
+                        attempt,
+                        self._MAX_RETRIES,
+                        self.shop,
+                        exc,
+                    )
+                    await asyncio.sleep(self._BACKOFF_BASE * (2 ** (attempt - 1)))
+        if last_exc is not None:
+            LOG.error(
+                "Shopify GraphQL failed after retries shop=%s url=%s error=%s",
+                self.shop,
+                self.url,
+                last_exc,
+            )
+        raise last_exc  # type: ignore[misc]
 
     async def _ensure_client(self) -> None:
         """Create the httpx.AsyncClient if not already created.
@@ -119,7 +175,11 @@ class ShopifyClient:
             "X-Shopify-Access-Token": self._token,
             "Content-Type": "application/json",
         }
-        self._client = httpx.AsyncClient(headers=headers, timeout=30.0)
+        self._client = httpx.AsyncClient(
+            headers=headers,
+            timeout=30.0,
+            transport=httpx.AsyncHTTPTransport(retries=3),
+        )
 
     def set_token(self, token: str, persist: bool = False) -> None:
         """Attach a token to the client at runtime.
@@ -509,3 +569,158 @@ class ShopifyClient:
                 break
 
         return collected
+
+    # ── Bulk Operation helpers ──────────────────────────────────────────
+
+    async def create_staged_upload(self) -> Dict[str, Any]:
+        """Create a staged upload target for a JSONL file used in bulk mutations."""
+        mutation = _load_graphql("stagedUploadsCreate.graphql")
+        try:
+            resp = await self.graphql(mutation, {
+                "input": [{
+                    "resource": "BULK_MUTATION_VARIABLES",
+                    "filename": "bulk_import.jsonl",
+                    "mimeType": "text/jsonl",
+                    "httpMethod": "POST",
+                }]
+            })
+        except Exception:
+            LOG.exception(
+                "create_staged_upload failed shop=%s url=%s",
+                self.shop,
+                self.url,
+            )
+            raise
+        targets = resp.get("data", {}).get("stagedUploadsCreate", {}).get("stagedTargets", [])
+        errors = resp.get("data", {}).get("stagedUploadsCreate", {}).get("userErrors", [])
+        if errors:
+            raise RuntimeError(f"Staged upload creation failed: {errors}")
+        if not targets:
+            raise RuntimeError("No staged upload targets returned")
+        return targets[0]
+
+    async def upload_to_staged_url(
+        self, url: str, parameters: List[Dict[str, str]], jsonl_data: str
+    ) -> None:
+        """Upload JSONL data to a Shopify staged upload URL via multipart POST."""
+        form_fields: Dict[str, str] = {}
+        for param in parameters:
+            name = param.get("name", "")
+            value = param.get("value", "")
+            if name:
+                form_fields[name] = value
+        files = {"file": ("bulk_import.jsonl", jsonl_data.encode(), "text/jsonl")}
+        # Use a clean client — the Shopify client has Content-Type: application/json
+        # which conflicts with the multipart/form-data the GCS upload requires.
+        async with httpx.AsyncClient(timeout=60.0) as upload_client:
+            resp = await upload_client.post(url, data=form_fields, files=files)
+            resp.raise_for_status()
+
+    async def run_bulk_mutation(self, staged_upload_path: str) -> Dict[str, Any]:
+        """Start a bulk mutation operation using the productSet mutation."""
+        product_set_mutation = _load_graphql("productSet.graphql")
+        mutation = _load_graphql("bulkOperationRunMutation.graphql")
+        resp = await self.graphql(mutation, {
+            "mutation": product_set_mutation,
+            "stagedUploadPath": staged_upload_path,
+        })
+        payload = resp.get("data", {}).get("bulkOperationRunMutation", {})
+        errors = payload.get("userErrors", [])
+        if errors:
+            raise RuntimeError(f"Bulk mutation failed to start: {errors}")
+        bulk_op = payload.get("bulkOperation")
+        if not bulk_op:
+            raise RuntimeError("No bulk operation returned")
+        return bulk_op
+
+    async def get_bulk_operation(self, operation_id: str) -> Dict[str, Any]:
+        """Query the status of a bulk operation by ID."""
+        query = _load_graphql("bulkOperationQuery.graphql")
+        resp = await self.graphql(query)
+        bulk_op = resp.get("data", {}).get("currentBulkOperation", {})
+        if (
+            isinstance(bulk_op, dict)
+            and bulk_op.get("id")
+            and operation_id
+            and bulk_op.get("id") != operation_id
+        ):
+            raise RuntimeError(
+                "Current bulk mutation operation does not match requested operation: "
+                f"expected={operation_id} actual={bulk_op.get('id')}"
+            )
+        return bulk_op
+
+    async def wait_for_bulk_operation(
+        self,
+        operation_id: str,
+        *,
+        poll_interval: float = 5.0,
+        timeout: float = 600.0,
+    ) -> Dict[str, Any]:
+        """Poll a bulk operation until it reaches a terminal state."""
+        elapsed = 0.0
+        terminal_statuses = {"COMPLETED", "FAILED", "CANCELED", "EXPIRED"}
+        while elapsed < timeout:
+            status = await self.get_bulk_operation(operation_id)
+            if status.get("status") in terminal_statuses:
+                return status
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+        raise RuntimeError(
+            f"Bulk operation {operation_id} timed out after {timeout}s"
+        )
+
+    @staticmethod
+    def build_product_set_jsonl(products: List[Dict[str, Any]]) -> str:
+        """Build JSONL content for bulkOperationRunMutation with productSet."""
+        lines: List[str] = []
+        for product in products:
+            input_payload = ShopifyClient._build_product_set_input(product)
+            identifier = ShopifyClient._build_product_set_identifier(product)
+            line: Dict[str, Any] = {"input": input_payload}
+            if identifier:
+                line["identifier"] = identifier
+            lines.append(json.dumps(line, ensure_ascii=False))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_product_set_input(product: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a ProductSetInput dict from internal product format."""
+        payload: Dict[str, Any] = {}
+        mapping = {
+            "title": "title",
+            "handle": "handle",
+            "body_html": "descriptionHtml",
+            "vendor": "vendor",
+            "product_type": "productType",
+            "status": "status",
+        }
+        for source_key, target_key in mapping.items():
+            value = product.get(source_key)
+            if value is not None and value != "":
+                payload[target_key] = value
+        tags = ShopifyClient._normalize_tags(
+            product.get("tags"),
+            allow_empty="tags" in product,
+        )
+        if tags is not None:
+            payload["tags"] = tags
+        seo_title = product.get("seo_title")
+        seo_description = product.get("seo_description")
+        if seo_title or seo_description:
+            payload["seo"] = {
+                "title": str(seo_title or ""),
+                "description": str(seo_description or ""),
+            }
+        return payload
+
+    @staticmethod
+    def _build_product_set_identifier(product: Dict[str, Any]) -> Dict[str, str] | None:
+        """Build a ProductSetIdentifiers dict for upsert matching."""
+        gid = product.get("id") or product.get("shopify_gid")
+        if isinstance(gid, str) and gid.strip():
+            return {"id": gid.strip()}
+        handle = product.get("handle")
+        if isinstance(handle, str) and handle.strip():
+            return {"handle": handle.strip()}
+        return None

@@ -5,14 +5,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app_context import AppContext, get_ctx
 from shopify import (
     ShopifyClient,
 )  # kept for route-level monkeypatch compatibility in tests
-from .utils import parse_products_json
+from .utils import parse_products_json, resolve_shop_access_token, resolve_shop_domain
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -83,6 +83,7 @@ def _save_submit_draft_state(
 
 @router.post("/submit-products", summary="Submit extracted products to Shopify")
 async def submit_products_to_shopify(
+    request: Request,
     products_json: str | None = Form(None),
     import_mode: str = Form("auto"),
     run_id: str | None = Form(None),
@@ -104,6 +105,8 @@ async def submit_products_to_shopify(
         execute as get_submitted_execute,
     )
 
+    resolved_shop_domain = resolve_shop_domain(request, shop_domain)
+    resolved_shop_access_token = resolve_shop_access_token(request, shop_access_token)
     resolved_draft_id = draft_id
     if offload:
         effective_run_id = run_id or str(uuid.uuid4())
@@ -111,7 +114,7 @@ async def submit_products_to_shopify(
             submitted_document = get_submitted_execute(
                 supabase=ctx.supabase,
                 submitted_id=submitted_id,
-                shop_domain=shop_domain,
+                shop_domain=resolved_shop_domain,
             )
             if isinstance(submitted_document, dict):
                 inferred_draft_id = submitted_document.get("draft_id")
@@ -128,7 +131,7 @@ async def submit_products_to_shopify(
                     run_id=effective_run_id,
                     import_mode=import_mode,
                     draft_name=document_name,
-                    shop_domain=shop_domain,
+                    shop_domain=resolved_shop_domain,
                     products=products,
                     extraction_status="succeeded",
                     extraction_run_id=None,
@@ -148,7 +151,7 @@ async def submit_products_to_shopify(
             _save_submit_draft_state(
                 ctx=ctx,
                 draft_id=resolved_draft_id,
-                shop_domain=shop_domain,
+                shop_domain=resolved_shop_domain,
                 fallback_run_id=effective_run_id,
                 fallback_name=document_name,
                 submit_status="queued",
@@ -162,7 +165,7 @@ async def submit_products_to_shopify(
                     "source": "shopify_submit",
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "attempt": 1,
-                    "shop_domain": shop_domain,
+                    "shop_domain": resolved_shop_domain,
                 },
             )
             ctx.supabase.runs.enqueue_offload_job(
@@ -174,13 +177,13 @@ async def submit_products_to_shopify(
                     "run_id": effective_run_id,
                     "draft_id": resolved_draft_id,
                     "submitted_id": submitted_id,
-                    "shop_domain": shop_domain,
+                    "shop_domain": resolved_shop_domain,
                     "payload": {
                         "import_mode": import_mode,
                         "document_name": document_name,
                         "products_json": products_json,
-                        "shop_access_token": shop_access_token,
-                        "has_shop_access_token": bool(shop_access_token),
+                        "shop_access_token": resolved_shop_access_token,
+                        "has_shop_access_token": bool(resolved_shop_access_token),
                     },
                 },
                 require_persistent_queue=True,
@@ -210,11 +213,30 @@ async def submit_products_to_shopify(
             draft_id=resolved_draft_id,
             submitted_id=submitted_id,
             document_name=document_name,
-            shop_domain=shop_domain,
-            shop_access_token=shop_access_token,
+            shop_domain=resolved_shop_domain,
+            shop_access_token=resolved_shop_access_token,
         )
         return result
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/submit-status/{run_id}", summary="Poll submit job status")
+async def get_submit_status(
+    run_id: str,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    run = ctx.supabase.runs.get_run(run_id, shop_domain=shop_domain)
+    if not isinstance(run, dict):
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {
+        "run_id": run.get("run_id"),
+        "status": run.get("status"),
+        "error": run.get("error"),
+        "created_at": run.get("created_at"),
+        "ended_at": run.get("ended_at"),
+        "duration_ms": run.get("duration_ms"),
+    }

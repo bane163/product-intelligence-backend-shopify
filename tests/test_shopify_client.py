@@ -192,3 +192,76 @@ async def test_update_product_from_input_supports_explicit_clear_payloads():
         assert product["productType"] == ""
         assert product["tags"] == []
         assert product["seo"] == {"title": "", "description": ""}
+
+
+@pytest.mark.asyncio
+async def test_graphql_raises_on_top_level_errors():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    error_resp = {
+        "errors": [
+            {
+                "message": "Access denied for stagedUploadsCreate field.",
+                "extensions": {"code": "ACCESS_DENIED"},
+            }
+        ]
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        mock.post("/admin/api/2025-10/graphql.json").respond(
+            200,
+            json=error_resp,
+            headers={"x-request-id": "req-graphql-error-1"},
+        )
+        with pytest.raises(RuntimeError, match="Access denied"):
+            await client.graphql("mutation { stagedUploadsCreate(input: []) { userErrors { message } } }")
+
+
+@pytest.mark.asyncio
+async def test_create_staged_upload_surfaces_graphql_error():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    error_resp = {
+        "errors": [
+            {
+                "message": "Access denied for stagedUploadsCreate field.",
+                "extensions": {"code": "ACCESS_DENIED"},
+            }
+        ]
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        mock.post("/admin/api/2025-10/graphql.json").respond(
+            200,
+            json=error_resp,
+            headers={"x-request-id": "req-create-staged-upload-1"},
+        )
+        with pytest.raises(RuntimeError, match="Access denied"):
+            await client.create_staged_upload()
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_operation_uses_current_bulk_operation_query():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    response = {
+        "data": {
+            "currentBulkOperation": {
+                "id": "gid://shopify/BulkOperation/1",
+                "status": "RUNNING",
+                "errorCode": None,
+                "objectCount": "0",
+                "rootObjectCount": "0",
+                "url": None,
+                "partialDataUrl": None,
+                "completedAt": None,
+                "createdAt": "2026-01-01T00:00:00Z",
+            }
+        }
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        route = mock.post("/admin/api/2025-10/graphql.json").respond(200, json=response)
+        result = await client.get_bulk_operation("gid://shopify/BulkOperation/1")
+        assert result["id"] == "gid://shopify/BulkOperation/1"
+        assert route.called
+        request_body = json.loads(route.calls.last.request.content.decode())
+        assert "currentBulkOperation" in request_body["query"]
+        assert "bulkOperation(id:" not in request_body["query"]

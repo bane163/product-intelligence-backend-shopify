@@ -1,0 +1,13 @@
+query bulkOperationQuery {
+  currentBulkOperation(type: MUTATION) {
+    id
+    status
+    errorCode
+    objectCount
+    rootObjectCount
+    url
+    partialDataUrl
+    completedAt
+    createdAt
+  }
+}

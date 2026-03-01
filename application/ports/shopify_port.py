@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol
 
 
 class ShopifyPort(Protocol):
@@ -31,3 +31,24 @@ class ShopifyPort(Protocol):
     async def list_products_for_audit(
         self, query: Optional[str] = None, limit: int = 50
     ) -> list[Dict[str, Any]]: ...
+
+    async def create_staged_upload(self) -> Dict[str, Any]: ...
+
+    async def upload_to_staged_url(
+        self, url: str, parameters: List[Dict[str, str]], jsonl_data: str
+    ) -> None: ...
+
+    async def run_bulk_mutation(self, staged_upload_path: str) -> Dict[str, Any]: ...
+
+    async def get_bulk_operation(self, operation_id: str) -> Dict[str, Any]: ...
+
+    async def wait_for_bulk_operation(
+        self,
+        operation_id: str,
+        *,
+        poll_interval: float = 5.0,
+        timeout: float = 600.0,
+    ) -> Dict[str, Any]: ...
+
+    @staticmethod
+    def build_product_set_jsonl(products: List[Dict[str, Any]]) -> str: ...

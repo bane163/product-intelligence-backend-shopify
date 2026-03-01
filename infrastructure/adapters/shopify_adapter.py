@@ -1,5 +1,5 @@
 import shopify as _shopify
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class ShopifyAdapter:
@@ -47,3 +47,32 @@ class ShopifyAdapter:
         self, query: str | None = None, limit: int = 50
     ) -> list[Dict[str, Any]]:
         return await self._client.list_products_for_audit(query=query, limit=limit)
+
+    async def create_staged_upload(self) -> Dict[str, Any]:
+        return await self._client.create_staged_upload()
+
+    async def upload_to_staged_url(
+        self, url: str, parameters: List[Dict[str, str]], jsonl_data: str
+    ) -> None:
+        return await self._client.upload_to_staged_url(url, parameters, jsonl_data)
+
+    async def run_bulk_mutation(self, staged_upload_path: str) -> Dict[str, Any]:
+        return await self._client.run_bulk_mutation(staged_upload_path)
+
+    async def get_bulk_operation(self, operation_id: str) -> Dict[str, Any]:
+        return await self._client.get_bulk_operation(operation_id)
+
+    async def wait_for_bulk_operation(
+        self,
+        operation_id: str,
+        *,
+        poll_interval: float = 5.0,
+        timeout: float = 600.0,
+    ) -> Dict[str, Any]:
+        return await self._client.wait_for_bulk_operation(
+            operation_id, poll_interval=poll_interval, timeout=timeout
+        )
+
+    @staticmethod
+    def build_product_set_jsonl(products: List[Dict[str, Any]]) -> str:
+        return _shopify.ShopifyClient.build_product_set_jsonl(products)

@@ -280,6 +280,17 @@ class OffloadWorker:
         document_name = _optional_str(payload.get("document_name"))
         products_json = _optional_str(payload.get("products_json"))
         shop_access_token = _optional_str(payload.get("shop_access_token"))
+        LOG.info(
+            "offload_submit_start run_id=%s draft_id=%s submitted_id=%s shop_domain=%s "
+            "import_mode=%s has_products_json=%s has_shop_access_token=%s",
+            run_id,
+            draft_id,
+            submitted_id,
+            shop_domain,
+            import_mode,
+            bool(products_json),
+            bool(shop_access_token),
+        )
 
         if draft_id:
             _save_draft_state(
@@ -314,11 +325,38 @@ class OffloadWorker:
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
         )
+        LOG.info(
+            "offload_submit_result run_id=%s draft_id=%s submitted_id=%s success_count=%s failed_count=%s error=%s",
+            run_id,
+            draft_id,
+            result.get("submitted_id") if isinstance(result, dict) else None,
+            result.get("success_count") if isinstance(result, dict) else None,
+            result.get("failed_count") if isinstance(result, dict) else None,
+            result.get("error") if isinstance(result, dict) else None,
+        )
         submit_succeeded = bool(
             isinstance(result, dict)
             and isinstance(result.get("submitted_id"), str)
             and result.get("submitted_id")
         )
+        error_detail: str | None = None
+        if not submit_succeeded and isinstance(result, dict):
+            raw_error = result.get("error")
+            if isinstance(raw_error, str) and raw_error.strip():
+                error_detail = raw_error.strip()
+            else:
+                success_count = result.get("success_count")
+                failed_count = result.get("failed_count")
+                if isinstance(success_count, int) and isinstance(failed_count, int):
+                    error_detail = (
+                        "Submit completed with no successful products "
+                        f"(success_count={success_count}, failed_count={failed_count})"
+                    )
+                elif isinstance(failed_count, int):
+                    error_detail = (
+                        "Submit completed with no successful products "
+                        f"(failed_count={failed_count})"
+                    )
         if draft_id:
             _save_draft_state(
                 ctx=self.ctx,
@@ -328,10 +366,17 @@ class OffloadWorker:
                 fallback_name=document_name,
                 submit_status="succeeded" if submit_succeeded else "failed",
                 submit_run_id=run_id,
-                submit_error=None if submit_succeeded else "Submit did not complete",
+                submit_error=None if submit_succeeded else (error_detail or "Submit did not complete"),
             )
         if not submit_succeeded:
-            raise RuntimeError("Submit did not complete")
+            LOG.error(
+                "offload_submit_failed run_id=%s draft_id=%s error=%s result=%s",
+                run_id,
+                draft_id,
+                error_detail or "Submit did not complete",
+                result if isinstance(result, dict) else None,
+            )
+            raise RuntimeError(error_detail or "Submit did not complete")
 
         return {
             "run_id": run_id,

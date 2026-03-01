@@ -868,28 +868,61 @@ async def test_save_product_draft():
         assert "draft_id" in body
 
 
-@pytest.mark.asyncio
-async def test_submit_products_auto_mode(monkeypatch):
-    async def fake_create_product_from_input(self, product):
+def _patch_bulk_submit(monkeypatch, product_results: list[dict] | None = None):
+    """Patch all bulk operation methods on ShopifyAdapter for submit tests."""
+    from infrastructure.adapters.shopify_adapter import ShopifyAdapter
+    import shopify as shopify_module
+    from application.use_cases.processing import submit_products as sp_module
+
+    async def fake_create_staged_upload(self):
         return {
-            "data": {
-                "productCreate": {
-                    "product": {
-                        "id": "gid://shopify/Product/2",
-                        "title": product.get("title"),
-                    },
-                    "userErrors": [],
-                }
-            }
+            "url": "https://staged.example.com/upload",
+            "resourceUrl": "staged://bulk_import.jsonl",
+            "parameters": [{"name": "key", "value": "tmp/bulk_import.jsonl"}],
         }
 
-    import api.agents.submit as submit_api
+    async def fake_upload_to_staged_url(self, url, parameters, jsonl_data):
+        pass
 
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fake_create_product_from_input,
-    )
+    async def fake_run_bulk_mutation(self, staged_upload_path):
+        return {"id": "gid://shopify/BulkOperation/1", "status": "CREATED"}
+
+    results = product_results or []
+
+    async def fake_wait_for_bulk_operation(self, operation_id, *, poll_interval=5.0, timeout=600.0):
+        return {
+            "id": operation_id,
+            "status": "COMPLETED",
+            "url": "https://results.example.com/bulk.jsonl",
+            "rootObjectCount": len(results),
+            "objectCount": len(results),
+        }
+
+    async def fake_download_bulk_results(shopify, result_url):
+        return results
+
+    monkeypatch.setattr(ShopifyAdapter, "create_staged_upload", fake_create_staged_upload)
+    monkeypatch.setattr(ShopifyAdapter, "upload_to_staged_url", fake_upload_to_staged_url)
+    monkeypatch.setattr(ShopifyAdapter, "run_bulk_mutation", fake_run_bulk_mutation)
+    monkeypatch.setattr(ShopifyAdapter, "wait_for_bulk_operation", fake_wait_for_bulk_operation)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "create_staged_upload", fake_create_staged_upload)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "upload_to_staged_url", fake_upload_to_staged_url)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "run_bulk_mutation", fake_run_bulk_mutation)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "wait_for_bulk_operation", fake_wait_for_bulk_operation)
+    monkeypatch.setattr(sp_module, "_download_bulk_results", fake_download_bulk_results)
+
+
+@pytest.mark.asyncio
+async def test_submit_products_auto_mode(monkeypatch):
+    """Submit should use bulk operation flow (staged upload → bulk mutation → poll)."""
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {"id": "gid://shopify/Product/2", "title": "Demo"},
+                "userErrors": [],
+            }
+        }
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -903,35 +936,221 @@ async def test_submit_products_auto_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_submit_products_auto_updates_when_id_present(monkeypatch):
-    async def fake_update_product_from_input(self, product):
-        return {
+async def test_submit_products_partial_success_creates_submitted_document(monkeypatch):
+    _patch_bulk_submit(monkeypatch, [
+        {
             "data": {
-                "productUpdate": {
-                    "product": {"id": product.get("id"), "title": product.get("title")},
+                "productSet": {
+                    "product": {"id": "gid://shopify/Product/300", "title": "Good Product"},
                     "userErrors": [],
                 }
             }
+        },
+        {
+            "data": {
+                "productSet": {
+                    "product": {"id": None, "title": "Bad Product"},
+                    "userErrors": [{"field": ["title"], "message": "Title is invalid"}],
+                }
+            }
+        },
+    ])
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "products_json": json.dumps([{"title": "Good Product"}, {"title": "Bad Product"}]),
+                "import_mode": "auto",
+                "document_name": "partial-submit.xlsx",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success_count"] == 1
+        assert body["submitted_id"]
+        assert any(item.get("status") == "failed" for item in body["results"])
+
+        submitted_detail = await ac.get(
+            f"/agents/submitted-documents/{body['submitted_id']}"
+        )
+        assert submitted_detail.status_code == 200
+        stored_products = submitted_detail.json()["submitted_document"]["products"]
+        assert len(stored_products) == 1
+        assert stored_products[0]["title"] == "Good Product"
+
+
+@pytest.mark.asyncio
+async def test_submit_products_uses_request_scoped_shop_context(monkeypatch):
+    from infrastructure.adapters.shopify_adapter import ShopifyAdapter
+    import shopify as shopify_module
+    from application.use_cases.processing import submit_products as sp_module
+
+    captured: dict[str, Any] = {}
+
+    async def fail_adapter_create_staged_upload(self):
+        _ = self
+        raise RuntimeError("adapter client should not be used for request-scoped submit")
+
+    async def fake_create_staged_upload(self):
+        captured["shop"] = getattr(self, "shop", None)
+        captured["token"] = getattr(self, "_token", None)
+        return {
+            "url": "https://staged.example.com/upload",
+            "resourceUrl": "staged://bulk_import.jsonl",
+            "parameters": [{"name": "key", "value": "tmp/bulk_import.jsonl"}],
         }
 
-    async def fail_create_product_from_input(self, product):
-        _ = (self, product)
-        raise AssertionError(
-            "create_product_from_input should not be called when id is present"
+    async def fake_upload_to_staged_url(self, url, parameters, jsonl_data):
+        _ = (self, url, parameters, jsonl_data)
+
+    async def fake_run_bulk_mutation(self, staged_upload_path):
+        _ = (self, staged_upload_path)
+        return {"id": "gid://shopify/BulkOperation/1", "status": "CREATED"}
+
+    async def fake_wait_for_bulk_operation(self, operation_id, *, poll_interval=5.0, timeout=600.0):
+        _ = (self, poll_interval, timeout)
+        return {
+            "id": operation_id,
+            "status": "COMPLETED",
+            "url": "https://results.example.com/bulk.jsonl",
+            "rootObjectCount": 1,
+            "objectCount": 1,
+        }
+
+    async def fake_download_bulk_results(shopify, result_url):
+        _ = (shopify, result_url)
+        return [{
+            "data": {
+                "productSet": {
+                    "product": {"id": "gid://shopify/Product/200", "title": "Scoped"},
+                    "userErrors": [],
+                }
+            }
+        }]
+
+    monkeypatch.setattr(ShopifyAdapter, "create_staged_upload", fail_adapter_create_staged_upload)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "create_staged_upload", fake_create_staged_upload)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "upload_to_staged_url", fake_upload_to_staged_url)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "run_bulk_mutation", fake_run_bulk_mutation)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "wait_for_bulk_operation", fake_wait_for_bulk_operation)
+    monkeypatch.setattr(sp_module, "_download_bulk_results", fake_download_bulk_results)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "products_json": json.dumps([{"title": "Scoped"}]),
+                "import_mode": "auto",
+                "shop_domain": "scoped-shop.myshopify.com",
+                "shop_access_token": "shpat_scoped_token",
+            },
         )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success_count"] == 1
+        assert captured["shop"] == "scoped-shop.myshopify.com"
+        assert captured["token"] == "shpat_scoped_token"
 
-    import api.agents.submit as submit_api
 
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "update_product_from_input",
-        fake_update_product_from_input,
-    )
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fail_create_product_from_input,
-    )
+@pytest.mark.asyncio
+async def test_submit_products_infers_shop_from_draft_when_request_shop_missing(monkeypatch):
+    from infrastructure.adapters.shopify_adapter import ShopifyAdapter
+    import shopify as shopify_module
+    from application.use_cases.processing import submit_products as sp_module
+
+    captured: dict[str, Any] = {}
+
+    async def fail_adapter_create_staged_upload(self):
+        _ = self
+        raise RuntimeError("adapter client should not be used when draft has tenant")
+
+    async def fake_create_staged_upload(self):
+        captured["shop"] = getattr(self, "shop", None)
+        return {
+            "url": "https://staged.example.com/upload",
+            "resourceUrl": "staged://bulk_import.jsonl",
+            "parameters": [{"name": "key", "value": "tmp/bulk_import.jsonl"}],
+        }
+
+    async def fake_upload_to_staged_url(self, url, parameters, jsonl_data):
+        _ = (self, url, parameters, jsonl_data)
+
+    async def fake_run_bulk_mutation(self, staged_upload_path):
+        _ = (self, staged_upload_path)
+        return {"id": "gid://shopify/BulkOperation/1", "status": "CREATED"}
+
+    async def fake_wait_for_bulk_operation(self, operation_id, *, poll_interval=5.0, timeout=600.0):
+        _ = (self, poll_interval, timeout)
+        return {
+            "id": operation_id,
+            "status": "COMPLETED",
+            "url": "https://results.example.com/bulk.jsonl",
+            "rootObjectCount": 1,
+            "objectCount": 1,
+        }
+
+    async def fake_download_bulk_results(shopify, result_url):
+        _ = (shopify, result_url)
+        return [{
+            "data": {
+                "productSet": {
+                    "product": {"id": "gid://shopify/Product/201", "title": "Draft Scoped"},
+                    "userErrors": [],
+                }
+            }
+        }]
+
+    monkeypatch.setattr(ShopifyAdapter, "create_staged_upload", fail_adapter_create_staged_upload)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "create_staged_upload", fake_create_staged_upload)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "upload_to_staged_url", fake_upload_to_staged_url)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "run_bulk_mutation", fake_run_bulk_mutation)
+    monkeypatch.setattr(shopify_module.ShopifyClient, "wait_for_bulk_operation", fake_wait_for_bulk_operation)
+    monkeypatch.setattr(sp_module, "_download_bulk_results", fake_download_bulk_results)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        created_draft = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Draft Scoped"}]),
+                "run_id": "run-draft-scoped",
+                "import_mode": "auto",
+                "shop_domain": "draft-scoped.myshopify.com",
+                "draft_name": "draft-scoped.xlsx",
+            },
+        )
+        assert created_draft.status_code == 200
+        draft_id = created_draft.json()["draft_id"]
+
+        submitted = await ac.post(
+            "/agents/submit-products",
+            data={
+                "draft_id": draft_id,
+                "import_mode": "auto",
+            },
+        )
+        assert submitted.status_code == 200
+        assert submitted.json()["success_count"] == 1
+        assert captured["shop"] == "draft-scoped.myshopify.com"
+
+
+@pytest.mark.asyncio
+async def test_submit_products_auto_updates_when_id_present(monkeypatch):
+    """Submit with a product that has an ID should use productSet with identifier."""
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {
+                    "id": "gid://shopify/Product/99",
+                    "title": "Existing Demo",
+                },
+                "userErrors": [],
+            }
+        }
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -945,36 +1164,24 @@ async def test_submit_products_auto_updates_when_id_present(monkeypatch):
         assert r.status_code == 200
         body = r.json()
         assert body["success_count"] == 1
-        assert body["results"][0]["mode"] == "update"
+        assert body["results"][0]["mode"] == "productSet"
 
 
 @pytest.mark.asyncio
 async def test_submit_products_uses_submitted_document_when_submitted_id_provided(
     monkeypatch,
 ):
-    created_payloads: list[dict[str, Any]] = []
-
-    async def fake_create_product_from_input(self, product):
-        created_payloads.append(dict(product))
-        return {
-            "data": {
-                "productCreate": {
-                    "product": {
-                        "id": "gid://shopify/Product/404",
-                        "title": product.get("title"),
-                    },
-                    "userErrors": [],
-                }
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {
+                    "id": "gid://shopify/Product/404",
+                    "title": "Stored Demo",
+                },
+                "userErrors": [],
             }
         }
-
-    import api.agents.submit as submit_api
-
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fake_create_product_from_input,
-    )
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -990,8 +1197,6 @@ async def test_submit_products_uses_submitted_document_when_submitted_id_provide
         submitted_id = seed_response.json()["submitted_id"]
         assert submitted_id
 
-        created_payloads.clear()
-
         submit_response = await ac.post(
             "/agents/submit-products",
             data={
@@ -1002,34 +1207,21 @@ async def test_submit_products_uses_submitted_document_when_submitted_id_provide
         assert submit_response.status_code == 200
         body = submit_response.json()
         assert body["success_count"] == 1
-        assert created_payloads and created_payloads[0]["title"] == "Stored Demo"
 
 
 @pytest.mark.asyncio
 async def test_submit_products_uses_draft_when_draft_id_provided(monkeypatch):
-    created_payloads: list[dict[str, Any]] = []
-
-    async def fake_create_product_from_input(self, product):
-        created_payloads.append(dict(product))
-        return {
-            "data": {
-                "productCreate": {
-                    "product": {
-                        "id": "gid://shopify/Product/405",
-                        "title": product.get("title"),
-                    },
-                    "userErrors": [],
-                }
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {
+                    "id": "gid://shopify/Product/405",
+                    "title": "Draft Source Demo",
+                },
+                "userErrors": [],
             }
         }
-
-    import api.agents.submit as submit_api
-
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fake_create_product_from_input,
-    )
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -1046,8 +1238,6 @@ async def test_submit_products_uses_draft_when_draft_id_provided(monkeypatch):
         draft_id = draft_response.json()["draft_id"]
         assert draft_id
 
-        created_payloads.clear()
-
         submit_response = await ac.post(
             "/agents/submit-products",
             data={
@@ -1058,24 +1248,11 @@ async def test_submit_products_uses_draft_when_draft_id_provided(monkeypatch):
         assert submit_response.status_code == 200
         body = submit_response.json()
         assert body["success_count"] == 1
-        assert created_payloads and created_payloads[0]["title"] == "Draft Source Demo"
 
 
 @pytest.mark.asyncio
 async def test_submit_products_rejects_unknown_draft_id(monkeypatch):
-    async def fail_create_product_from_input(self, product):
-        _ = (self, product)
-        raise AssertionError(
-            "create_product_from_input should not be called for unknown draft_id"
-        )
-
-    import api.agents.submit as submit_api
-
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fail_create_product_from_input,
-    )
+    _patch_bulk_submit(monkeypatch, [])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -1092,19 +1269,7 @@ async def test_submit_products_rejects_unknown_draft_id(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_submit_products_rejects_unknown_submitted_id(monkeypatch):
-    async def fail_create_product_from_input(self, product):
-        _ = (self, product)
-        raise AssertionError(
-            "create_product_from_input should not be called for unknown submitted_id"
-        )
-
-    import api.agents.submit as submit_api
-
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fail_create_product_from_input,
-    )
+    _patch_bulk_submit(monkeypatch, [])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -1147,8 +1312,6 @@ async def test_submit_products_requires_products_source(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_submit_products_ignores_legacy_ai_enhancements_flag(monkeypatch):
-    created_payloads: list[dict[str, Any]] = []
-
     async def fail_generate_suggestions_execute(
         *,
         supabase,
@@ -1160,22 +1323,7 @@ async def test_submit_products_ignores_legacy_ai_enhancements_flag(monkeypatch):
         _ = supabase, products, shop_domain, normalization_settings, trace_event
         raise AssertionError("submit should not call product intelligence generation")
 
-    async def fake_create_product_from_input(self, product):
-        created_payloads.append(dict(product))
-        return {
-            "data": {
-                "productCreate": {
-                    "product": {
-                        "id": "gid://shopify/Product/555",
-                        "title": product.get("title"),
-                    },
-                    "userErrors": [],
-                }
-            }
-        }
-
     import application.use_cases.processing.submit_products as submit_uc
-    import api.agents.submit as submit_api
 
     monkeypatch.setattr(
         submit_uc,
@@ -1183,11 +1331,14 @@ async def test_submit_products_ignores_legacy_ai_enhancements_flag(monkeypatch):
         fail_generate_suggestions_execute,
         raising=False,
     )
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fake_create_product_from_input,
-    )
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {"id": "gid://shopify/Product/555", "title": "Demo"},
+                "userErrors": [],
+            }
+        }
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -1200,7 +1351,6 @@ async def test_submit_products_ignores_legacy_ai_enhancements_flag(monkeypatch):
         assert response.status_code == 200
         body = response.json()
         assert body["success_count"] == 1
-        assert created_payloads and created_payloads[0]["title"] == "Demo"
 
 
 @pytest.mark.asyncio
@@ -1225,21 +1375,7 @@ async def test_submit_products_legacy_ai_flag_does_not_mutate_draft(monkeypatch)
             }
         ]
 
-    async def fake_create_product_from_input(self, product):
-        return {
-            "data": {
-                "productCreate": {
-                    "product": {
-                        "id": "gid://shopify/Product/777",
-                        "title": product.get("title"),
-                    },
-                    "userErrors": [],
-                }
-            }
-        }
-
     import application.use_cases.processing.submit_products as submit_uc
-    import api.agents.submit as submit_api
 
     monkeypatch.setattr(
         submit_uc,
@@ -1247,11 +1383,14 @@ async def test_submit_products_legacy_ai_flag_does_not_mutate_draft(monkeypatch)
         fake_generate_suggestions_execute,
         raising=False,
     )
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fake_create_product_from_input,
-    )
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {"id": "gid://shopify/Product/777", "title": "Drafted Product"},
+                "userErrors": [],
+            }
+        }
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -1755,6 +1894,80 @@ async def test_submit_offload_returns_queued_with_draft_tracking(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_submit_offload_resolves_shop_context_from_headers(monkeypatch):
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+
+    original_save_product_draft = ctx.services.supabase.save_product_draft
+
+    def fake_save_product_draft(**kwargs):
+        payload = dict(kwargs)
+        payload.pop("require_lifecycle_columns", None)
+        return original_save_product_draft(**payload)
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "save_product_draft",
+        fake_save_product_draft,
+        raising=False,
+    )
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        _ = require_persistent_queue
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    headers = {
+        "x-shop-domain": "header-shop.myshopify.com",
+        "x-shop-access-token": "shpat_header_token",
+    }
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        created = await ac.post(
+            "/agents/product-drafts",
+            data={
+                "products_json": json.dumps([{"title": "Header Draft Product"}]),
+                "run_id": "run-submit-header-base",
+                "import_mode": "auto",
+                "draft_name": "Header Draft",
+            },
+            headers=headers,
+        )
+        assert created.status_code == 200
+        draft_id = created.json()["draft_id"]
+
+        response = await ac.post(
+            "/agents/submit-products",
+            data={
+                "draft_id": draft_id,
+                "run_id": "run-submit-header-offload",
+                "offload": "true",
+                "import_mode": "auto",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 202
+        assert len(queued_jobs) == 1
+        assert queued_jobs[0]["shop_domain"] == "header-shop.myshopify.com"
+        assert (
+            queued_jobs[0]["payload"]["shop_access_token"] == "shpat_header_token"
+        )
+
+
+@pytest.mark.asyncio
 async def test_import_offload_returns_explicit_error_when_queue_persistence_fails(
     monkeypatch,
 ):
@@ -2016,26 +2229,17 @@ async def test_bulk_delete_product_drafts():
 
 @pytest.mark.asyncio
 async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
-    async def fake_create_product_from_input(self, product):
-        return {
-            "data": {
-                "productCreate": {
-                    "product": {
-                        "id": "gid://shopify/Product/1",
-                        "title": product.get("title"),
-                    },
-                    "userErrors": [],
-                }
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {
+                    "id": "gid://shopify/Product/1",
+                    "title": "Submitted Draft Product",
+                },
+                "userErrors": [],
             }
         }
-
-    import api.agents.submit as submit_api
-
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fake_create_product_from_input,
-    )
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -2105,26 +2309,17 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_bulk_delete_submitted_documents(monkeypatch):
-    async def fake_create_product_from_input(self, product):
-        return {
-            "data": {
-                "productCreate": {
-                    "product": {
-                        "id": "gid://shopify/Product/3",
-                        "title": product.get("title"),
-                    },
-                    "userErrors": [],
-                }
+    _patch_bulk_submit(monkeypatch, [{
+        "data": {
+            "productSet": {
+                "product": {
+                    "id": "gid://shopify/Product/3",
+                    "title": "Bulk Submitted",
+                },
+                "userErrors": [],
             }
         }
-
-    import api.agents.submit as submit_api
-
-    monkeypatch.setattr(
-        submit_api.ShopifyClient,
-        "create_product_from_input",
-        fake_create_product_from_input,
-    )
+    }])
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:

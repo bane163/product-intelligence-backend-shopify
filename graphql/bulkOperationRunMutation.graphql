@@ -1,0 +1,13 @@
+mutation bulkOperationRunMutation($mutation: String!, $stagedUploadPath: String!) {
+  bulkOperationRunMutation(mutation: $mutation, stagedUploadPath: $stagedUploadPath) {
+    bulkOperation {
+      id
+      status
+      url
+    }
+    userErrors {
+      field
+      message
+    }
+  }
+}

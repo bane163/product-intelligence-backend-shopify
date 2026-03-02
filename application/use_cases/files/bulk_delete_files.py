@@ -1,12 +1,6 @@
 from application.ports.supabase_port import SupabaseNamespacedPort
+from application.use_cases._bulk_delete import collect_bulk_delete_results
 
 
 def execute(supabase: SupabaseNamespacedPort, ids: list[str]) -> dict[str, list[str]]:
-    deleted_ids: list[str] = []
-    failed_ids: list[str] = []
-    for file_id in ids:
-        if supabase.file.delete_file(file_id):
-            deleted_ids.append(file_id)
-        else:
-            failed_ids.append(file_id)
-    return {"deleted_ids": deleted_ids, "failed_ids": failed_ids}
+    return collect_bulk_delete_results(ids, supabase.file.delete_file)

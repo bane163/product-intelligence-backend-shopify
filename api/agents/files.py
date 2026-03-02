@@ -17,7 +17,13 @@ from application.services.document_formats import (
     supported_extensions_display,
 )
 from .files_helper import generate_thumbnail_bytes
-from .schemas import BulkDeletePayload, BulkDeleteResult
+from .schemas import (
+    BulkDeletePayload,
+    BulkDeleteResult,
+    BulkUploadError,
+    BulkUploadItem,
+    BulkUploadResult,
+)
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -291,36 +297,17 @@ async def _run_import_in_background(
         )
 
 
-@router.get("/files", summary="List uploaded files")
-async def list_uploaded_files(
-    limit: int = 1000, offset: int = 0, ctx: AppContext = Depends(get_ctx)
+def _bulk_upload_error_code(status_code: int) -> str:
+    if status_code == 415:
+        return "unsupported_file_type"
+    if status_code >= 500:
+        return "processing_failed"
+    return f"http_{status_code}"
+
+
+async def _prepare_uploaded_file(
+    file: UploadFile, *, ctx: AppContext
 ) -> dict[str, Any]:
-    """List all uploaded files."""
-    from application.use_cases.files.list_files import execute as list_files_execute
-
-    resolved_limit = max(1, min(limit, 5000))
-    resolved_offset = max(0, offset)
-    files = list_files_execute(
-        supabase=ctx.supabase, limit=resolved_limit, offset=resolved_offset
-    )
-    return {"files": files}
-
-
-@router.get("/collabora-url", summary="Get current Collabora URL")
-async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
-    """Get the current Collabora URL and WOPI base URL for interactive viewer."""
-    from application.use_cases.collabora.get_collabora_url import (
-        execute as get_collabora_execute,
-    )
-
-    return get_collabora_execute(collabora=ctx.services.collabora)
-
-
-@router.post("/upload", summary="Upload a file for preview and processing")
-async def upload_file(
-    file: UploadFile = File(...), ctx: AppContext = Depends(get_ctx)
-) -> dict[str, Any]:
-    """Upload a file and return a file_id for WOPI preview."""
     file_bytes = await file.read()
     file_id = str(uuid.uuid4())
     original_name = file.filename or "document.xlsx"
@@ -366,13 +353,11 @@ async def upload_file(
     elif document_format.kind == "spreadsheet_legacy":
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
         try:
-            file_bytes = (
-                await ctx.services.collabora.convert_document_to_xlsx_collabora(
-                    file_bytes,
-                    filename=original_name,
-                    content_type=original_content_type or "application/octet-stream",
-                    collabora_base_url=collabora_url,
-                )
+            file_bytes = await ctx.services.collabora.convert_document_to_xlsx_collabora(
+                file_bytes,
+                filename=original_name,
+                content_type=original_content_type or "application/octet-stream",
+                collabora_base_url=collabora_url,
             )
         except Exception as exc:
             raise HTTPException(
@@ -384,29 +369,127 @@ async def upload_file(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+    return {
+        "file_id": file_id,
+        "name": stored_name,
+        "content_type": stored_content_type,
+        "content": file_bytes,
+        "size": len(file_bytes),
+    }
+
+
+@router.get("/files", summary="List uploaded files")
+async def list_uploaded_files(
+    limit: int = 1000, offset: int = 0, ctx: AppContext = Depends(get_ctx)
+) -> dict[str, Any]:
+    """List all uploaded files."""
+    from application.use_cases.files.list_files import execute as list_files_execute
+
+    resolved_limit = max(1, min(limit, 5000))
+    resolved_offset = max(0, offset)
+    files = list_files_execute(
+        supabase=ctx.supabase, limit=resolved_limit, offset=resolved_offset
+    )
+    return {"files": files}
+
+
+@router.get("/collabora-url", summary="Get current Collabora URL")
+async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
+    """Get the current Collabora URL and WOPI base URL for interactive viewer."""
+    from application.use_cases.collabora.get_collabora_url import (
+        execute as get_collabora_execute,
+    )
+
+    return get_collabora_execute(collabora=ctx.services.collabora)
+
+
+@router.post("/upload", summary="Upload a file for preview and processing")
+async def upload_file(
+    file: UploadFile = File(...), ctx: AppContext = Depends(get_ctx)
+) -> dict[str, Any]:
+    """Upload a file and return a file_id for WOPI preview."""
+    prepared = await _prepare_uploaded_file(file, ctx=ctx)
+
     from application.use_cases.files.save_file import execute as save_file_execute
 
     save_file_execute(
         supabase=ctx.supabase,
-        file_id=file_id,
-        name=stored_name,
-        content=file_bytes,
-        content_type=stored_content_type,
+        file_id=prepared["file_id"],
+        name=prepared["name"],
+        content=prepared["content"],
+        content_type=prepared["content_type"],
         file_origin=MERCHANT_UPLOAD_FILE_ORIGIN,
     )
     thumbnail_generated = False
 
-    from application.use_cases.files.get_file import execute as get_file_execute
-
-    file_name_dict = get_file_execute(supabase=ctx.supabase, file_id=file_id)
-    file_name = _optional_str(file_name_dict, "name") or "unknown"
-
     return {
-        "file_id": file_id,
-        "filename": file_name,
-        "size": len(file_bytes),
+        "file_id": prepared["file_id"],
+        "filename": prepared["name"],
+        "size": prepared["size"],
         "thumbnail_generated": thumbnail_generated,
     }
+
+
+@router.post("/upload/bulk", summary="Upload multiple files for preview and processing")
+async def upload_files_bulk(
+    files: list[UploadFile] = File(...),
+    ctx: AppContext = Depends(get_ctx),
+) -> BulkUploadResult:
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one file is required")
+
+    prepared_items: list[dict[str, Any]] = []
+    errors: list[BulkUploadError] = []
+
+    for index, file in enumerate(files):
+        try:
+            prepared = await _prepare_uploaded_file(file, ctx=ctx)
+            prepared["index"] = index
+            prepared_items.append(prepared)
+        except HTTPException as exc:
+            errors.append(
+                BulkUploadError(
+                    index=index,
+                    filename=file.filename or f"file-{index + 1}",
+                    error=str(exc.detail),
+                    code=_bulk_upload_error_code(exc.status_code),
+                )
+            )
+
+    if prepared_items:
+        payloads = [
+            {
+                "file_id": item["file_id"],
+                "name": item["name"],
+                "content": item["content"],
+                "content_type": item["content_type"],
+                "file_origin": MERCHANT_UPLOAD_FILE_ORIGIN,
+            }
+            for item in prepared_items
+        ]
+        try:
+            ctx.supabase.file.save_files(payloads)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed saving uploaded files: {exc}"
+            )
+
+    uploaded = [
+        BulkUploadItem(
+            index=item["index"],
+            file_id=item["file_id"],
+            filename=item["name"],
+            size=item["size"],
+        )
+        for item in prepared_items
+    ]
+    return BulkUploadResult(
+        total=len(files),
+        succeeded=len(uploaded),
+        failed=len(errors),
+        uploaded=uploaded,
+        errors=errors,
+    )
 
 
 @router.post("/excel", summary="Process an Excel file through the AI agent workflow")

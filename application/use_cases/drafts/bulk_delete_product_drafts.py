@@ -3,6 +3,7 @@
 from typing import Iterable
 
 from application.ports.supabase_port import SupabaseNamespacedPort
+from application.use_cases._bulk_delete import collect_bulk_delete_results
 
 
 def execute(
@@ -11,11 +12,10 @@ def execute(
     *,
     shop_domain: str | None = None,
 ) -> dict[str, list[str]]:
-    deleted_ids = []
-    failed_ids = []
-    for draft_id in ids:
-        if supabase.drafts.delete_product_draft(draft_id, shop_domain=shop_domain):
-            deleted_ids.append(draft_id)
-        else:
-            failed_ids.append(draft_id)
-    return {"deleted_ids": deleted_ids, "failed_ids": failed_ids}
+    return collect_bulk_delete_results(
+        ids,
+        lambda draft_id: supabase.drafts.delete_product_draft(
+            draft_id,
+            shop_domain=shop_domain,
+        ),
+    )

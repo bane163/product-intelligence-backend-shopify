@@ -63,14 +63,39 @@ class SupabaseLlmConfigMixin:
         cipher = self._get_cipher()
         return cipher.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
 
+    @staticmethod
+    def _get_api_key_env_var(extra: Any) -> str | None:
+        if not isinstance(extra, dict):
+            return None
+        raw = extra.get("api_key_env_var")
+        if not isinstance(raw, str):
+            return None
+        candidate = raw.strip()
+        if not candidate or not all(ch == "_" or ch.isalnum() for ch in candidate):
+            return None
+        return candidate
+
+    def _resolve_api_key_from_reference(self, row: dict[str, Any]) -> str:
+        # Missing env vars intentionally resolve to an empty key so callers can
+        # treat the config as incomplete instead of exposing plaintext secrets.
+        env_var = self._get_api_key_env_var(row.get("extra"))
+        if not env_var:
+            return ""
+        return os.getenv(env_var, "").strip()
+
     def _sanitize_llm_model_config(self, row: dict[str, Any]) -> dict[str, Any]:
         masked = dict(row)
         masked.pop("api_key_ciphertext", None)
-        masked["api_key_masked"] = self._mask_api_key(masked.pop("api_key", None)) or (
+        api_key_masked = self._mask_api_key(masked.pop("api_key", None)) or (
             f"************{masked.get('api_key_last4')}"
             if masked.get("api_key_last4")
             else None
         )
+        if not api_key_masked:
+            env_var = self._get_api_key_env_var(masked.get("extra"))
+            if env_var:
+                api_key_masked = f"env:{env_var}"
+        masked["api_key_masked"] = api_key_masked
         return masked
 
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]:
@@ -296,9 +321,14 @@ class SupabaseLlmConfigMixin:
         if not row:
             return None
         try:
+            api_key = self._decrypt_api_key(row.get("api_key_ciphertext") or "")
+            if not api_key:
+                api_key = self._resolve_api_key_from_reference(row)
+            api_key_masked = self._sanitize_llm_model_config(row).get("api_key_masked")
             return {
                 **row,
-                "api_key": self._decrypt_api_key(row.get("api_key_ciphertext") or ""),
+                "api_key": api_key,
+                "api_key_masked": api_key_masked,
             }
         except Exception:
             LOG.exception(

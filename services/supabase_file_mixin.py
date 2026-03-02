@@ -130,77 +130,124 @@ class SupabaseFileMixin:
         content_type: str | None = None,
         file_origin: str | None = None,
     ) -> None:
-        normalized_origin = self._normalize_file_origin(
-            file_origin
-        ) or self._infer_file_origin_from_filename(name)
-        bucket = self._try_get_bucket()
-        if bucket is None:
-            self.file_storage[file_id] = {
-                "name": name,
-                "content": content,
-                "content_type": content_type or "application/octet-stream",
-                "storage_path": file_id,
-                "file_origin": normalized_origin,
-                "thumbnail_storage_path": None,
-                "thumbnail_content": None,
-            }
+        self.save_files(
+            [
+                {
+                    "file_id": file_id,
+                    "name": name,
+                    "content": content,
+                    "content_type": content_type,
+                    "file_origin": file_origin,
+                }
+            ]
+        )
+
+    def save_files(self, files: Sequence[Mapping[str, Any]]) -> None:
+        if not files:
             return
 
-        safe_content_type = content_type or "application/octet-stream"
-        if safe_content_type.startswith("text/"):
-            safe_content_type = "application/octet-stream"
+        bucket = self._try_get_bucket()
+        metadata_payloads: list[dict[str, Any]] = []
+        legacy_metadata_payloads: list[dict[str, Any]] = []
 
-        try:
-            bucket.upload(
-                file_id,
-                content,
-                {
-                    "content-type": safe_content_type,
-                    "metadata": {"name": name},
-                },
+        for item in files:
+            file_id = str(item.get("file_id") or "").strip()
+            if not file_id:
+                continue
+            name = str(item.get("name") or "").strip() or file_id
+            content = item.get("content")
+            if not isinstance(content, (bytes, bytearray, memoryview)):
+                raise ValueError(f"Invalid content payload for file_id={file_id}")
+            content_bytes = bytes(content)
+            raw_content_type = item.get("content_type")
+            content_type = (
+                raw_content_type
+                if isinstance(raw_content_type, str) and raw_content_type
+                else "application/octet-stream"
             )
-        except Exception:
-            try:
-                bucket.update(
-                    file_id,
-                    content,
-                    {
-                        "content-type": safe_content_type,
-                        "metadata": {"name": name},
-                    },
-                )
-            except Exception:
-                bucket.upload(
-                    file_id,
-                    content,
-                    {"content-type": safe_content_type, "upsert": "true"},
-                )
+            normalized_origin = self._normalize_file_origin(
+                item.get("file_origin")
+            ) or self._infer_file_origin_from_filename(name)
+
+            if bucket is None:
+                self.file_storage[file_id] = {
+                    "name": name,
+                    "content": content_bytes,
+                    "content_type": content_type,
+                    "storage_path": file_id,
+                    "file_origin": normalized_origin,
+                    "thumbnail_storage_path": None,
+                    "thumbnail_content": None,
+                }
+            else:
+                safe_content_type = content_type
+                if safe_content_type.startswith("text/"):
+                    safe_content_type = "application/octet-stream"
+
+                try:
+                    bucket.upload(
+                        file_id,
+                        content_bytes,
+                        {
+                            "content-type": safe_content_type,
+                            "metadata": {"name": name},
+                        },
+                    )
+                except Exception:
+                    try:
+                        bucket.update(
+                            file_id,
+                            content_bytes,
+                            {
+                                "content-type": safe_content_type,
+                                "metadata": {"name": name},
+                            },
+                        )
+                    except Exception:
+                        bucket.upload(
+                            file_id,
+                            content_bytes,
+                            {"content-type": safe_content_type, "upsert": "true"},
+                        )
+
+            payload = {
+                "storage_path": file_id,
+                "filename": name,
+                "content_type": content_type,
+                "size": len(content_bytes),
+                "file_origin": normalized_origin,
+            }
+            metadata_payloads.append(payload)
+            legacy_payload = dict(payload)
+            legacy_payload.pop("file_origin", None)
+            legacy_metadata_payloads.append(legacy_payload)
+
+        if not metadata_payloads:
+            return
 
         try:
             client = self._get_supabase_client()
-            if client:
-                metadata_payload = {
-                    "storage_path": file_id,
-                    "filename": name,
-                    "content_type": content_type or "application/octet-stream",
-                    "size": len(content) if content else 0,
-                    "file_origin": normalized_origin,
-                }
+            if not client:
+                return
+            try:
+                client.table("file_metadata").upsert(
+                    metadata_payloads, on_conflict="storage_path"
+                ).execute()
+            except Exception:
                 try:
                     client.table("file_metadata").upsert(
-                        metadata_payload, on_conflict="storage_path"
+                        legacy_metadata_payloads, on_conflict="storage_path"
                     ).execute()
                 except Exception:
-                    legacy_payload = dict(metadata_payload)
-                    legacy_payload.pop("file_origin", None)
-                    try:
-                        client.table("file_metadata").upsert(
-                            legacy_payload, on_conflict="storage_path"
-                        ).execute()
-                    except Exception:
-                        client.table("file_metadata").insert(legacy_payload).execute()
+                    for payload in legacy_metadata_payloads:
+                        try:
+                            client.table("file_metadata").upsert(
+                                payload, on_conflict="storage_path"
+                            ).execute()
+                        except Exception:
+                            client.table("file_metadata").insert(payload).execute()
         except Exception:
-            LOG.exception("Failed inserting file metadata for %s", file_id)
+            LOG.exception("Failed inserting file metadata for bulk save")
 
     def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         try:

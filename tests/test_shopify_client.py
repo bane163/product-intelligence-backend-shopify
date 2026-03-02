@@ -123,6 +123,37 @@ async def test_update_product_with_metafields_triggers_metafields_set():
 
 
 @pytest.mark.asyncio
+async def test_get_product_metafields_uses_keys_and_returns_connection_nodes():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    query_resp = {
+        "data": {
+            "node": {
+                "metafields": {
+                    "nodes": [
+                        {
+                            "namespace": "specbrain",
+                            "key": "material",
+                            "value": "cotton",
+                            "type": "single_line_text_field",
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        route = mock.post("/admin/api/2025-10/graphql.json").respond(200, json=query_resp)
+        resp = await client.get_product_metafields(
+            "gid://shopify/Product/1",
+            [{"namespace": "specbrain", "key": "material"}],
+        )
+        assert resp == query_resp["data"]["node"]["metafields"]["nodes"]
+        request_body = json.loads(route.calls.last.request.content.decode())
+        assert request_body["variables"]["keys"] == ["specbrain.material"]
+
+
+@pytest.mark.asyncio
 async def test_list_products_for_audit_returns_normalized_rows():
     client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
 

@@ -196,6 +196,68 @@ async def test_upload_does_not_block_on_thumbnail_generation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bulk_upload_returns_per_file_results_with_partial_failure():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = [
+            (
+                "files",
+                (
+                    "good.xlsx",
+                    io.BytesIO(b"good-content"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            ),
+            ("files", ("bad.zip", io.BytesIO(b"zip-data"), "application/zip")),
+        ]
+        response = await ac.post("/agents/upload/bulk", files=files)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 2
+        assert payload["succeeded"] == 1
+        assert payload["failed"] == 1
+        assert len(payload["uploaded"]) == 1
+        assert len(payload["errors"]) == 1
+        assert payload["uploaded"][0]["filename"] == "good.xlsx"
+        assert payload["errors"][0]["filename"] == "bad.zip"
+        assert "Unsupported file type" in payload["errors"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_upload_succeeds_for_multiple_files():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        files = [
+            (
+                "files",
+                (
+                    "one.xlsx",
+                    io.BytesIO(b"one-content"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            ),
+            (
+                "files",
+                (
+                    "two.xlsx",
+                    io.BytesIO(b"two-content"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                ),
+            ),
+        ]
+        response = await ac.post("/agents/upload/bulk", files=files)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 2
+        assert payload["succeeded"] == 2
+        assert payload["failed"] == 0
+        assert len(payload["uploaded"]) == 2
+        assert payload["errors"] == []
+        uploaded_filenames = [item["filename"] for item in payload["uploaded"]]
+        assert uploaded_filenames == ["one.xlsx", "two.xlsx"]
+
+
+@pytest.mark.asyncio
 async def test_preview_generates_png(monkeypatch):
     async def fake_generate_thumbnail_bytes(**kwargs):
         _ = kwargs

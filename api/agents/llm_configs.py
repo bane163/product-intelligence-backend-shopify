@@ -69,7 +69,12 @@ async def get_active_llm_config(shop_domain: str, ctx: AppContext = Depends(get_
             "max_tokens": config.get("max_tokens"),
             "timeout_seconds": config.get("timeout_seconds"),
             "is_active": config.get("is_active"),
-            "api_key_masked": f"************{config.get('api_key_last4')}" if config.get("api_key_last4") else None,
+            "api_key_masked": config.get("api_key_masked")
+            or (
+                f"************{config.get('api_key_last4')}"
+                if config.get("api_key_last4")
+                else None
+            ),
             "created_at": config.get("created_at"),
             "updated_at": config.get("updated_at"),
         }

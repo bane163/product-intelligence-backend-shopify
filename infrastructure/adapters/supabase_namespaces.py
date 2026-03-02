@@ -26,6 +26,7 @@ class SupabaseDomainAccessors:
             target,
             (
                 "save_file",
+                "save_files",
                 "list_files",
                 "get_file",
                 "delete_file",
@@ -34,6 +35,7 @@ class SupabaseDomainAccessors:
             ),
             aliases={
                 "save": "save_file",
+                "save_many": "save_files",
                 "list": "list_files",
                 "get": "get_file",
                 "delete": "delete_file",

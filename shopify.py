@@ -310,22 +310,23 @@ class ShopifyClient:
     ) -> List[Dict[str, Any]]:
         if not identifiers:
             return []
-        normalized_identifiers = [
-            {"namespace": str(item.get("namespace") or "").strip(), "key": str(item.get("key") or "").strip()}
+        keys = [
+            f"{str(item.get('namespace') or '').strip()}.{str(item.get('key') or '').strip()}"
             for item in identifiers
             if isinstance(item, dict)
             and str(item.get("namespace") or "").strip()
             and str(item.get("key") or "").strip()
         ]
-        if not normalized_identifiers:
+        if not keys:
             return []
         query = _load_graphql("productMetafields.graphql")
-        resp = await self.graphql(query, {"id": gid, "identifiers": normalized_identifiers})
+        resp = await self.graphql(query, {"id": gid, "keys": keys})
         node = resp.get("data", {}).get("node", {}) if isinstance(resp, dict) else {}
-        metafields = node.get("metafields") if isinstance(node, dict) else None
-        if not isinstance(metafields, list):
+        metafields = node.get("metafields") if isinstance(node, dict) else {}
+        nodes = metafields.get("nodes") if isinstance(metafields, dict) else None
+        if not isinstance(nodes, list):
             return []
-        return [item for item in metafields if isinstance(item, dict)]
+        return [item for item in nodes if isinstance(item, dict)]
 
     async def create_product_options(
         self, product_id: str, options: List[Dict[str, Any]]

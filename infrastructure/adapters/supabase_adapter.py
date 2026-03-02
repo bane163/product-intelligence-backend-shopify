@@ -53,6 +53,9 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             file_origin=file_origin,
         )
 
+    def save_files(self, files: list[dict[str, Any]]) -> None:
+        return self._service.save_files(files)
+
     def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         return self._service.list_files(limit, offset)
 

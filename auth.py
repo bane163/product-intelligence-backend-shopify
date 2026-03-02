@@ -1,5 +1,7 @@
 import hashlib
+import logging
 import hmac as _hmac
+import os
 import secrets
 from typing import Dict, Optional
 
@@ -12,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 router = APIRouter(prefix="/shopify/auth", tags=["shopify_auth"])
+LOG = logging.getLogger(__name__)
 
 # In-memory state store for CSRF protection (simple; not persistent)
 _state_store: Dict[str, str] = {}
@@ -69,6 +72,84 @@ def _verify_hmac(params: Dict[str, str], client_secret: str) -> bool:
     return _hmac.compare_digest(digest, params.get("hmac", ""))
 
 
+def _seed_default_llm_configs_on_install(shop: str) -> None:
+    tenant = str(shop or "").strip().lower()
+    if not tenant:
+        return
+
+    from app_context import get_app_context
+
+    llm_configs = get_app_context().supabase.llm_configs
+    existing = llm_configs.list_llm_model_configs(tenant) or []
+    has_ollama = any(
+        "ollama" in str(item.get("provider") or "").strip().lower()
+        for item in existing
+    )
+    has_openai = any(
+        str(item.get("provider") or "").strip().lower().startswith("openai")
+        for item in existing
+    )
+    has_active = any(bool(item.get("is_active")) for item in existing)
+
+    defaults: list[dict] = []
+    if not has_ollama:
+        defaults.append(
+            {
+                "name": "Ollama Cloud (Default)",
+                "provider": "ollama/openai-compat",
+                "base_url": os.getenv("OLLAMA_CLOUD_URL", "http://localhost:11434/v1/"),
+                "model_id": os.getenv("OLLAMA_MODEL_ID", "deepseek-r1:8b"),
+                "extra": {
+                    "seeded_by": "shopify_auth_install",
+                    "api_key_source": "env_ref",
+                    "api_key_env_var": "OLLAMA_API_KEY",
+                    "enable_file_search": False,
+                },
+            }
+        )
+    if not has_openai:
+        defaults.append(
+            {
+                "name": "OpenAI (Default)",
+                "provider": "openai",
+                "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                "model_id": os.getenv("OPENAI_MODEL_ID", "gpt-4.1-mini"),
+                "extra": {
+                    "seeded_by": "shopify_auth_install",
+                    "api_key_source": "env_ref",
+                    "api_key_env_var": "OPENAI_API_KEY",
+                    "enable_file_search": True,
+                },
+            }
+        )
+
+    for default in defaults:
+        extra = default.get("extra") or {}
+        env_var = str(extra.get("api_key_env_var") or "").strip()
+        has_env_key = bool(env_var and os.getenv(env_var, "").strip())
+        is_active = bool((not has_active) and has_env_key)
+        if is_active:
+            has_active = True
+        try:
+            llm_configs.create_llm_model_config(
+                shop_domain=tenant,
+                name=str(default["name"]),
+                provider=str(default["provider"]),
+                base_url=str(default["base_url"]),
+                model_id=str(default["model_id"]),
+                # Seeded defaults keep only a server-side env reference in `extra`.
+                api_key="",
+                is_active=is_active,
+                extra=dict(extra),
+            )
+        except Exception:
+            LOG.exception(
+                "Failed seeding default llm config provider=%s shop=%s",
+                default.get("provider"),
+                tenant,
+            )
+
+
 @router.get("/callback")
 async def callback(request: Request):
     """Callback endpoint Shopify redirects to after auth. Exchanges code for access token and stores it."""
@@ -119,6 +200,10 @@ async def callback(request: Request):
 
     # Persist token in the simple JSON token store
     token_store.save_token(shop, access_token)
+    try:
+        _seed_default_llm_configs_on_install(shop)
+    except Exception:
+        LOG.exception("Failed seeding default llm configs for shop=%s", shop)
 
     # Clean up state
     try:

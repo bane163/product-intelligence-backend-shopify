@@ -1,5 +1,7 @@
 """Shared request/response schemas for agents routes."""
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -32,3 +34,35 @@ class BulkUploadResult(BaseModel):
     failed: int
     uploaded: list[BulkUploadItem] = Field(default_factory=list)
     errors: list[BulkUploadError] = Field(default_factory=list)
+
+
+class BatchExtractSubmitRequest(BaseModel):
+    file_ids: list[str] = Field(min_length=1)
+    import_mode: str = "auto"
+    extraction_mode: str = "per_sheet"
+    auto_submit: bool = True
+    offload: bool = True
+
+
+class BatchExtractSubmitAcceptedItem(BaseModel):
+    index: int
+    file_id: str
+    draft_id: str
+    extraction_run_id: str
+    submit_run_id: str
+    status: Literal["queued"] = "queued"
+
+
+class BatchExtractSubmitError(BaseModel):
+    index: int
+    file_id: str
+    error: str
+    code: str | None = None
+
+
+class BatchExtractSubmitResult(BaseModel):
+    total: int
+    queued: int
+    failed: int
+    accepted: list[BatchExtractSubmitAcceptedItem] = Field(default_factory=list)
+    errors: list[BatchExtractSubmitError] = Field(default_factory=list)

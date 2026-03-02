@@ -16,6 +16,20 @@ TEST_SHOP_DOMAIN = "store.myshopify.com"
 TEST_SHOP_HEADERS = {"x-shop-domain": TEST_SHOP_DOMAIN}
 
 
+def _force_in_memory_storage(monkeypatch):
+    ctx = get_app_context()
+    service = getattr(ctx.services.supabase, "_service", None)
+    if service is not None:
+        monkeypatch.setattr(service, "_try_get_bucket", lambda: None, raising=False)
+        monkeypatch.setattr(service, "_get_supabase_client", lambda: None, raising=False)
+    monkeypatch.setattr(
+        ctx.services.supabase, "_try_get_bucket", lambda: None, raising=False
+    )
+    monkeypatch.setattr(
+        ctx.services.supabase, "_get_supabase_client", lambda: None, raising=False
+    )
+
+
 @pytest.mark.asyncio
 async def test_upload_and_wopi_get_file_contents():
     transport = ASGITransport(app=app)
@@ -1578,6 +1592,375 @@ async def test_import_ignores_freeform_prompt_fields(monkeypatch):
         assert "prompt" not in captured
         assert "writer_prompt" not in captured
         assert captured.get("extraction_mode") == "per_sheet"
+
+
+@pytest.mark.asyncio
+async def test_batch_extract_submit_contract_returns_expected_shape_with_partial_failure(
+    monkeypatch,
+):
+    _force_in_memory_storage(monkeypatch)
+    tenant_header = {"x-shop-domain": "batch-contract.myshopify.com"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-contract.xlsx",
+                    io.BytesIO(b"batch-contract"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        valid_file_id = uploaded.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import/batch",
+            headers=tenant_header,
+            json={
+                "file_ids": [valid_file_id, "missing-file-id"],
+                "import_mode": "auto",
+                "extraction_mode": "per_sheet",
+                "auto_submit": True,
+                "offload": True,
+            },
+        )
+        assert response.status_code == 202
+        body = response.json()
+        assert body["total"] == 2
+        assert body["queued"] == 1
+        assert body["failed"] == 1
+        assert len(body["accepted"]) == 1
+        assert len(body["errors"]) == 1
+
+        accepted = body["accepted"][0]
+        assert accepted["index"] == 0
+        assert accepted["file_id"] == valid_file_id
+        assert accepted["status"] == "queued"
+        assert isinstance(accepted["draft_id"], str) and accepted["draft_id"]
+        assert (
+            isinstance(accepted["extraction_run_id"], str)
+            and accepted["extraction_run_id"]
+        )
+        assert isinstance(accepted["submit_run_id"], str) and accepted["submit_run_id"]
+
+        error = body["errors"][0]
+        assert error["index"] == 1
+        assert error["file_id"] == "missing-file-id"
+        assert error["code"] == "file_not_found"
+        assert "File not found" in error["error"]
+
+
+@pytest.mark.asyncio
+async def test_batch_extract_submit_contract_requires_non_empty_file_ids(monkeypatch):
+    _force_in_memory_storage(monkeypatch)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.post(
+            "/agents/import/batch",
+            json={"file_ids": [], "auto_submit": True, "offload": True},
+        )
+        assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_batch_extract_submit_requires_shop_domain(monkeypatch):
+    _force_in_memory_storage(monkeypatch)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-missing-tenant.xlsx",
+                    io.BytesIO(b"batch-missing-tenant"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import/batch",
+            json={
+                "file_ids": [file_id],
+                "import_mode": "auto",
+                "extraction_mode": "per_sheet",
+                "auto_submit": True,
+                "offload": True,
+            },
+        )
+        assert response.status_code == 400
+        assert "shop_domain" in response.text
+
+
+@pytest.mark.asyncio
+async def test_batch_extract_submit_persists_tenant_scoped_draft_visible_in_list(
+    monkeypatch,
+):
+    _force_in_memory_storage(monkeypatch)
+    tenant_header = {"x-shop-domain": "batch-shop.myshopify.com"}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        uploaded = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-visible.xlsx",
+                    io.BytesIO(b"batch-visible"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+
+        queued = await ac.post(
+            "/agents/import/batch",
+            headers=tenant_header,
+            json={
+                "file_ids": [file_id],
+                "import_mode": "auto",
+                "extraction_mode": "per_sheet",
+                "auto_submit": True,
+                "offload": True,
+            },
+        )
+        assert queued.status_code == 202
+        draft_id = queued.json()["accepted"][0]["draft_id"]
+
+        listed = await ac.get("/agents/product-drafts", headers=tenant_header)
+        assert listed.status_code == 200
+        draft_ids = [item.get("draft_id") for item in listed.json()["drafts"]]
+        assert draft_id in draft_ids
+
+
+@pytest.mark.asyncio
+async def test_batch_extract_submit_queues_document_import_jobs(monkeypatch):
+    _force_in_memory_storage(monkeypatch)
+    tenant_header = {"x-shop-domain": "batch-queue.myshopify.com"}
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        assert require_persistent_queue is True
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        first_upload = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-queue-1.xlsx",
+                    io.BytesIO(b"batch-queue-1"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        second_upload = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-queue-2.xlsx",
+                    io.BytesIO(b"batch-queue-2"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert first_upload.status_code == 200
+        assert second_upload.status_code == 200
+        first_file_id = first_upload.json()["file_id"]
+        second_file_id = second_upload.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import/batch",
+            headers=tenant_header,
+            json={
+                "file_ids": [first_file_id, second_file_id],
+                "import_mode": "auto",
+                "extraction_mode": "per_sheet",
+                "auto_submit": True,
+                "offload": True,
+            },
+        )
+        assert response.status_code == 202
+        body = response.json()
+        assert body["total"] == 2
+        assert body["queued"] == 2
+        assert body["failed"] == 0
+        assert len(body["accepted"]) == 2
+        assert len(queued_jobs) == 2
+
+        queued_by_file_id = {item["file_id"]: item for item in queued_jobs}
+        assert set(queued_by_file_id.keys()) == {first_file_id, second_file_id}
+        for accepted in body["accepted"]:
+            job = queued_by_file_id[accepted["file_id"]]
+            assert job["job_type"] == "document_import"
+            assert job["status"] == "queued"
+            assert job["run_id"] == accepted["extraction_run_id"]
+            assert job["draft_id"] == accepted["draft_id"]
+            assert job["payload"]["auto_submit"] is True
+            assert job["payload"]["submit_run_id"] == accepted["submit_run_id"]
+            assert job["payload"]["extraction_mode"] == "per_sheet"
+
+
+@pytest.mark.asyncio
+async def test_batch_extract_submit_reuses_active_draft_without_duplicate_enqueue(
+    monkeypatch,
+):
+    _force_in_memory_storage(monkeypatch)
+    tenant_header = {"x-shop-domain": "batch-idempotency.myshopify.com"}
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        assert require_persistent_queue is True
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        upload = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-idempotency.xlsx",
+                    io.BytesIO(b"batch-idempotency"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert upload.status_code == 200
+        file_id = upload.json()["file_id"]
+
+        first = await ac.post(
+            "/agents/import/batch",
+            headers=tenant_header,
+            json={"file_ids": [file_id], "auto_submit": True, "offload": True},
+        )
+        second = await ac.post(
+            "/agents/import/batch",
+            headers=tenant_header,
+            json={"file_ids": [file_id], "auto_submit": True, "offload": True},
+        )
+        assert first.status_code == 202
+        assert second.status_code == 202
+        first_accepted = first.json()["accepted"][0]
+        second_accepted = second.json()["accepted"][0]
+
+        assert second_accepted["draft_id"] == first_accepted["draft_id"]
+        assert second_accepted["extraction_run_id"] == first_accepted["extraction_run_id"]
+        assert second_accepted["submit_run_id"] == first_accepted["submit_run_id"]
+        assert len(queued_jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_batch_extract_submit_reports_per_file_queue_failure(monkeypatch):
+    _force_in_memory_storage(monkeypatch)
+    tenant_header = {"x-shop-domain": "batch-errors.myshopify.com"}
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+    failing_file_id = {"value": None}
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        assert require_persistent_queue is True
+        payload = {"job_id": job_id, **fields}
+        if payload.get("file_id") == failing_file_id["value"]:
+            raise RuntimeError("offload_jobs table missing")
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        first_upload = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-queue-ok.xlsx",
+                    io.BytesIO(b"batch-queue-ok"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        second_upload = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-queue-fail.xlsx",
+                    io.BytesIO(b"batch-queue-fail"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert first_upload.status_code == 200
+        assert second_upload.status_code == 200
+        first_file_id = first_upload.json()["file_id"]
+        failing_file_id["value"] = second_upload.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import/batch",
+            headers=tenant_header,
+            json={
+                "file_ids": [first_file_id, failing_file_id["value"]],
+                "auto_submit": True,
+                "offload": True,
+            },
+        )
+        assert response.status_code == 202
+        body = response.json()
+        assert body["total"] == 2
+        assert body["queued"] == 1
+        assert body["failed"] == 1
+        assert len(body["accepted"]) == 1
+        assert len(body["errors"]) == 1
+        assert body["accepted"][0]["file_id"] == first_file_id
+        assert body["errors"][0]["file_id"] == failing_file_id["value"]
+        assert body["errors"][0]["code"] == "queue_failed"
+        assert "offload_jobs table missing" in body["errors"][0]["error"]
+        assert len(queued_jobs) == 1
+        assert queued_jobs[0]["file_id"] == first_file_id
 
 
 @pytest.mark.asyncio

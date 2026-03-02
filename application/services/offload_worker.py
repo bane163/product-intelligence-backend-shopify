@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import socket
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from app_context import AppContext, get_app_context
@@ -177,6 +179,9 @@ class OffloadWorker:
         write_to_file = _parse_bool(payload.get("write_to_file"))
         output_path = _optional_str(payload.get("output_path"))
         collabora_url = _optional_str(payload.get("collabora_url"))
+        import_mode = _optional_str(payload.get("import_mode")) or "auto"
+        auto_submit = _parse_bool(payload.get("auto_submit"))
+        requested_submit_run_id = _optional_str(payload.get("submit_run_id"))
 
         if not file_id:
             raise RuntimeError("Document import offload job missing file_id")
@@ -260,6 +265,95 @@ class OffloadWorker:
                 extraction_run_id=run_id,
                 extraction_error=None,
             )
+
+            draft_state = get_draft_execute(
+                supabase=self.ctx.supabase,
+                draft_id=draft_id,
+                shop_domain=shop_domain,
+            )
+            draft_submit_status = (
+                (_optional_str_field(draft_state, "submit_status") or "").lower()
+                if isinstance(draft_state, dict)
+                else ""
+            )
+            draft_submit_run_id = (
+                _optional_str_field(draft_state, "submit_run_id")
+                if isinstance(draft_state, dict)
+                else None
+            )
+            should_queue_submit = auto_submit or bool(draft_submit_run_id)
+            if should_queue_submit and draft_submit_status not in {
+                "queued",
+                "running",
+                "succeeded",
+            }:
+                submit_run_id = (
+                    requested_submit_run_id or draft_submit_run_id or str(uuid.uuid4())
+                )
+                document_name = (
+                    _optional_str_field(draft_state, "draft_name")
+                    if isinstance(draft_state, dict)
+                    else None
+                ) or input_name
+                try:
+                    _save_draft_state(
+                        ctx=self.ctx,
+                        draft_id=draft_id,
+                        shop_domain=shop_domain,
+                        fallback_run_id=run_id,
+                        fallback_import_mode=import_mode,
+                        fallback_name=document_name,
+                        submit_status="queued",
+                        submit_run_id=submit_run_id,
+                        submit_error=None,
+                    )
+                    self.ctx.supabase.runs.create_or_update_run(
+                        submit_run_id,
+                        {
+                            "status": "queued",
+                            "source": "shopify_submit",
+                            "started_at": datetime.now(timezone.utc).isoformat(),
+                            "attempt": 1,
+                            "shop_domain": shop_domain,
+                        },
+                    )
+                    self.ctx.supabase.runs.enqueue_offload_job(
+                        str(uuid.uuid4()),
+                        {
+                            "queue_name": "offload",
+                            "job_type": "shopify_submit",
+                            "status": "queued",
+                            "run_id": submit_run_id,
+                            "draft_id": draft_id,
+                            "submitted_id": None,
+                            "shop_domain": shop_domain,
+                            "payload": {
+                                "import_mode": import_mode,
+                                "document_name": document_name,
+                                "products_json": None,
+                                "shop_access_token": None,
+                                "has_shop_access_token": False,
+                            },
+                        },
+                        require_persistent_queue=True,
+                    )
+                except Exception as exc:
+                    _save_draft_state(
+                        ctx=self.ctx,
+                        draft_id=draft_id,
+                        shop_domain=shop_domain,
+                        fallback_run_id=run_id,
+                        fallback_import_mode=import_mode,
+                        fallback_name=document_name,
+                        submit_status="failed",
+                        submit_run_id=submit_run_id,
+                        submit_error=str(exc),
+                    )
+                    LOG.exception(
+                        "Failed queueing auto submit for draft_id=%s run_id=%s",
+                        draft_id,
+                        run_id,
+                    )
 
         return {
             "run_id": run_id,

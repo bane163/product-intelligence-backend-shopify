@@ -21,6 +21,7 @@ class _DummyShopify:
 def _build_ctx() -> AppContext:
     supabase_service = SupabaseService()
     supabase_service._get_supabase_client = lambda: None  # type: ignore[attr-defined]
+    supabase_service._try_get_bucket = lambda: None  # type: ignore[attr-defined]
     return AppContext(
         services=ServiceRegistry(
             supabase=SupabaseAdapter(supabase_service),
@@ -170,6 +171,105 @@ async def test_run_once_marks_document_import_job_failed_when_file_missing():
     assert draft is not None
     assert draft["extraction_status"] == "failed"
     assert "file not found" in str(draft.get("extraction_error", "")).lower()
+
+
+@pytest.mark.asyncio
+async def test_run_once_document_import_auto_submit_enqueues_shopify_submit_job(
+    monkeypatch,
+):
+    import application.services.offload_worker as offload_worker
+
+    ctx = _build_ctx()
+    extraction_run_id = "run-document-auto-submit"
+    submit_run_id = "run-submit-auto-submit"
+    draft_id = "draft-document-auto-submit"
+    file_id = "file-document-auto-submit"
+    job_id = "job-document-auto-submit"
+    ctx.supabase.file.save_file(
+        file_id,
+        name="queued-auto-submit.xlsx",
+        content=b"queued",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    ctx.supabase.drafts.save_product_draft(
+        draft_id=draft_id,
+        run_id=extraction_run_id,
+        import_mode="auto",
+        draft_name="Queued Auto Submit",
+        input_file_id=file_id,
+        input_filename="queued-auto-submit.xlsx",
+        extraction_status="queued",
+        extraction_run_id=extraction_run_id,
+        extraction_error=None,
+        submit_status=None,
+        submit_run_id=submit_run_id,
+        submit_error=None,
+        products=[],
+    )
+    ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "document_import",
+            "status": "queued",
+            "run_id": extraction_run_id,
+            "draft_id": draft_id,
+            "file_id": file_id,
+            "payload": {
+                "input_filename": "queued-auto-submit.xlsx",
+                "input_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "extraction_mode": "per_sheet",
+                "auto_submit": True,
+                "submit_run_id": submit_run_id,
+                "import_mode": "auto",
+            },
+        },
+    )
+
+    async def fake_process_document_execute(**kwargs):
+        assert kwargs["run_id"] == extraction_run_id
+        assert kwargs["file_bytes"] == b"queued"
+        return {
+            "run_id": extraction_run_id,
+            "result": {
+                "products": [{"title": "Queued Product"}],
+            },
+        }
+
+    monkeypatch.setattr(
+        offload_worker,
+        "process_document_execute",
+        fake_process_document_execute,
+    )
+
+    worker = offload_worker.OffloadWorker(
+        ctx=ctx, queue_name="offload", worker_id="worker-1"
+    )
+    processed = await worker.run_once()
+    assert processed is True
+
+    import_job = ctx.supabase.runs.get_offload_job(job_id)
+    assert import_job is not None
+    assert import_job["status"] == "succeeded"
+
+    offload_jobs = getattr(ctx.supabase._service, "offload_jobs", {})
+    submit_jobs = [
+        item
+        for item in offload_jobs.values()
+        if item.get("job_type") == "shopify_submit" and item.get("draft_id") == draft_id
+    ]
+    assert len(submit_jobs) == 1
+    assert submit_jobs[0]["status"] == "queued"
+    assert submit_jobs[0]["run_id"] == submit_run_id
+    assert submit_jobs[0]["payload"]["import_mode"] == "auto"
+
+    submit_run = ctx.supabase.runs.get_run(submit_run_id)
+    assert submit_run is None or submit_run["status"] == "queued"
+
+    draft = ctx.supabase.drafts.get_product_draft(draft_id)
+    assert draft is not None
+    assert draft["submit_status"] == "queued"
+    assert draft["submit_run_id"] == submit_run_id
 
 
 @pytest.mark.asyncio

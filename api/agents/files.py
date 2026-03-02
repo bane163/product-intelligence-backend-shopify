@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 
 from app_context import AppContext, get_ctx
@@ -18,12 +18,17 @@ from application.services.document_formats import (
 )
 from .files_helper import generate_thumbnail_bytes
 from .schemas import (
+    BatchExtractSubmitAcceptedItem,
+    BatchExtractSubmitError,
+    BatchExtractSubmitRequest,
+    BatchExtractSubmitResult,
     BulkDeletePayload,
     BulkDeleteResult,
     BulkUploadError,
     BulkUploadItem,
     BulkUploadResult,
 )
+from .utils import require_shop_domain
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -305,6 +310,146 @@ def _bulk_upload_error_code(status_code: int) -> str:
     return f"http_{status_code}"
 
 
+def _queue_batch_extract_submit_for_file(
+    *,
+    ctx: AppContext,
+    file_id: str,
+    import_mode: str,
+    extraction_mode: str,
+    auto_submit: bool,
+    shop_domain: str | None = None,
+) -> BatchExtractSubmitAcceptedItem:
+    from application.use_cases.files.get_file import execute as get_file_execute
+
+    file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id)
+    if not isinstance(file_entry, dict):
+        raise LookupError("File not found")
+    file_content = file_entry.get("content")
+    if not isinstance(file_content, (bytes, bytearray)):
+        raise RuntimeError("Stored file content is invalid")
+    input_name = _optional_str(file_entry, "name")
+    input_content_type = _optional_str(file_entry, "content_type")
+    file_size = len(file_content)
+
+    active_draft = _find_active_import_draft_for_file(
+        ctx=ctx,
+        file_id=file_id,
+        shop_domain=shop_domain,
+    )
+    active_draft_id = _optional_str(active_draft, "draft_id")
+    if active_draft and active_draft_id:
+        extraction_run_id = _first_non_empty_str(
+            _optional_str(active_draft, "extraction_run_id"),
+            _optional_str(active_draft, "run_id"),
+        ) or str(uuid.uuid4())
+        submit_run_id = _first_non_empty_str(_optional_str(active_draft, "submit_run_id"))
+        if auto_submit and not submit_run_id:
+            submit_run_id = str(uuid.uuid4())
+        if auto_submit and submit_run_id:
+            _save_draft_state(
+                ctx=ctx,
+                draft_id=active_draft_id,
+                shop_domain=shop_domain,
+                fallback_run_id=extraction_run_id,
+                fallback_import_mode=(
+                    _first_non_empty_str(_optional_str(active_draft, "import_mode"))
+                    or import_mode
+                ),
+                fallback_name=input_name,
+                fallback_input_file_id=file_id,
+                fallback_input_filename=input_name,
+                submit_run_id=submit_run_id,
+                submit_error=None,
+            )
+        elif not _first_non_empty_str(_optional_str(active_draft, "draft_name")):
+            _save_draft_state(
+                ctx=ctx,
+                draft_id=active_draft_id,
+                shop_domain=shop_domain,
+                fallback_run_id=extraction_run_id,
+                fallback_import_mode=(
+                    _first_non_empty_str(_optional_str(active_draft, "import_mode"))
+                    or import_mode
+                ),
+                fallback_name=input_name,
+                fallback_input_file_id=file_id,
+                fallback_input_filename=input_name,
+            )
+        return BatchExtractSubmitAcceptedItem(
+            index=-1,
+            file_id=file_id,
+            draft_id=active_draft_id,
+            extraction_run_id=extraction_run_id,
+            submit_run_id=submit_run_id or str(uuid.uuid4()),
+        )
+
+    extraction_run_id = str(uuid.uuid4())
+    draft_id = str(uuid.uuid4())
+    submit_run_id = str(uuid.uuid4())
+    _save_draft_state(
+        ctx=ctx,
+        draft_id=draft_id,
+        shop_domain=shop_domain,
+        fallback_run_id=extraction_run_id,
+        fallback_import_mode=import_mode,
+        fallback_name=input_name,
+        fallback_input_file_id=file_id,
+        fallback_input_filename=input_name,
+        products=[],
+        extraction_status="queued",
+        extraction_run_id=extraction_run_id,
+        extraction_error=None,
+        submit_status=None,
+        submit_run_id=submit_run_id if auto_submit else None,
+        submit_error=None,
+    )
+    ctx.supabase.runs.create_or_update_run(
+        extraction_run_id,
+        {
+            "status": "queued",
+            "source": "document_import",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "input_file_id": file_id,
+            "input_filename": input_name,
+            "input_content_type": input_content_type,
+            "input_size_bytes": file_size,
+            "attempt": 1,
+            "shop_domain": shop_domain,
+        },
+    )
+    ctx.supabase.runs.enqueue_offload_job(
+        str(uuid.uuid4()),
+        {
+            "queue_name": "offload",
+            "job_type": "document_import",
+            "status": "queued",
+            "run_id": extraction_run_id,
+            "draft_id": draft_id,
+            "file_id": file_id,
+            "shop_domain": shop_domain,
+            "payload": {
+                "input_filename": input_name,
+                "input_content_type": input_content_type,
+                "extraction_mode": extraction_mode,
+                "write_to_file": False,
+                "output_path": None,
+                "collabora_url": None,
+                "import_mode": import_mode,
+                "auto_submit": bool(auto_submit),
+                "submit_run_id": submit_run_id if auto_submit else None,
+            },
+        },
+        require_persistent_queue=True,
+    )
+    return BatchExtractSubmitAcceptedItem(
+        index=-1,
+        file_id=file_id,
+        draft_id=draft_id,
+        extraction_run_id=extraction_run_id,
+        submit_run_id=submit_run_id,
+    )
+
+
 async def _prepare_uploaded_file(
     file: UploadFile, *, ctx: AppContext
 ) -> dict[str, Any]:
@@ -488,6 +633,98 @@ async def upload_files_bulk(
         succeeded=len(uploaded),
         failed=len(errors),
         uploaded=uploaded,
+        errors=errors,
+    )
+
+
+@router.post(
+    "/import/batch",
+    summary="Queue extraction and auto-submit for multiple uploaded files",
+    status_code=202,
+)
+async def queue_batch_extract_submit(
+    request: Request,
+    payload: BatchExtractSubmitRequest,
+    ctx: AppContext = Depends(get_ctx),
+) -> BatchExtractSubmitResult:
+    resolved_shop_domain = require_shop_domain(request)
+    accepted: list[BatchExtractSubmitAcceptedItem] = []
+    errors: list[BatchExtractSubmitError] = []
+
+    for index, raw_file_id in enumerate(payload.file_ids):
+        file_id = raw_file_id.strip()
+        if not file_id:
+            errors.append(
+                BatchExtractSubmitError(
+                    index=index,
+                    file_id=raw_file_id,
+                    error="File ID is required",
+                    code="invalid_file_id",
+                )
+            )
+            continue
+
+        try:
+            queued_item = _queue_batch_extract_submit_for_file(
+                ctx=ctx,
+                file_id=file_id,
+                import_mode=payload.import_mode,
+                extraction_mode=payload.extraction_mode,
+                auto_submit=payload.auto_submit,
+                shop_domain=resolved_shop_domain,
+            )
+        except LookupError:
+            errors.append(
+                BatchExtractSubmitError(
+                    index=index,
+                    file_id=file_id,
+                    error="File not found",
+                    code="file_not_found",
+                )
+            )
+            continue
+        except RuntimeError as exc:
+            message = str(exc).strip() or "Failed queueing batch import"
+            code = (
+                "invalid_file_content"
+                if "content is invalid" in message.lower()
+                else "queue_failed"
+            )
+            errors.append(
+                BatchExtractSubmitError(
+                    index=index,
+                    file_id=file_id,
+                    error=message,
+                    code=code,
+                )
+            )
+            continue
+        except Exception as exc:
+            errors.append(
+                BatchExtractSubmitError(
+                    index=index,
+                    file_id=file_id,
+                    error=str(exc) or "Failed queueing batch import",
+                    code="queue_failed",
+                )
+            )
+            continue
+
+        accepted.append(
+            BatchExtractSubmitAcceptedItem(
+                index=index,
+                file_id=queued_item.file_id,
+                draft_id=queued_item.draft_id,
+                extraction_run_id=queued_item.extraction_run_id,
+                submit_run_id=queued_item.submit_run_id,
+            )
+        )
+
+    return BatchExtractSubmitResult(
+        total=len(payload.file_ids),
+        queued=len(accepted),
+        failed=len(errors),
+        accepted=accepted,
         errors=errors,
     )
 

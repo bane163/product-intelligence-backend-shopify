@@ -91,7 +91,7 @@ Recommended client flow:
 2. Start realtime subscriptions scoped to `shop_domain` + relevant `run_id`/`draft_id`.
 3. On reconnect, call snapshot again with `after_seq` (last seen event sequence) to backfill any missed events.
 
-Mutations still go through backend APIs (`/agents/import`, `/agents/submit-products`); realtime is read-only push.
+Mutations still go through backend APIs (`/agents/import`, `/agents/import/batch`, `/agents/submit-products`); realtime is read-only push.
 
 ### How to Stop
 

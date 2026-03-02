@@ -96,6 +96,7 @@ async def execute(
 
         model_env = None
         model_provider = None
+        model_file_search_enabled = None
         if shop_domain:
             active_model = supabase.llm_configs.get_active_llm_model_config(shop_domain)
             if active_model:
@@ -109,6 +110,12 @@ async def execute(
                     if active_model.get("provider") is not None
                     else None
                 )
+                model_extra = active_model.get("extra")
+                model_file_search_enabled = True
+                if isinstance(model_extra, dict):
+                    explicit_toggle = model_extra.get("enable_file_search")
+                    if isinstance(explicit_toggle, bool):
+                        model_file_search_enabled = explicit_toggle
                 supabase.runs.create_or_update_run(
                     run_id,
                     {
@@ -124,6 +131,7 @@ async def execute(
                         "model_name": active_model.get("model_id"),
                         "provider": active_model.get("provider"),
                         "config_name": active_model.get("name"),
+                        "file_search_enabled": model_file_search_enabled,
                     },
                 )
 
@@ -165,6 +173,7 @@ async def execute(
             agent_prompt=DEFAULT_IMPORT_AGENT_PROMPT,
             model_env=model_env,
             model_provider=model_provider,
+            model_file_search_enabled=model_file_search_enabled,
             input_name=input_name,
             input_content_type=input_content_type,
             extraction_mode=extraction_mode,

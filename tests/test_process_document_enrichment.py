@@ -130,9 +130,11 @@ class _FakeTracing:
 class _FakeLLM:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
+        self.last_kwargs: dict = {}
 
     async def run_excel_agent_workflow(self, *args, **kwargs):
-        _ = args, kwargs
+        _ = args
+        self.last_kwargs = dict(kwargs)
         return dict(self.payload)
 
 
@@ -401,3 +403,32 @@ async def test_process_document_workbook_ai_enhancements_shows_all_enriched_fiel
     assert "metafield:extractor.color_hint" in attributes, (
         f"metafield missing from AI Enhancements: {attributes}"
     )
+
+
+@pytest.mark.asyncio
+async def test_process_document_passes_file_search_toggle_from_model_config_extra():
+    supabase = _FakeSupabase(
+        model_config={
+            "base_url": "https://api.openai.com/v1",
+            "model_id": "gpt-4.1-mini",
+            "api_key": "secret",
+            "provider": "openai",
+            "extra": {"enable_file_search": False},
+        }
+    )
+    llm = _FakeLLM(payload={"products": []})
+    tracing = _FakeTracing()
+
+    await process_document_uc.execute(
+        supabase=supabase,
+        llm=llm,
+        tracing=tracing,
+        ctx=SimpleNamespace(),
+        file_bytes=b"sheet-bytes",
+        input_name="catalog.csv",
+        input_content_type="text/csv",
+        run_id="run-import-file-search-toggle",
+        shop_domain="store.myshopify.com",
+    )
+
+    assert llm.last_kwargs["model_file_search_enabled"] is False

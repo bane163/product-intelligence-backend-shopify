@@ -40,7 +40,11 @@ def _is_openai_file_search_enabled(
     *,
     model_provider: str | None,
     model_env: dict[str, str] | None,
+    model_file_search_enabled: bool | None = None,
 ) -> bool:
+    if model_file_search_enabled is False:
+        return False
+
     base_url = str((model_env or {}).get("OLLAMA_CLOUD_URL") or "").strip().lower()
     if base_url:
         return "api.openai.com" in base_url
@@ -72,6 +76,7 @@ class LLMService(LLMServiceInterface):
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
         model_provider: str | None = None,
+        model_file_search_enabled: bool | None = None,
         *,
         input_name: Optional[str] = None,
         input_content_type: Optional[str] = None,
@@ -100,13 +105,18 @@ class LLMService(LLMServiceInterface):
             )
 
         is_csv = document_format.kind == "csv"
+        is_spreadsheet_kind = document_format.kind in {
+            "spreadsheet",
+            "spreadsheet_legacy",
+        }
         requires_visual_context = not is_csv
         normalized_extraction_mode = extraction_mode.strip().lower() or "per_sheet"
         max_sheets = 1 if normalized_extraction_mode == "first_sheet" else 20
         use_openai_file_search = _is_openai_file_search_enabled(
             model_provider=model_provider,
             model_env=model_env,
-        )
+            model_file_search_enabled=model_file_search_enabled,
+        ) and not is_spreadsheet_kind
 
         def _trace(
             phase: str,
@@ -333,6 +343,7 @@ class LLMService(LLMServiceInterface):
         agent_prompt: str = "Please analyze the document and the associated image(s).",
         model_env: Optional[Dict[str, str]] = None,
         model_provider: str | None = None,
+        model_file_search_enabled: bool | None = None,
         *,
         input_name: Optional[str] = None,
         input_content_type: Optional[str] = None,
@@ -348,6 +359,7 @@ class LLMService(LLMServiceInterface):
             agent_prompt=agent_prompt,
             model_env=model_env,
             model_provider=model_provider,
+            model_file_search_enabled=model_file_search_enabled,
             input_name=input_name,
             input_content_type=input_content_type,
             extraction_mode=extraction_mode,

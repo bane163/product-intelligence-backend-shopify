@@ -1,5 +1,8 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
+from ai.models import ProductsList
 from app_context import AppContext, ServiceRegistry
 from infrastructure.adapters.supabase_adapter import SupabaseAdapter
 from services.supabase_service import SupabaseService
@@ -31,6 +34,37 @@ def _build_ctx() -> AppContext:
             shopify=_DummyShopify(),
         )
     )
+
+
+def test_claim_next_offload_job_claims_retryable_job_when_available():
+    ctx = _build_ctx()
+    job_id = "job-claim-retryable"
+    ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "document_import",
+            "status": "retryable",
+            "run_id": "run-claim-retryable",
+            "draft_id": "draft-claim-retryable",
+            "file_id": "file-claim-retryable",
+            "attempt_count": 1,
+            "max_attempts": 3,
+            "available_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+            "payload": {},
+        },
+    )
+
+    claimed = ctx.supabase.runs.claim_next_offload_job(
+        queue_name="offload",
+        worker_id="worker-1",
+        lease_seconds=60,
+    )
+
+    assert claimed is not None
+    assert claimed["job_id"] == job_id
+    assert claimed["status"] == "claimed"
+    assert int(claimed.get("attempt_count") or 0) == 2
 
 
 @pytest.mark.asyncio
@@ -121,6 +155,88 @@ async def test_run_once_processes_document_import_job_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_once_processes_document_import_products_list_payload(monkeypatch):
+    import application.services.offload_worker as offload_worker
+
+    ctx = _build_ctx()
+    run_id = "run-document-products-list"
+    draft_id = "draft-document-products-list"
+    file_id = "file-document-products-list"
+    job_id = "job-document-products-list"
+    ctx.supabase.file.save_file(
+        file_id,
+        name="queued-products-list.xlsx",
+        content=b"queued",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    ctx.supabase.drafts.save_product_draft(
+        draft_id=draft_id,
+        run_id=run_id,
+        import_mode="auto",
+        draft_name="Queued Draft",
+        input_file_id=file_id,
+        input_filename="queued-products-list.xlsx",
+        extraction_status="queued",
+        extraction_run_id=run_id,
+        extraction_error=None,
+        submit_status=None,
+        submit_run_id=None,
+        submit_error=None,
+        products=[],
+    )
+    ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "document_import",
+            "status": "queued",
+            "run_id": run_id,
+            "draft_id": draft_id,
+            "file_id": file_id,
+            "payload": {
+                "input_filename": "queued-products-list.xlsx",
+                "input_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "extraction_mode": "per_sheet",
+            },
+        },
+    )
+
+    async def fake_process_document_execute(**kwargs):
+        assert kwargs["run_id"] == run_id
+        assert kwargs["file_bytes"] == b"queued"
+        return {
+            "run_id": run_id,
+            "result": ProductsList(products=[{"title": "Queued Product"}]),
+        }
+
+    monkeypatch.setattr(
+        offload_worker,
+        "process_document_execute",
+        fake_process_document_execute,
+    )
+
+    worker = offload_worker.OffloadWorker(
+        ctx=ctx, queue_name="offload", worker_id="worker-1"
+    )
+    processed = await worker.run_once()
+    assert processed is True
+
+    job = ctx.supabase.runs.get_offload_job(job_id)
+    assert job is not None
+    assert job["status"] == "succeeded"
+    assert job["result"]["run_id"] == run_id
+    assert job["result"]["draft_id"] == draft_id
+    assert job["result"]["product_count"] == 1
+
+    draft = ctx.supabase.drafts.get_product_draft(draft_id)
+    assert draft is not None
+    assert draft["extraction_status"] == "succeeded"
+    assert draft["extraction_run_id"] == run_id
+    assert len(draft["products"]) == 1
+    assert draft["products"][0]["title"] == "Queued Product"
+
+
+@pytest.mark.asyncio
 async def test_run_once_marks_document_import_job_failed_when_file_missing():
     import application.services.offload_worker as offload_worker
 
@@ -171,6 +287,180 @@ async def test_run_once_marks_document_import_job_failed_when_file_missing():
     assert draft is not None
     assert draft["extraction_status"] == "failed"
     assert "file not found" in str(draft.get("extraction_error", "")).lower()
+
+
+@pytest.mark.asyncio
+async def test_run_once_requeues_document_import_job_before_max_attempts(monkeypatch):
+    import application.services.offload_worker as offload_worker
+
+    ctx = _build_ctx()
+    run_id = "run-document-retryable"
+    draft_id = "draft-document-retryable"
+    file_id = "file-document-retryable"
+    job_id = "job-document-retryable"
+    ctx.supabase.file.save_file(
+        file_id,
+        name="queued-retryable.xlsx",
+        content=b"queued",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    ctx.supabase.drafts.save_product_draft(
+        draft_id=draft_id,
+        run_id=run_id,
+        import_mode="auto",
+        draft_name="Queued Retryable",
+        input_file_id=file_id,
+        input_filename="queued-retryable.xlsx",
+        extraction_status="queued",
+        extraction_run_id=run_id,
+        extraction_error=None,
+        submit_status=None,
+        submit_run_id=None,
+        submit_error=None,
+        products=[],
+    )
+    ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "document_import",
+            "status": "queued",
+            "run_id": run_id,
+            "draft_id": draft_id,
+            "file_id": file_id,
+            "max_attempts": 3,
+            "payload": {
+                "input_filename": "queued-retryable.xlsx",
+                "input_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "extraction_mode": "per_sheet",
+            },
+        },
+    )
+
+    async def fake_process_document_execute(**kwargs):
+        _ = kwargs
+        raise RuntimeError("transient extraction failure")
+
+    monkeypatch.setattr(
+        offload_worker,
+        "process_document_execute",
+        fake_process_document_execute,
+    )
+
+    worker = offload_worker.OffloadWorker(
+        ctx=ctx, queue_name="offload", worker_id="worker-1"
+    )
+    processed = await worker.run_once()
+    assert processed is True
+
+    job = ctx.supabase.runs.get_offload_job(job_id)
+    assert job is not None
+    assert job["status"] == "retryable"
+    assert "transient extraction failure" in str(job.get("error", "")).lower()
+    assert int(job.get("attempt_count") or 0) == 1
+    available_at = datetime.fromisoformat(str(job.get("available_at")).replace("Z", "+00:00"))
+    assert available_at > datetime.now(timezone.utc)
+    result_payload = job.get("result")
+    assert isinstance(result_payload, dict)
+    assert result_payload.get("dead_letter") is False
+
+    draft = ctx.supabase.drafts.get_product_draft(draft_id)
+    assert draft is not None
+    assert draft["extraction_status"] == "running"
+    assert draft["extraction_error"] is None
+
+    run = ctx.supabase.runs.get_run(run_id)
+    assert run is None or run["status"] != "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_once_marks_document_import_job_dead_letter_after_max_attempts(
+    monkeypatch,
+):
+    import application.services.offload_worker as offload_worker
+
+    ctx = _build_ctx()
+    run_id = "run-document-dead-letter"
+    draft_id = "draft-document-dead-letter"
+    file_id = "file-document-dead-letter"
+    job_id = "job-document-dead-letter"
+    ctx.supabase.file.save_file(
+        file_id,
+        name="queued-dead-letter.xlsx",
+        content=b"queued",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    ctx.supabase.drafts.save_product_draft(
+        draft_id=draft_id,
+        run_id=run_id,
+        import_mode="auto",
+        draft_name="Queued Dead Letter",
+        input_file_id=file_id,
+        input_filename="queued-dead-letter.xlsx",
+        extraction_status="queued",
+        extraction_run_id=run_id,
+        extraction_error=None,
+        submit_status=None,
+        submit_run_id=None,
+        submit_error=None,
+        products=[],
+    )
+    ctx.supabase.runs.create_or_update_run(
+        run_id,
+        {
+            "status": "queued",
+            "source": "document_import",
+        },
+    )
+    ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "document_import",
+            "status": "queued",
+            "run_id": run_id,
+            "draft_id": draft_id,
+            "file_id": file_id,
+            "max_attempts": 1,
+            "payload": {
+                "input_filename": "queued-dead-letter.xlsx",
+                "input_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "extraction_mode": "per_sheet",
+            },
+        },
+    )
+
+    async def fake_process_document_execute(**kwargs):
+        _ = kwargs
+        raise RuntimeError("permanent extraction failure")
+
+    monkeypatch.setattr(
+        offload_worker,
+        "process_document_execute",
+        fake_process_document_execute,
+    )
+
+    worker = offload_worker.OffloadWorker(
+        ctx=ctx, queue_name="offload", worker_id="worker-1"
+    )
+    processed = await worker.run_once()
+    assert processed is True
+
+    job = ctx.supabase.runs.get_offload_job(job_id)
+    assert job is not None
+    assert job["status"] == "failed"
+    assert "permanent extraction failure" in str(job.get("error", "")).lower()
+    result_payload = job.get("result")
+    assert isinstance(result_payload, dict)
+    assert result_payload.get("dead_letter") is True
+
+    draft = ctx.supabase.drafts.get_product_draft(draft_id)
+    assert draft is not None
+    assert draft["extraction_status"] == "failed"
+    assert "permanent extraction failure" in str(draft.get("extraction_error", "")).lower()
+
+    run = ctx.supabase.runs.get_run(run_id)
+    assert run is None or run["status"] == "failed"
 
 
 @pytest.mark.asyncio

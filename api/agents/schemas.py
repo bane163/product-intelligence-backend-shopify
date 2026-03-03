@@ -40,7 +40,7 @@ class BatchExtractSubmitRequest(BaseModel):
     file_ids: list[str] = Field(min_length=1)
     import_mode: str = "auto"
     extraction_mode: str = "per_sheet"
-    auto_submit: bool = True
+    auto_submit: bool = False
     offload: bool = True
 
 

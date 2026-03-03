@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from openpyxl import load_workbook
+from ai.models import ProductsList
 
 import application.use_cases.processing.process_document as process_document_uc
 
@@ -138,6 +139,12 @@ class _FakeLLM:
         return dict(self.payload)
 
 
+class _FakeLLMProductsList:
+    async def run_excel_agent_workflow(self, *args, **kwargs):
+        _ = args, kwargs
+        return ProductsList(products=[{"title": "Demo Product"}])
+
+
 @pytest.mark.asyncio
 async def test_process_document_enriches_products_during_import(monkeypatch):
     async def fake_generate_suggestions_execute(
@@ -190,6 +197,29 @@ async def test_process_document_enriches_products_during_import(monkeypatch):
     assert result["result"]["products"][0]["vendor"] == "Enriched Vendor"
     assert result["result"]["enrichment_applied"] is True
     assert result["result"]["enrichment_suggestions_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_process_document_normalizes_products_list_result_shape():
+    supabase = _FakeSupabase()
+    llm = _FakeLLMProductsList()
+    tracing = _FakeTracing()
+
+    result = await process_document_uc.execute(
+        supabase=supabase,
+        llm=llm,
+        tracing=tracing,
+        ctx=SimpleNamespace(),
+        file_bytes=b"sheet-bytes",
+        input_name="catalog.xlsx",
+        input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        run_id="run-import-products-list",
+        shop_domain=None,
+        write_to_file=False,
+    )
+
+    assert isinstance(result["result"], dict)
+    assert result["result"]["products"][0]["title"] == "Demo Product"
 
 
 @pytest.mark.asyncio

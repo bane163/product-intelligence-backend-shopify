@@ -14,6 +14,14 @@ class SupabaseIntelligenceMixin:
             "_get_supabase_client must be implemented by the host class"
         )
 
+    def _bulk_operation_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "product_intelligence_bulk_operations", None)
+        if isinstance(store, dict):
+            return store
+        fallback: dict[str, dict[str, Any]] = {}
+        setattr(self, "product_intelligence_bulk_operations", fallback)
+        return fallback
+
     def save_product_intelligence_audit(
         self,
         *,
@@ -461,6 +469,114 @@ class SupabaseIntelligenceMixin:
         cached = dict(item)
         self.product_intelligence_suggestions[suggestion_id] = cached
         return cached
+
+    def get_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        shop_domain: str,
+    ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        normalized_operation = str(operation_type or "").strip().lower()
+        normalized_key = str(idempotency_key or "").strip()
+        if not tenant or not normalized_operation or not normalized_key:
+            return None
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_bulk_operations")
+                    .select("*")
+                    .eq("shop_domain", tenant)
+                    .eq("operation_type", normalized_operation)
+                    .eq("idempotency_key", normalized_key)
+                    .limit(1)
+                    .execute()
+                )
+                rows = res.data or []
+                if rows:
+                    row = dict(rows[0])
+                    self._bulk_operation_store()[
+                        f"{tenant}:{normalized_operation}:{normalized_key}"
+                    ] = row
+                    return row
+            except Exception:
+                LOG.exception(
+                    "Failed fetching intelligence bulk operation for shop=%s operation=%s",
+                    tenant,
+                    normalized_operation,
+                )
+        cached = self._bulk_operation_store().get(
+            f"{tenant}:{normalized_operation}:{normalized_key}"
+        )
+        if isinstance(cached, dict):
+            return dict(cached)
+        return None
+
+    def upsert_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        request_hash: str,
+        response: dict[str, Any],
+        shop_domain: str,
+        status: str = "succeeded",
+    ) -> dict[str, Any]:
+        tenant = str(shop_domain or "").strip().lower()
+        normalized_operation = str(operation_type or "").strip().lower()
+        normalized_key = str(idempotency_key or "").strip()
+        normalized_hash = str(request_hash or "").strip()
+        normalized_status = str(status or "").strip().lower() or "succeeded"
+        if (
+            not tenant
+            or not normalized_operation
+            or not normalized_key
+            or not normalized_hash
+        ):
+            raise ValueError("Invalid bulk operation idempotency payload")
+        if not isinstance(response, dict):
+            raise ValueError("response must be an object")
+        now = self._utc_now()
+        payload = {
+            "shop_domain": tenant,
+            "operation_type": normalized_operation,
+            "idempotency_key": normalized_key,
+            "request_hash": normalized_hash,
+            "status": normalized_status,
+            "response": response,
+            "created_at": now,
+            "updated_at": now,
+        }
+        client = self._get_supabase_client()
+        if client:
+            try:
+                res = (
+                    client.table("product_intelligence_bulk_operations")
+                    .upsert(
+                        payload,
+                        on_conflict="shop_domain,operation_type,idempotency_key",
+                    )
+                    .execute()
+                )
+                rows = res.data or []
+                if rows:
+                    row = dict(rows[0])
+                    self._bulk_operation_store()[
+                        f"{tenant}:{normalized_operation}:{normalized_key}"
+                    ] = row
+                    return row
+            except Exception:
+                LOG.exception(
+                    "Failed upserting intelligence bulk operation for shop=%s operation=%s",
+                    tenant,
+                    normalized_operation,
+                )
+        self._bulk_operation_store()[
+            f"{tenant}:{normalized_operation}:{normalized_key}"
+        ] = dict(payload)
+        return dict(payload)
 
     @staticmethod
     def _default_product_intelligence_normalization_settings() -> dict[str, Any]:

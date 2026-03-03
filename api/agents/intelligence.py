@@ -1,5 +1,6 @@
 """Product intelligence routes."""
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -736,9 +737,58 @@ async def apply_product_intelligence_suggestions_bulk(
     if not isinstance(raw_ids, list):
         raise HTTPException(status_code=400, detail="suggestion_ids must be a list")
     suggestion_ids = [str(item).strip() for item in raw_ids if str(item).strip()]
+    deduped_suggestion_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for suggestion_id in suggestion_ids:
+        if suggestion_id in seen_ids:
+            continue
+        seen_ids.add(suggestion_id)
+        deduped_suggestion_ids.append(suggestion_id)
+    suggestion_ids = deduped_suggestion_ids
     if not suggestion_ids:
         raise HTTPException(status_code=400, detail="No suggestion_ids provided")
     shop_domain = require_shop_domain(request, payload.get("shop_domain"))
+    raw_idempotency_key = request.headers.get("idempotency-key")
+    if not raw_idempotency_key:
+        payload_key = payload.get("idempotency_key")
+        raw_idempotency_key = (
+            str(payload_key).strip() if payload_key is not None else None
+        )
+    idempotency_key = (
+        str(raw_idempotency_key).strip() if isinstance(raw_idempotency_key, str) else ""
+    )
+    operation_type = "apply_bulk_suggestions"
+    request_hash: str | None = None
+    if idempotency_key:
+        fingerprint = json.dumps(
+            {
+                "suggestion_ids": suggestion_ids,
+                "shop_domain": shop_domain,
+                "operation_type": operation_type,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        request_hash = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
+        existing_operation = ctx.supabase.intelligence.get_product_intelligence_bulk_operation(
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+            shop_domain=shop_domain,
+        )
+        if isinstance(existing_operation, dict):
+            existing_hash = str(existing_operation.get("request_hash") or "").strip()
+            if existing_hash and existing_hash != request_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="idempotency_key already used with different payload",
+                )
+            existing_response = existing_operation.get("response")
+            if isinstance(existing_response, dict):
+                return {
+                    **existing_response,
+                    "idempotency_key": idempotency_key,
+                    "idempotency_replayed": True,
+                }
     shop_access_token = resolve_shop_access_token(
         request, payload.get("shop_access_token")
     )
@@ -764,9 +814,21 @@ async def apply_product_intelligence_suggestions_bulk(
         except Exception as exc:
             failed.append({"suggestion_id": suggestion_id, "error": str(exc)})
 
-    return {
+    response_payload = {
         "applied_count": len(results),
         "failed_count": len(failed),
         "results": results,
         "failed": failed,
+        "idempotency_key": idempotency_key or None,
+        "idempotency_replayed": False,
     }
+    if idempotency_key and request_hash:
+        ctx.supabase.intelligence.upsert_product_intelligence_bulk_operation(
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            response=response_payload,
+            shop_domain=shop_domain,
+            status="succeeded",
+        )
+    return response_payload

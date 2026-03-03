@@ -117,6 +117,8 @@ class SupabaseDomainAccessors:
                 "mark_product_intelligence_suggestion_pending",
                 "get_product_intelligence_normalization_settings",
                 "upsert_product_intelligence_normalization_settings",
+                "get_product_intelligence_bulk_operation",
+                "upsert_product_intelligence_bulk_operation",
             ),
         )
         self.llm_configs = SupabaseNamespace(

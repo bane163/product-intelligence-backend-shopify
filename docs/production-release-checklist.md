@@ -24,13 +24,13 @@ Use this checklist as a go/no-go gate before releasing to production.
 ### Required checks
 - [ ] Production deploy is immutable (no `--reload`, no source bind-mounts).
 - [ ] Frontend session storage uses managed Postgres (not local SQLite for production).
-- [ ] Worker queue has retry/backoff and dead-letter handling.
+- [x] Worker queue has retry/backoff and dead-letter handling.
 - [ ] Health and readiness probes exist for frontend, backend, worker, and Collabora.
 - [ ] Long-lived connections (SSE/WebSocket) are configured for edge/proxy timeouts.
 
 ### Fail conditions (do not release)
 - Single-instance local state required for normal operation.
-- No retry policy for async/offload jobs.
+- Retry policy for async/offload jobs is disabled, bypassed, or not exercised in staging.
 - No readiness check to detect partial outages.
 
 ---

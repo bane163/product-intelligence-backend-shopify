@@ -31,5 +31,6 @@ class SupabaseService(
         self.product_intelligence_audits: dict[str, dict[str, Any]] = {}
         self.product_intelligence_findings: dict[str, list[dict[str, Any]]] = {}
         self.product_intelligence_suggestions: dict[str, dict[str, Any]] = {}
+        self.product_intelligence_bulk_operations: dict[str, dict[str, Any]] = {}
         self.product_intelligence_normalization_settings: dict[str, dict[str, Any]] = {}
         self.llm_model_configs: dict[str, dict[str, Any]] = {}

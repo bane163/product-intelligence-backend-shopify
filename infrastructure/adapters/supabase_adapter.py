@@ -436,6 +436,38 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             settings=settings,
         )
 
+    def get_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        shop_domain: str,
+    ) -> dict[str, Any] | None:
+        return self._service.get_product_intelligence_bulk_operation(
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+            shop_domain=shop_domain,
+        )
+
+    def upsert_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        request_hash: str,
+        response: dict[str, Any],
+        shop_domain: str,
+        status: str = "succeeded",
+    ) -> dict[str, Any]:
+        return self._service.upsert_product_intelligence_bulk_operation(
+            operation_type=operation_type,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            response=response,
+            shop_domain=shop_domain,
+            status=status,
+        )
+
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]:
         return self._service.list_llm_model_configs(shop_domain)
 

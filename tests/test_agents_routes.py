@@ -1822,6 +1822,63 @@ async def test_batch_extract_submit_queues_document_import_jobs(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_batch_extract_submit_defaults_to_non_auto_submit_payload(monkeypatch):
+    _force_in_memory_storage(monkeypatch)
+    tenant_header = {"x-shop-domain": "batch-queue-default.myshopify.com"}
+    ctx = get_app_context()
+    queued_jobs: list[dict[str, Any]] = []
+
+    def fake_enqueue_offload_job(
+        job_id: str,
+        fields: dict[str, Any],
+        *,
+        require_persistent_queue: bool = False,
+    ):
+        assert require_persistent_queue is True
+        payload = {"job_id": job_id, **fields}
+        queued_jobs.append(payload)
+        return payload
+
+    monkeypatch.setattr(
+        ctx.services.supabase,
+        "enqueue_offload_job",
+        fake_enqueue_offload_job,
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        upload = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "batch-queue-default.xlsx",
+                    io.BytesIO(b"batch-queue-default"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+        assert upload.status_code == 200
+        file_id = upload.json()["file_id"]
+
+        response = await ac.post(
+            "/agents/import/batch",
+            headers=tenant_header,
+            json={
+                "file_ids": [file_id],
+                "import_mode": "auto",
+                "extraction_mode": "per_sheet",
+                "offload": True,
+            },
+        )
+        assert response.status_code == 202
+        assert response.json()["queued"] == 1
+        assert len(queued_jobs) == 1
+        assert queued_jobs[0]["payload"]["auto_submit"] is False
+        assert queued_jobs[0]["payload"]["submit_run_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_batch_extract_submit_reuses_active_draft_without_duplicate_enqueue(
     monkeypatch,
 ):
@@ -3241,6 +3298,277 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
         assert revert_single.json()["status"] == "pending"
         assert len(updates) == 2
         assert updates[1]["vendor"] == ""
+
+
+@pytest.mark.asyncio
+async def test_apply_suggestion_with_metafields_uses_existing_metafields_for_revert(
+    monkeypatch,
+):
+    async def fake_get_product(self, gid):
+        return {
+            "data": {
+                "node": {
+                    "id": gid,
+                    "title": "Catalog Product",
+                    "descriptionHtml": "Catalog description",
+                    "vendor": "Original Vendor",
+                    "handle": "catalog-product",
+                    "productType": "General",
+                    "status": "ACTIVE",
+                    "tags": ["tag-1"],
+                    "seo": {
+                        "title": "Catalog Product",
+                        "description": "Catalog description",
+                    },
+                }
+            }
+        }
+
+    metafields_calls: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+
+    async def fake_get_product_metafields(self, gid, identifiers):
+        metafields_calls.append({"gid": gid, "identifiers": identifiers})
+        return [
+            {
+                "namespace": "specbrain",
+                "key": "material",
+                "value": "wool",
+                "type": "single_line_text_field",
+            }
+        ]
+
+    async def fake_update_product_from_input(self, product):
+        updates.append(dict(product))
+        return {
+            "data": {
+                "productUpdate": {
+                    "product": {"id": product.get("id")},
+                    "userErrors": [],
+                }
+            }
+        }
+
+    async def fake_generate_suggestions_execute(
+        *,
+        supabase,
+        products,
+        shop_domain,
+        normalization_settings=None,
+        trace_event=None,
+    ):
+        _ = (supabase, products, shop_domain, normalization_settings, trace_event)
+        return [
+            {
+                "suggestion_id": f"suggestion-{uuid.uuid4()}",
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "product_title": "Catalog Product",
+                "category": "completeness",
+                "severity": "medium",
+                "message": "Set material metafield",
+                "patch_payload": {
+                    "metafields": [
+                        {
+                            "namespace": "specbrain",
+                            "key": "material",
+                            "value": "cotton",
+                            "type": "single_line_text_field",
+                        }
+                    ]
+                },
+                "status": "pending",
+            }
+        ]
+
+    import shopify as shopify_module
+    import application.use_cases.intelligence_generate_suggestions as suggestions_uc
+
+    monkeypatch.setattr(shopify_module.ShopifyClient, "get_product", fake_get_product)
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "get_product_metafields",
+        fake_get_product_metafields,
+    )
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "update_product_from_input",
+        fake_update_product_from_input,
+    )
+    monkeypatch.setattr(
+        suggestions_uc, "execute", fake_generate_suggestions_execute
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
+        audit_run = await ac.post(
+            "/agents/intelligence/audit",
+            json={
+                "products": [
+                    {
+                        "id": "gid://shopify/Product/201",
+                        "title": "Catalog Product",
+                        "handle": "catalog-product",
+                    }
+                ]
+            },
+        )
+        assert audit_run.status_code == 200
+        audit_id = audit_run.json()["audit_id"]
+
+        suggestions = await ac.get(
+            f"/agents/intelligence/audits/{audit_id}/suggestions"
+        )
+        assert suggestions.status_code == 200
+        rows = suggestions.json()["suggestions"]
+        suggestion = next(
+            (
+                row
+                for row in rows
+                if isinstance(row.get("patch_payload"), dict)
+                and isinstance(row["patch_payload"].get("metafields"), list)
+            ),
+            None,
+        )
+        assert suggestion is not None
+
+        apply_single = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion['suggestion_id']}/apply"
+        )
+        assert apply_single.status_code == 200
+        assert apply_single.json()["status"] == "applied"
+        assert len(metafields_calls) == 1
+        assert metafields_calls[0]["identifiers"] == [
+            {"namespace": "specbrain", "key": "material"}
+        ]
+        assert len(updates) == 1
+        assert updates[0]["metafields"] == [
+            {
+                "namespace": "specbrain",
+                "key": "material",
+                "value": "cotton",
+                "type": "single_line_text_field",
+            }
+        ]
+        applied_suggestion = apply_single.json()["suggestion"]
+        assert applied_suggestion["previous_payload"]["metafields"] == [
+            {
+                "namespace": "specbrain",
+                "key": "material",
+                "value": "wool",
+                "type": "single_line_text_field",
+            }
+        ]
+        assert (
+            applied_suggestion["previous_payload"]["__revert_modes"]["metafields"]
+            == "restore"
+        )
+
+
+@pytest.mark.asyncio
+async def test_apply_bulk_with_idempotency_key_replays_without_reapplying(monkeypatch):
+    _force_in_memory_storage(monkeypatch)
+    applied_calls: list[str] = []
+
+    async def fake_apply_suggestion_execute(
+        *,
+        supabase,
+        shopify,
+        suggestion_id,
+        patch_payload=None,
+        shop_domain=None,
+    ):
+        _ = (supabase, shopify, patch_payload, shop_domain)
+        applied_calls.append(str(suggestion_id))
+        return {
+            "status": "applied",
+            "shopify_updated": True,
+            "target_product_id": f"gid://shopify/Product/{suggestion_id}",
+        }
+
+    import application.use_cases.intelligence_apply_suggestion as apply_uc
+
+    monkeypatch.setattr(apply_uc, "execute", fake_apply_suggestion_execute)
+
+    idempotency_key = f"apply-bulk-{uuid.uuid4()}"
+    headers = {**TEST_SHOP_HEADERS, "Idempotency-Key": idempotency_key}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        first = await ac.post(
+            "/agents/intelligence/suggestions/apply-bulk",
+            headers=headers,
+            json={"suggestion_ids": ["s-1", "s-2"]},
+        )
+        assert first.status_code == 200
+        first_body = first.json()
+        assert first_body["applied_count"] == 2
+        assert first_body["failed_count"] == 0
+        assert first_body["idempotency_key"] == idempotency_key
+        assert first_body["idempotency_replayed"] is False
+
+        second = await ac.post(
+            "/agents/intelligence/suggestions/apply-bulk",
+            headers=headers,
+            json={"suggestion_ids": ["s-1", "s-2"]},
+        )
+        assert second.status_code == 200
+        second_body = second.json()
+        assert second_body["applied_count"] == 2
+        assert second_body["failed_count"] == 0
+        assert second_body["idempotency_key"] == idempotency_key
+        assert second_body["idempotency_replayed"] is True
+
+    assert applied_calls == ["s-1", "s-2"]
+
+
+@pytest.mark.asyncio
+async def test_apply_bulk_idempotency_key_conflict_on_payload_mismatch(monkeypatch):
+    _force_in_memory_storage(monkeypatch)
+    applied_calls: list[str] = []
+
+    async def fake_apply_suggestion_execute(
+        *,
+        supabase,
+        shopify,
+        suggestion_id,
+        patch_payload=None,
+        shop_domain=None,
+    ):
+        _ = (supabase, shopify, patch_payload, shop_domain)
+        applied_calls.append(str(suggestion_id))
+        return {
+            "status": "applied",
+            "shopify_updated": True,
+            "target_product_id": f"gid://shopify/Product/{suggestion_id}",
+        }
+
+    import application.use_cases.intelligence_apply_suggestion as apply_uc
+
+    monkeypatch.setattr(apply_uc, "execute", fake_apply_suggestion_execute)
+
+    idempotency_key = f"apply-bulk-{uuid.uuid4()}"
+    headers = {**TEST_SHOP_HEADERS, "Idempotency-Key": idempotency_key}
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        first = await ac.post(
+            "/agents/intelligence/suggestions/apply-bulk",
+            headers=headers,
+            json={"suggestion_ids": ["s-1"]},
+        )
+        assert first.status_code == 200
+        assert first.json()["idempotency_replayed"] is False
+
+        second = await ac.post(
+            "/agents/intelligence/suggestions/apply-bulk",
+            headers=headers,
+            json={"suggestion_ids": ["s-1", "s-2"]},
+        )
+        assert second.status_code == 409
+        assert "idempotency_key" in str(second.json().get("detail", "")).lower()
+
+    assert applied_calls == ["s-1"]
 
 
 @pytest.mark.asyncio

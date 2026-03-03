@@ -245,6 +245,25 @@ class SupabasePort(Protocol):
         settings: dict[str, Any],
     ) -> dict[str, Any]: ...
 
+    def get_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        shop_domain: str,
+    ) -> dict[str, Any] | None: ...
+
+    def upsert_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        request_hash: str,
+        response: dict[str, Any],
+        shop_domain: str,
+        status: str = "succeeded",
+    ) -> dict[str, Any]: ...
+
     def list_llm_model_configs(self, shop_domain: str) -> list[dict[str, Any]]: ...
 
     def create_llm_model_config(
@@ -541,6 +560,25 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         *,
         shop_domain: str,
         settings: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def get_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        shop_domain: str,
+    ) -> dict[str, Any] | None: ...
+
+    def upsert_product_intelligence_bulk_operation(
+        self,
+        *,
+        operation_type: str,
+        idempotency_key: str,
+        request_hash: str,
+        response: dict[str, Any],
+        shop_domain: str,
+        status: str = "succeeded",
     ) -> dict[str, Any]: ...
 
 

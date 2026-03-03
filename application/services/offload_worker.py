@@ -3,7 +3,7 @@ import logging
 import os
 import socket
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app_context import AppContext, get_app_context
@@ -50,6 +50,23 @@ def _parse_bool(value: Any) -> bool:
     return False
 
 
+def _extract_products_from_result_payload(
+    payload: Any,
+) -> list[dict[str, Any]] | None:
+    raw_products: Any = None
+    if isinstance(payload, dict):
+        raw_products = payload.get("products")
+    else:
+        model_dump = getattr(payload, "model_dump", None)
+        if callable(model_dump):
+            dumped = model_dump(mode="json")
+            if isinstance(dumped, dict):
+                raw_products = dumped.get("products")
+    if not isinstance(raw_products, list):
+        return None
+    return [item for item in raw_products if isinstance(item, dict)]
+
+
 def _safe_int(value: Any, default: int, *, minimum: int) -> int:
     try:
         parsed = int(value)
@@ -68,6 +85,25 @@ def _safe_float(value: Any, default: float, *, minimum: float) -> float:
 
 def _default_worker_id() -> str:
     return f"{socket.gethostname()}-{os.getpid()}"
+
+
+def _compute_retry_delay_seconds(attempt_count: int) -> int:
+    normalized_attempt = max(1, int(attempt_count))
+    # Exponential backoff (15s, 30s, 60s, ...) capped at 5 minutes.
+    return min(300, 15 * (2 ** (normalized_attempt - 1)))
+
+
+def _is_retryable_job_failure(*, job_type: str, error_message: str) -> bool:
+    if job_type != "document_import":
+        return False
+    lowered = error_message.lower()
+    non_retryable_markers = (
+        "file not found",
+        "missing file_id",
+        "content is invalid",
+        "lifecycle columns missing",
+    )
+    return not any(marker in lowered for marker in non_retryable_markers)
 
 
 def _save_draft_state(
@@ -243,11 +279,7 @@ class OffloadWorker:
         if isinstance(result_payload, dict):
             output_file_id = _optional_str(result_payload.get("file_id"))
             output_filename = _optional_str(result_payload.get("filename"))
-            products = result_payload.get("products")
-            if isinstance(products, list):
-                extracted_products = [
-                    item for item in products if isinstance(item, dict)
-                ]
+        extracted_products = _extract_products_from_result_payload(result_payload)
 
         if draft_id:
             _save_draft_state(
@@ -564,21 +596,65 @@ class OffloadWorker:
         except Exception as exc:
             error_message = str(exc)
             LOG.exception("Offload job failed: job_id=%s", job_id)
-            try:
-                self._mark_related_failure(job, error_message)
-            except Exception:
-                LOG.exception(
-                    "Failed marking related offload failure state for job_id=%s",
-                    job_id,
-                )
-            self.ctx.supabase.runs.update_offload_job(
-                job_id,
-                {
-                    "status": "failed",
-                    "error": error_message,
-                    "result": {"error": error_message},
-                },
+            attempt_count = _safe_int(job.get("attempt_count"), 1, minimum=0)
+            max_attempts = _safe_int(job.get("max_attempts"), 5, minimum=1)
+            should_retry = attempt_count < max_attempts and _is_retryable_job_failure(
+                job_type=job_type,
+                error_message=error_message,
             )
+            if should_retry:
+                retry_at = datetime.now(timezone.utc) + timedelta(
+                    seconds=_compute_retry_delay_seconds(attempt_count)
+                )
+                self.ctx.supabase.runs.update_offload_job(
+                    job_id,
+                    {
+                        "status": "retryable",
+                        "error": error_message,
+                        "available_at": retry_at.isoformat(),
+                        "claimed_at": None,
+                        "claim_expires_at": None,
+                        "worker_id": None,
+                        "result": {
+                            "error": error_message,
+                            "dead_letter": False,
+                            "attempt_count": attempt_count,
+                            "max_attempts": max_attempts,
+                            "retry_at": retry_at.isoformat(),
+                        },
+                    },
+                )
+                continue_run_id = _optional_str(job.get("run_id"))
+                if continue_run_id:
+                    self.ctx.supabase.runs.create_or_update_run(
+                        continue_run_id,
+                        {
+                            "status": "queued",
+                            "shop_domain": _optional_str(job.get("shop_domain")),
+                            "error": None,
+                        },
+                    )
+            else:
+                try:
+                    self._mark_related_failure(job, error_message)
+                except Exception:
+                    LOG.exception(
+                        "Failed marking related offload failure state for job_id=%s",
+                        job_id,
+                    )
+                self.ctx.supabase.runs.update_offload_job(
+                    job_id,
+                    {
+                        "status": "failed",
+                        "error": error_message,
+                        "result": {
+                            "error": error_message,
+                            "dead_letter": True,
+                            "attempt_count": attempt_count,
+                            "max_attempts": max_attempts,
+                        },
+                    },
+                )
         return True
 
     async def run_forever(self) -> None:

@@ -52,6 +52,21 @@ def _normalize_shop(shop: str | None) -> str | None:
     return value.strip("/")
 
 
+def _should_fallback_metafields_query(error_message: str) -> bool:
+    lowered = error_message.lower()
+    fallback_markers = (
+        "doesn't accept argument 'keys'",
+        'doesn\'t accept argument "keys"',
+        "does not accept argument 'keys'",
+        'does not accept argument "keys"',
+        'unknown argument "keys"',
+        "code=argumentnotaccepted",
+        "code=variablerequiresvalidtype",
+        "hasmetafieldsidentifier",
+    )
+    return any(marker in lowered for marker in fallback_markers)
+
+
 class ShopifyClient:
     """
     Minimal async Shopify GraphQL helper.
@@ -310,23 +325,50 @@ class ShopifyClient:
     ) -> List[Dict[str, Any]]:
         if not identifiers:
             return []
-        keys = [
-            f"{str(item.get('namespace') or '').strip()}.{str(item.get('key') or '').strip()}"
+        requested_pairs = [
+            (
+                str(item.get("namespace") or "").strip(),
+                str(item.get("key") or "").strip(),
+            )
             for item in identifiers
             if isinstance(item, dict)
-            and str(item.get("namespace") or "").strip()
-            and str(item.get("key") or "").strip()
         ]
+        requested_pairs = [
+            (namespace, key)
+            for namespace, key in requested_pairs
+            if namespace and key
+        ]
+        keys = [f"{namespace}.{key}" for namespace, key in requested_pairs]
         if not keys:
             return []
         query = _load_graphql("productMetafields.graphql")
-        resp = await self.graphql(query, {"id": gid, "keys": keys})
+        used_fallback_query = False
+        try:
+            resp = await self.graphql(query, {"id": gid, "keys": keys})
+        except RuntimeError as exc:
+            if not _should_fallback_metafields_query(str(exc)):
+                raise
+            used_fallback_query = True
+            fallback_query = _load_graphql("productMetafieldsAll.graphql")
+            resp = await self.graphql(fallback_query, {"id": gid})
         node = resp.get("data", {}).get("node", {}) if isinstance(resp, dict) else {}
         metafields = node.get("metafields") if isinstance(node, dict) else {}
         nodes = metafields.get("nodes") if isinstance(metafields, dict) else None
         if not isinstance(nodes, list):
             return []
-        return [item for item in nodes if isinstance(item, dict)]
+        normalized_nodes = [item for item in nodes if isinstance(item, dict)]
+        if not used_fallback_query:
+            return normalized_nodes
+        requested_set = set(requested_pairs)
+        return [
+            item
+            for item in normalized_nodes
+            if (
+                str(item.get("namespace") or "").strip(),
+                str(item.get("key") or "").strip(),
+            )
+            in requested_set
+        ]
 
     async def create_product_options(
         self, product_id: str, options: List[Dict[str, Any]]

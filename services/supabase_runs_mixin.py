@@ -275,7 +275,7 @@ class SupabaseRunsMixin:
             status = self._normalize_offload_job_status(item.get("status"))
             available_at = parse_ts(item.get("available_at")) or now
             claim_expires_at = parse_ts(item.get("claim_expires_at"))
-            is_queued_ready = status == "queued" and available_at <= now
+            is_queued_ready = status in {"queued", "retryable"} and available_at <= now
             is_claim_expired = (
                 status == "claimed"
                 and claim_expires_at is not None

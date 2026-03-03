@@ -154,6 +154,58 @@ async def test_get_product_metafields_uses_keys_and_returns_connection_nodes():
 
 
 @pytest.mark.asyncio
+async def test_get_product_metafields_falls_back_when_keys_argument_not_supported():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    first_error = {
+        "errors": [
+            {
+                "message": "Field 'metafields' doesn't accept argument 'keys'",
+                "extensions": {"code": "argumentNotAccepted"},
+            }
+        ]
+    }
+    fallback_resp = {
+        "data": {
+            "node": {
+                "metafields": {
+                    "nodes": [
+                        {
+                            "namespace": "specbrain",
+                            "key": "material",
+                            "value": "cotton",
+                            "type": "single_line_text_field",
+                        },
+                        {
+                            "namespace": "specbrain",
+                            "key": "care",
+                            "value": "hand wash",
+                            "type": "single_line_text_field",
+                        },
+                    ]
+                }
+            }
+        }
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        route = mock.post("/admin/api/2025-10/graphql.json")
+        route.side_effect = [
+            httpx.Response(200, json=first_error),
+            httpx.Response(200, json=fallback_resp),
+        ]
+        resp = await client.get_product_metafields(
+            "gid://shopify/Product/1",
+            [{"namespace": "specbrain", "key": "material"}],
+        )
+        assert resp == [fallback_resp["data"]["node"]["metafields"]["nodes"][0]]
+        assert route.call_count == 2
+        first_request = json.loads(route.calls[0].request.content.decode())
+        second_request = json.loads(route.calls[1].request.content.decode())
+        assert first_request["variables"]["keys"] == ["specbrain.material"]
+        assert second_request["variables"] == {"id": "gid://shopify/Product/1"}
+
+
+@pytest.mark.asyncio
 async def test_list_products_for_audit_returns_normalized_rows():
     client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
 

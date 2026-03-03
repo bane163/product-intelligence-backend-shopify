@@ -4,6 +4,7 @@ from time import perf_counter
 from typing import Any, Callable
 import uuid
 
+from ai.models import ProductsList
 from app_context import AppContext
 
 from application.domain.product_intelligence_patching import (
@@ -182,6 +183,14 @@ async def execute(
             writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,
             trace_event=trace_event,
         )
+        if isinstance(result, ProductsList):
+            result = {
+                "products": [
+                    item
+                    for item in result.model_dump(mode="json").get("products", [])
+                    if isinstance(item, dict)
+                ]
+            }
         if isinstance(result, dict):
             enrichment_attempted = False
             enrichment_applied = False
@@ -271,7 +280,6 @@ async def execute(
             ):
                 try:
                     from ai.excel_writer import create_excel_bytes
-                    from ai.models import ProductsList
 
                     enriched_products = [
                         item

@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app_context import AppContext, get_ctx
+from shared.metrics_signals import signal_api_error
+from shared.observability import current_observability_fields
 from shopify import (
     ShopifyClient,
 )  # kept for route-level monkeypatch compatibility in tests
@@ -109,6 +111,7 @@ async def submit_products_to_shopify(
     resolved_shop_access_token = resolve_shop_access_token(request, shop_access_token)
     resolved_draft_id = draft_id
     if offload:
+        observability_fields = current_observability_fields()
         effective_run_id = run_id or str(uuid.uuid4())
         if not resolved_draft_id and submitted_id:
             submitted_document = get_submitted_execute(
@@ -166,6 +169,7 @@ async def submit_products_to_shopify(
                     "started_at": datetime.now(timezone.utc).isoformat(),
                     "attempt": 1,
                     "shop_domain": resolved_shop_domain,
+                    **observability_fields,
                 },
             )
             ctx.supabase.runs.enqueue_offload_job(
@@ -178,6 +182,7 @@ async def submit_products_to_shopify(
                     "draft_id": resolved_draft_id,
                     "submitted_id": submitted_id,
                     "shop_domain": resolved_shop_domain,
+                    **observability_fields,
                     "payload": {
                         "import_mode": import_mode,
                         "document_name": document_name,
@@ -191,6 +196,13 @@ async def submit_products_to_shopify(
         except HTTPException:
             raise
         except Exception as exc:
+            signal_api_error(
+                route="/submit-products",
+                method="POST",
+                status_code=500,
+                error=str(exc),
+                offload=True,
+            )
             raise HTTPException(status_code=500, detail=str(exc))
         return JSONResponse(
             status_code=202,
@@ -218,8 +230,22 @@ async def submit_products_to_shopify(
         )
         return result
     except RuntimeError as exc:
+        signal_api_error(
+            route="/submit-products",
+            method="POST",
+            status_code=400,
+            error=str(exc),
+            offload=False,
+        )
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
+        signal_api_error(
+            route="/submit-products",
+            method="POST",
+            status_code=500,
+            error=str(exc),
+            offload=False,
+        )
         raise HTTPException(status_code=500, detail=str(exc))
 
 

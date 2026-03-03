@@ -2,6 +2,7 @@ from typing import Optional
 
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
+from shared.observability import current_observability_fields
 
 
 class RunEventEmitter:
@@ -40,6 +41,16 @@ class RunEventEmitter:
         Mirrors the behavior previously implemented inline in handlers.
         """
         self.event_seq += 1
+        event_metadata = dict(metadata or {})
+        for key, value in current_observability_fields().items():
+            event_metadata.setdefault(key, value)
+        observability_run_fields = {
+            key: value
+            for key, value in event_metadata.items()
+            if key in {"request_id", "correlation_id"} and isinstance(value, str)
+        }
+        if observability_run_fields:
+            self.supabase.runs.create_or_update_run(self.run_id, observability_run_fields)
         event = self.tracing.emit_run_event(
             self.run_id,
             phase=phase,
@@ -47,7 +58,7 @@ class RunEventEmitter:
             level=level,
             payload_preview=payload_preview,
             error=error,
-            metadata=metadata,
+            metadata=event_metadata or None,
         )
         self.supabase.runs.append_run_event(self.run_id, event, self.event_seq)
         return event

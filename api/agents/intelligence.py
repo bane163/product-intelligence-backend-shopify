@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app_context import AppContext, get_ctx
+from shared.observability import current_observability_fields
 from .utils import require_shop_domain, resolve_shop_access_token
 
 router = APIRouter()
@@ -229,6 +230,7 @@ async def run_product_intelligence_audit(
         if isinstance(run_id, str) and run_id.strip()
         else str(uuid.uuid4())
     )
+    observability_fields = current_observability_fields()
     started_at = datetime.now(timezone.utc)
     ctx.supabase.runs.create_or_update_run(
         run_id_value,
@@ -238,6 +240,7 @@ async def run_product_intelligence_audit(
             "started_at": started_at.isoformat(),
             "attempt": 1,
             "shop_domain": shop_domain,
+            **observability_fields,
         },
     )
     from application.services.run_event_emitter import RunEventEmitter

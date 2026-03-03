@@ -17,6 +17,7 @@ from application.ports.tracing_port import TracingPort
 from application.use_cases.intelligence_generate_suggestions import (
     execute as generate_suggestions_execute,
 )
+from shared.observability import current_observability_fields
 
 DEFAULT_IMPORT_AGENT_PROMPT = "Please analyze the document and the associated image(s)."
 DEFAULT_IMPORT_WRITER_PROMPT: str | None = None
@@ -43,6 +44,7 @@ async def execute(
     but is isolated in the application layer. It currently uses AppContext directly for simplicity.
     """
     run_id = run_id or str(uuid.uuid4())
+    observability_fields = current_observability_fields()
     started_at = datetime.now(timezone.utc)
     emitter = None
     emit_and_persist: Callable[..., Any]
@@ -71,6 +73,7 @@ async def execute(
             "writer_prompt": DEFAULT_IMPORT_WRITER_PROMPT,
             "attempt": 1,
             "shop_domain": shop_domain,
+            **observability_fields,
         },
     )
     try:

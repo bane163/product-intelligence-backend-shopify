@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 import respx
@@ -348,3 +349,37 @@ async def test_get_bulk_operation_uses_current_bulk_operation_query():
         request_body = json.loads(route.calls.last.request.content.decode())
         assert "currentBulkOperation" in request_body["query"]
         assert "bulkOperation(id:" not in request_body["query"]
+
+
+@pytest.mark.asyncio
+async def test_graphql_emits_signal_for_throttle_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+
+    async def _noop_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("shopify.asyncio.sleep", _noop_sleep)
+    caplog.set_level(logging.INFO, logger="metrics.signals")
+    success_response = {"data": {"shop": {"name": "Test"}}}
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        route = mock.post("/admin/api/2025-10/graphql.json")
+        route.side_effect = [
+            httpx.Response(
+                429,
+                json={"errors": [{"message": "Throttled"}]},
+                headers={"Retry-After": "0"},
+            ),
+            httpx.Response(200, json=success_response),
+        ]
+        response = await client.graphql("query { shop { name } }")
+
+    assert response == success_response
+    signal_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        '"event": "shopify.retry"' in message and '"reason": "throttled"' in message
+        for message in signal_messages
+    )

@@ -14,6 +14,8 @@ from application.use_cases.processing.process_document import (
     execute as process_document_execute,
 )
 from application.use_cases.processing.submit_products import execute as submit_execute
+from shared.metrics_signals import signal_offload_queue, signal_worker_job_failure
+from shared.observability import bind_observability_context, current_observability_fields
 
 LOG = logging.getLogger(__name__)
 
@@ -104,6 +106,25 @@ def _is_retryable_job_failure(*, job_type: str, error_message: str) -> bool:
         "lifecycle columns missing",
     )
     return not any(marker in lowered for marker in non_retryable_markers)
+
+
+def _estimate_queue_backlog(ctx: AppContext, queue_name: str) -> int | None:
+    service = getattr(ctx.supabase, "_service", None)
+    memory_jobs = getattr(service, "offload_jobs", None)
+    if not isinstance(memory_jobs, dict):
+        return None
+
+    normalized_queue = (_optional_str(queue_name) or "offload").lower()
+    backlog = 0
+    for value in memory_jobs.values():
+        if not isinstance(value, dict):
+            continue
+        if (_optional_str(value.get("queue_name")) or "default").lower() != normalized_queue:
+            continue
+        status = (_optional_str(value.get("status")) or "").lower()
+        if status in {"queued", "retryable"}:
+            backlog += 1
+    return backlog
 
 
 def _save_draft_state(
@@ -253,6 +274,7 @@ class OffloadWorker:
                 {
                     "status": "running",
                     "shop_domain": shop_domain,
+                    **current_observability_fields(),
                 },
             )
 
@@ -559,102 +581,170 @@ class OffloadWorker:
         )
         if not isinstance(job, dict):
             LOG.debug("No queued jobs found on queue=%s", self.queue_name)
+            signal_offload_queue(
+                queue_name=self.queue_name,
+                status="idle",
+                backlog=_estimate_queue_backlog(self.ctx, self.queue_name),
+            )
             return False
 
         job_id = _optional_str(job.get("job_id"))
         if not job_id:
             LOG.error("Claimed offload job without job_id")
+            signal_offload_queue(
+                queue_name=self.queue_name,
+                status="failed",
+                job_type=_optional_str(job.get("job_type")) or "unknown",
+                error="Claimed offload job without job_id",
+            )
             return True
 
         job_type = _optional_str(job.get("job_type")) or "unknown"
-        LOG.info(
-            "Claimed offload job: job_id=%s type=%s queue=%s",
-            job_id,
-            job_type,
-            self.queue_name,
+        signal_offload_queue(
+            queue_name=self.queue_name,
+            status="claimed",
+            backlog=_estimate_queue_backlog(self.ctx, self.queue_name),
+            job_id=job_id,
+            job_type=job_type,
+            run_id=_optional_str(job.get("run_id")),
+            attempt_count=_safe_int(job.get("attempt_count"), 1, minimum=0),
+            max_attempts=_safe_int(job.get("max_attempts"), 5, minimum=1),
         )
+        with bind_observability_context(
+            request_id=_optional_str(job.get("request_id")),
+            correlation_id=_optional_str(job.get("correlation_id"))
+            or _optional_str(job.get("run_id")),
+        ) as (request_id, correlation_id):
+            LOG.info(
+                "Claimed offload job: job_id=%s type=%s queue=%s",
+                job_id,
+                job_type,
+                self.queue_name,
+            )
 
-        self.ctx.supabase.runs.update_offload_job(
-            job_id,
-            {
-                "status": "running",
-                "error": None,
-            },
-        )
-
-        try:
-            result = await self._process_job(job)
             self.ctx.supabase.runs.update_offload_job(
                 job_id,
                 {
-                    "status": "succeeded",
+                    "status": "running",
                     "error": None,
-                    "result": result,
+                    "request_id": request_id,
+                    "correlation_id": correlation_id,
                 },
             )
-            LOG.info("Offload job succeeded: job_id=%s type=%s", job_id, job_type)
-        except Exception as exc:
-            error_message = str(exc)
-            LOG.exception("Offload job failed: job_id=%s", job_id)
-            attempt_count = _safe_int(job.get("attempt_count"), 1, minimum=0)
-            max_attempts = _safe_int(job.get("max_attempts"), 5, minimum=1)
-            should_retry = attempt_count < max_attempts and _is_retryable_job_failure(
-                job_type=job_type,
-                error_message=error_message,
-            )
-            if should_retry:
-                retry_at = datetime.now(timezone.utc) + timedelta(
-                    seconds=_compute_retry_delay_seconds(attempt_count)
-                )
+
+            try:
+                result = await self._process_job(job)
                 self.ctx.supabase.runs.update_offload_job(
                     job_id,
                     {
-                        "status": "retryable",
-                        "error": error_message,
-                        "available_at": retry_at.isoformat(),
-                        "claimed_at": None,
-                        "claim_expires_at": None,
-                        "worker_id": None,
-                        "result": {
-                            "error": error_message,
-                            "dead_letter": False,
-                            "attempt_count": attempt_count,
-                            "max_attempts": max_attempts,
-                            "retry_at": retry_at.isoformat(),
-                        },
+                        "status": "succeeded",
+                        "error": None,
+                        "result": result,
+                        "request_id": request_id,
+                        "correlation_id": correlation_id,
                     },
                 )
-                continue_run_id = _optional_str(job.get("run_id"))
-                if continue_run_id:
-                    self.ctx.supabase.runs.create_or_update_run(
-                        continue_run_id,
-                        {
-                            "status": "queued",
-                            "shop_domain": _optional_str(job.get("shop_domain")),
-                            "error": None,
-                        },
+                LOG.info("Offload job succeeded: job_id=%s type=%s", job_id, job_type)
+            except Exception as exc:
+                error_message = str(exc)
+                LOG.exception("Offload job failed: job_id=%s", job_id)
+                attempt_count = _safe_int(job.get("attempt_count"), 1, minimum=0)
+                max_attempts = _safe_int(job.get("max_attempts"), 5, minimum=1)
+                should_retry = attempt_count < max_attempts and _is_retryable_job_failure(
+                    job_type=job_type,
+                    error_message=error_message,
+                )
+                signal_worker_job_failure(
+                    queue_name=self.queue_name,
+                    job_id=job_id,
+                    job_type=job_type,
+                    run_id=_optional_str(job.get("run_id")),
+                    dead_letter=not should_retry,
+                    attempt_count=attempt_count,
+                    max_attempts=max_attempts,
+                    error=error_message,
+                )
+                if should_retry:
+                    retry_at = datetime.now(timezone.utc) + timedelta(
+                        seconds=_compute_retry_delay_seconds(attempt_count)
                     )
-            else:
-                try:
-                    self._mark_related_failure(job, error_message)
-                except Exception:
-                    LOG.exception(
-                        "Failed marking related offload failure state for job_id=%s",
+                    self.ctx.supabase.runs.update_offload_job(
                         job_id,
-                    )
-                self.ctx.supabase.runs.update_offload_job(
-                    job_id,
-                    {
-                        "status": "failed",
-                        "error": error_message,
-                        "result": {
+                        {
+                            "status": "retryable",
                             "error": error_message,
-                            "dead_letter": True,
-                            "attempt_count": attempt_count,
-                            "max_attempts": max_attempts,
+                            "available_at": retry_at.isoformat(),
+                            "claimed_at": None,
+                            "claim_expires_at": None,
+                            "worker_id": None,
+                            "request_id": request_id,
+                            "correlation_id": correlation_id,
+                            "result": {
+                                "error": error_message,
+                                "dead_letter": False,
+                                "attempt_count": attempt_count,
+                                "max_attempts": max_attempts,
+                                "retry_at": retry_at.isoformat(),
+                            },
                         },
-                    },
-                )
+                    )
+                    continue_run_id = _optional_str(job.get("run_id"))
+                    if continue_run_id:
+                        self.ctx.supabase.runs.create_or_update_run(
+                            continue_run_id,
+                            {
+                                "status": "queued",
+                                "shop_domain": _optional_str(job.get("shop_domain")),
+                                "error": None,
+                                "request_id": request_id,
+                                "correlation_id": correlation_id,
+                            },
+                        )
+                    signal_offload_queue(
+                        queue_name=self.queue_name,
+                        status="retryable",
+                        backlog=_estimate_queue_backlog(self.ctx, self.queue_name),
+                        job_id=job_id,
+                        job_type=job_type,
+                        run_id=continue_run_id,
+                        attempt_count=attempt_count,
+                        max_attempts=max_attempts,
+                        error=error_message,
+                    )
+                else:
+                    try:
+                        self._mark_related_failure(job, error_message)
+                    except Exception:
+                        LOG.exception(
+                            "Failed marking related offload failure state for job_id=%s",
+                            job_id,
+                        )
+                    self.ctx.supabase.runs.update_offload_job(
+                        job_id,
+                        {
+                            "status": "failed",
+                            "error": error_message,
+                            "request_id": request_id,
+                            "correlation_id": correlation_id,
+                            "result": {
+                                "error": error_message,
+                                "dead_letter": True,
+                                "attempt_count": attempt_count,
+                                "max_attempts": max_attempts,
+                            },
+                        },
+                    )
+                    signal_offload_queue(
+                        queue_name=self.queue_name,
+                        status="failed",
+                        backlog=_estimate_queue_backlog(self.ctx, self.queue_name),
+                        job_id=job_id,
+                        job_type=job_type,
+                        run_id=_optional_str(job.get("run_id")),
+                        attempt_count=attempt_count,
+                        max_attempts=max_attempts,
+                        error=error_message,
+                    )
         return True
 
     async def run_forever(self) -> None:

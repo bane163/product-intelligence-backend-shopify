@@ -1,5 +1,6 @@
 import os
 import re
+from time import perf_counter
 from typing import Any, Dict, Optional, Union
 
 from agent_framework import (
@@ -19,6 +20,7 @@ from ai.excel_utils import extract_csv_contents, extract_excel_contents
 from ai.models import ProductsList
 from application.services.document_formats import classify_document
 from objects.workflow_payload import resolve_payload
+from shared.metrics_signals import signal_llm_latency
 from .interfaces import (
     CollaboraServiceInterface,
     LLMServiceInterface,
@@ -368,7 +370,29 @@ class LLMService(LLMServiceInterface):
             writer_agent_prompt=writer_agent_prompt,
             trace_event=trace_event,
         )
-        events = await workflow.run(excel_input)
+        started_at = perf_counter()
+        model_id = (
+            str((model_env or {}).get("OLLAMA_MODEL_ID") or "").strip() or None
+        )
+        try:
+            events = await workflow.run(excel_input)
+        except Exception as exc:
+            signal_llm_latency(
+                operation="run_excel_agent_workflow",
+                status="failed",
+                duration_ms=int((perf_counter() - started_at) * 1000),
+                model_provider=model_provider,
+                model_id=model_id,
+                error=str(exc),
+            )
+            raise
+        signal_llm_latency(
+            operation="run_excel_agent_workflow",
+            status="succeeded",
+            duration_ms=int((perf_counter() - started_at) * 1000),
+            model_provider=model_provider,
+            model_id=model_id,
+        )
         outputs = events.get_outputs() or []
         if outputs:
             return outputs[0]

@@ -57,6 +57,7 @@ class SupabaseDomainAccessors:
                 "claim_next_offload_job",
                 "update_offload_job",
                 "get_offload_job",
+                "list_offload_jobs_for_run",
             ),
             aliases={
                 "create_or_update": "create_or_update_run",
@@ -70,6 +71,7 @@ class SupabaseDomainAccessors:
                 "claim_next": "claim_next_offload_job",
                 "update_job": "update_offload_job",
                 "get_job": "get_offload_job",
+                "list_jobs_for_run": "list_offload_jobs_for_run",
             },
         )
         self.drafts = SupabaseNamespace(

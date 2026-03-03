@@ -16,6 +16,7 @@ from application.use_cases.intelligence_apply_suggestion import (
 
 from api.agents.utils import normalize_shop_domain, parse_products_json
 from shopify import ShopifyClient
+from shared.observability import current_observability_fields
 
 LOG = logging.getLogger(__name__)
 
@@ -275,6 +276,7 @@ async def execute(
 ) -> dict[str, object]:
     submit_started_at = perf_counter()
     current_run_id = run_id or str(uuid.uuid4())
+    observability_fields = current_observability_fields()
     emitter = None
     try:
         from application.services.run_event_emitter import RunEventEmitter
@@ -296,6 +298,7 @@ async def execute(
             "started_at": datetime.now(timezone.utc).isoformat(),
             "attempt": 1,
             "shop_domain": shop_domain,
+            **observability_fields,
         },
     )
     emit_and_persist(phase="submit_start", message="Starting Shopify submit")

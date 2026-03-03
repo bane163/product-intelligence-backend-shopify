@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from openpyxl import load_workbook
 from ai.models import ProductsList
+from shared.observability import bind_observability_context
 
 import application.use_cases.processing.process_document as process_document_uc
 
@@ -462,3 +463,30 @@ async def test_process_document_passes_file_search_toggle_from_model_config_extr
     )
 
     assert llm.last_kwargs["model_file_search_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_process_document_persists_observability_ids_from_context():
+    supabase = _FakeSupabase()
+    llm = _FakeLLM(payload={"products": []})
+    tracing = _FakeTracing()
+
+    with bind_observability_context(
+        request_id="req-process-document-1",
+        correlation_id="corr-process-document-1",
+    ):
+        await process_document_uc.execute(
+            supabase=supabase,
+            llm=llm,
+            tracing=tracing,
+            ctx=SimpleNamespace(),
+            file_bytes=b"sheet-bytes",
+            input_name="catalog.xlsx",
+            input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            run_id="run-process-observability",
+            shop_domain="store.myshopify.com",
+        )
+
+    first_run_update = supabase.runs.created_updates[0][1]
+    assert first_run_update["request_id"] == "req-process-document-1"
+    assert first_run_update["correlation_id"] == "corr-process-document-1"

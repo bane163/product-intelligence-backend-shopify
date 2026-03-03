@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -273,3 +274,32 @@ async def test_llm_service_uses_legacy_path_for_openai_excel_inputs(
     assert calls["legacy"] == 1
     assert result is not None
     assert result.products[0].title == "Legacy"
+
+
+@pytest.mark.asyncio
+async def test_run_excel_agent_workflow_emits_failure_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _FailingWorkflow:
+        async def run(self, _excel_input):
+            raise RuntimeError("llm workflow failed")
+
+    service = LLMService(collabora=_FakeCollabora(), supabase=_FakeSupabase())
+    monkeypatch.setattr(service, "get_agent_workflow", lambda *args, **kwargs: _FailingWorkflow())
+    caplog.set_level(logging.INFO, logger="metrics.signals")
+
+    with pytest.raises(RuntimeError, match="llm workflow failed"):
+        await service.run_excel_agent_workflow(
+            b"title\nFailure",
+            input_name="catalog.csv",
+            input_content_type="text/csv",
+            model_provider="openai",
+            model_env={"OLLAMA_MODEL_ID": "gpt-4.1-mini"},
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        '"event": "llm.request"' in message and '"status": "failed"' in message
+        for message in messages
+    )

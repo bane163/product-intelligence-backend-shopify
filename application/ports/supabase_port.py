@@ -81,6 +81,14 @@ class SupabasePort(Protocol):
 
     def get_offload_job(self, job_id: str) -> dict[str, Any] | None: ...
 
+    def list_offload_jobs_for_run(
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
+
     def save_product_draft(
         self,
         *,
@@ -391,6 +399,14 @@ class SupabaseRunsNamespacePort(Protocol):
     ) -> dict[str, Any] | None: ...
 
     def get_offload_job(self, job_id: str) -> dict[str, Any] | None: ...
+
+    def list_offload_jobs_for_run(
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]: ...
 
 
 class SupabaseDraftsNamespacePort(Protocol):

@@ -154,6 +154,19 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def get_offload_job(self, job_id: str) -> dict[str, Any] | None:
         return self._service.get_offload_job(job_id)
 
+    def list_offload_jobs_for_run(
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        return self._service.list_offload_jobs_for_run(
+            run_id,
+            shop_domain=shop_domain,
+            limit=limit,
+        )
+
     def save_product_draft(
         self,
         *,

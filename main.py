@@ -2,9 +2,13 @@ from contextlib import asynccontextmanager
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router
+from shared.observability import (
+    bind_observability_context,
+    resolve_request_and_correlation_ids,
+)
 
 # Import routers from the api package
 from api.shopify_products import router as shopify_router
@@ -39,6 +43,24 @@ async def lifespan(app: FastAPI):
 
 # FastAPI app instance — uvicorn/fastapi looks for an `app` variable by default
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def attach_observability_context(request: Request, call_next):
+    request_id, correlation_id = resolve_request_and_correlation_ids(
+        request_id=request.headers.get("x-request-id"),
+        correlation_id=request.headers.get("x-correlation-id"),
+    )
+    request.state.request_id = request_id
+    request.state.correlation_id = correlation_id
+    with bind_observability_context(
+        request_id=request_id, correlation_id=correlation_id
+    ):
+        response = await call_next(request)
+    response.headers["x-request-id"] = request_id
+    response.headers["x-correlation-id"] = correlation_id
+    return response
+
 
 # CORS middleware for Shopify embedded app
 app.add_middleware(

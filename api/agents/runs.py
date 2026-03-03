@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app_context import AppContext, get_ctx
+from shared.observability import current_observability_fields
 from .utils import require_shop_domain
 
 router = APIRouter()
@@ -51,11 +52,14 @@ def _append_control_event(
     message: str,
     metadata: dict[str, Any],
 ) -> None:
+    enriched_metadata = dict(metadata or {})
+    for key, value in current_observability_fields().items():
+        enriched_metadata.setdefault(key, value)
     event = ctx.services.tracing.emit_run_event(
         run_id,
         phase=phase,
         message=message,
-        metadata=metadata,
+        metadata=enriched_metadata or None,
     )
     history = ctx.supabase.runs.get_run_history(run_id, shop_domain=shop_domain)
     next_seq = len(history.get("events") or []) + 1
@@ -162,6 +166,37 @@ async def get_llm_run_history(
     return history
 
 
+@router.get(
+    "/runs/{run_id}/diagnostics",
+    summary="Get tenant-scoped run diagnostics",
+)
+async def get_llm_run_diagnostics(
+    run_id: str,
+    request: Request,
+    event_limit: int = 200,
+    message_limit: int = 200,
+    offload_limit: int = 20,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.runs.get_run_diagnostics import (
+        execute as get_run_diagnostics_execute,
+    )
+
+    tenant = require_shop_domain(request, shop_domain)
+    diagnostics = get_run_diagnostics_execute(
+        supabase=ctx.supabase,
+        run_id=run_id,
+        shop_domain=tenant,
+        event_limit=event_limit,
+        message_limit=message_limit,
+        offload_limit=offload_limit,
+    )
+    if diagnostics.get("run") is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return diagnostics
+
+
 @router.get("/runs/{run_id}/snapshot", summary="Get workflow snapshot for realtime")
 async def get_workflow_snapshot(
     run_id: str,
@@ -212,7 +247,7 @@ async def control_llm_run(
     now = _utc_now_iso()
     current_status = _normalize_run_status(run.get("status"), "running")
     current_attempt = _to_attempt(run.get("attempt"))
-    updates: dict[str, Any] = {"shop_domain": tenant}
+    updates: dict[str, Any] = {"shop_domain": tenant, **current_observability_fields()}
 
     if normalized_operation == "cancel":
         if current_status not in {"queued", "running"}:

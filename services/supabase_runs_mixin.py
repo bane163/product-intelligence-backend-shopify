@@ -27,6 +27,13 @@ class SupabaseRunsMixin:
         return normalized or None
 
     @staticmethod
+    def _normalize_identifier(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @staticmethod
     def _normalize_run_status(value: Any) -> str | None:
         normalized = str(value or "").strip().lower()
         if not normalized:
@@ -74,6 +81,39 @@ class SupabaseRunsMixin:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _is_missing_column_error(exc: Exception, *, column: str) -> bool:
+        normalized = " ".join(
+            str(exc)
+            .lower()
+            .replace('"', "")
+            .replace("'", "")
+            .replace("`", "")
+            .split()
+        )
+        if column.lower() not in normalized:
+            return False
+        return (
+            "could not find" in normalized
+            or "does not exist" in normalized
+            or "schema cache" in normalized
+            or "missing" in normalized
+        )
+
+    @classmethod
+    def _drop_missing_columns(
+        cls, payload: dict[str, Any], exc: Exception, *, candidates: tuple[str, ...]
+    ) -> dict[str, Any] | None:
+        has_missing_candidate = any(
+            cls._is_missing_column_error(exc, column=column) for column in candidates
+        )
+        if not has_missing_candidate:
+            return None
+        compat_payload = dict(payload)
+        for column in candidates:
+            compat_payload.pop(column, None)
+        return compat_payload
+
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None:
         client = self._get_supabase_client()
         if not client:
@@ -85,18 +125,45 @@ class SupabaseRunsMixin:
             )
         if "status" in payload:
             payload["status"] = self._normalize_run_status(payload.get("status"))
+        for key in ("request_id", "correlation_id"):
+            if key in payload:
+                payload[key] = self._normalize_identifier(payload.get(key))
         for key in ("prompt", "writer_prompt", "error"):
             if key in payload:
                 payload[key] = sanitize_text(payload.get(key))
         try:
             client.table("llm_runs").upsert(payload, on_conflict="run_id").execute()
-        except Exception:
+        except Exception as exc:
+            compat_payload = self._drop_missing_columns(
+                payload,
+                exc,
+                candidates=("request_id", "correlation_id"),
+            )
+            if compat_payload is not None:
+                try:
+                    client.table("llm_runs").upsert(
+                        compat_payload, on_conflict="run_id"
+                    ).execute()
+                    return
+                except Exception:
+                    LOG.exception(
+                        "Retry without observability columns failed for llm_runs row run_id=%s",
+                        run_id,
+                    )
             LOG.exception("Failed upserting llm_runs row for run_id=%s", run_id)
 
     def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None:
         client = self._get_supabase_client()
         if not client:
             return
+        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else None
+        request_id = self._normalize_identifier(event.get("request_id"))
+        correlation_id = self._normalize_identifier(event.get("correlation_id"))
+        if metadata:
+            request_id = request_id or self._normalize_identifier(metadata.get("request_id"))
+            correlation_id = correlation_id or self._normalize_identifier(
+                metadata.get("correlation_id")
+            )
         try:
             client.table("llm_run_events").insert(
                 {
@@ -107,10 +174,40 @@ class SupabaseRunsMixin:
                     "message": sanitize_text(event.get("message")) or "",
                     "payload_preview": sanitize_text(event.get("payload_preview")),
                     "error": sanitize_text(event.get("error")),
+                    "metadata": metadata or None,
+                    "request_id": request_id,
+                    "correlation_id": correlation_id,
                     "seq": seq,
                 }
             ).execute()
-        except Exception:
+        except Exception as exc:
+            payload = {
+                "run_id": run_id,
+                "ts": event.get("ts") or self._utc_now(),
+                "phase": event.get("phase", "unknown"),
+                "level": event.get("level", "info"),
+                "message": sanitize_text(event.get("message")) or "",
+                "payload_preview": sanitize_text(event.get("payload_preview")),
+                "error": sanitize_text(event.get("error")),
+                "metadata": metadata or None,
+                "request_id": request_id,
+                "correlation_id": correlation_id,
+                "seq": seq,
+            }
+            compat_payload = self._drop_missing_columns(
+                payload,
+                exc,
+                candidates=("metadata", "request_id", "correlation_id"),
+            )
+            if compat_payload is not None:
+                try:
+                    client.table("llm_run_events").insert(compat_payload).execute()
+                    return
+                except Exception:
+                    LOG.exception(
+                        "Retry without observability columns failed for llm_run_events row run_id=%s",
+                        run_id,
+                    )
             LOG.exception("Failed inserting llm_run_events row for run_id=%s", run_id)
 
     def append_run_message(
@@ -189,6 +286,10 @@ class SupabaseRunsMixin:
         )
         payload["max_attempts"] = max(1, self._safe_int(payload.get("max_attempts"), 5))
         payload["shop_domain"] = self._normalize_shop_domain(payload.get("shop_domain"))
+        payload["request_id"] = self._normalize_identifier(payload.get("request_id"))
+        payload["correlation_id"] = self._normalize_identifier(
+            payload.get("correlation_id")
+        )
         payload["available_at"] = payload.get("available_at") or self._utc_now()
         payload["created_at"] = payload.get("created_at") or self._utc_now()
         payload["updated_at"] = self._utc_now()
@@ -200,11 +301,32 @@ class SupabaseRunsMixin:
                     payload, on_conflict="job_id"
                 ).execute()
             except Exception as exc:
-                LOG.exception("Failed upserting offload_jobs row for job_id=%s", job_id)
-                if require_persistent_queue:
-                    raise RuntimeError(
-                        "Offload queue persistence failed (offload_jobs)"
-                    ) from exc
+                compat_payload = self._drop_missing_columns(
+                    payload,
+                    exc,
+                    candidates=("request_id", "correlation_id"),
+                )
+                if compat_payload is not None:
+                    try:
+                        client.table("offload_jobs").upsert(
+                            compat_payload, on_conflict="job_id"
+                        ).execute()
+                        payload = compat_payload
+                    except Exception as retry_exc:
+                        LOG.exception(
+                            "Retry without observability columns failed for offload_jobs row job_id=%s",
+                            job_id,
+                        )
+                        if require_persistent_queue:
+                            raise RuntimeError(
+                                "Offload queue persistence failed (offload_jobs)"
+                            ) from retry_exc
+                else:
+                    LOG.exception("Failed upserting offload_jobs row for job_id=%s", job_id)
+                    if require_persistent_queue:
+                        raise RuntimeError(
+                            "Offload queue persistence failed (offload_jobs)"
+                        ) from exc
 
         memory_jobs = getattr(self, "offload_jobs", None)
         if isinstance(memory_jobs, dict):
@@ -324,6 +446,9 @@ class SupabaseRunsMixin:
             payload["shop_domain"] = self._normalize_shop_domain(
                 payload.get("shop_domain")
             )
+        for key in ("request_id", "correlation_id"):
+            if key in payload:
+                payload[key] = self._normalize_identifier(payload.get(key))
         for int_key, default in (
             ("priority", 100),
             ("attempt_count", 0),
@@ -354,7 +479,33 @@ class SupabaseRunsMixin:
                     if isinstance(memory_jobs, dict):
                         memory_jobs[job_id] = row
                     return row
-            except Exception:
+            except Exception as exc:
+                compat_payload = self._drop_missing_columns(
+                    payload,
+                    exc,
+                    candidates=("request_id", "correlation_id"),
+                )
+                if compat_payload is not None:
+                    try:
+                        res = (
+                            client.table("offload_jobs")
+                            .update(compat_payload)
+                            .eq("job_id", job_id)
+                            .execute()
+                        )
+                        rows = res.data or []
+                        if rows:
+                            row = rows[0]
+                            memory_jobs = getattr(self, "offload_jobs", None)
+                            if isinstance(memory_jobs, dict):
+                                memory_jobs[job_id] = row
+                            return row
+                        payload = compat_payload
+                    except Exception:
+                        LOG.exception(
+                            "Retry without observability columns failed for offload_jobs update job_id=%s",
+                            job_id,
+                        )
                 LOG.exception("Failed updating offload_jobs row for job_id=%s", job_id)
 
         memory_jobs = getattr(self, "offload_jobs", None)
@@ -392,6 +543,50 @@ class SupabaseRunsMixin:
         if isinstance(memory_jobs, dict):
             return memory_jobs.get(job_id)
         return None
+
+    def list_offload_jobs_for_run(
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        normalized_limit = max(1, min(self._safe_int(limit, 20), 200))
+        normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+
+        client = self._get_supabase_client()
+        if client:
+            try:
+                query = (
+                    client.table("offload_jobs")
+                    .select("*")
+                    .eq("run_id", run_id)
+                    .order("created_at", desc=True)
+                    .limit(normalized_limit)
+                )
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                res = query.execute()
+                return res.data or []
+            except Exception:
+                LOG.exception("Failed listing offload_jobs rows for run_id=%s", run_id)
+
+        memory_jobs = getattr(self, "offload_jobs", None)
+        if not isinstance(memory_jobs, dict):
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for item in memory_jobs.values():
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("run_id") or "") != run_id:
+                continue
+            if normalized_shop_domain:
+                if self._normalize_shop_domain(item.get("shop_domain")) != normalized_shop_domain:
+                    continue
+            rows.append(item)
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        return rows[:normalized_limit]
 
     def list_runs(
         self,

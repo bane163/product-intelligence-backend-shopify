@@ -19,6 +19,7 @@ from application.domain.shopify_product_normalization import (
     normalize_variant_inputs,
 )
 from dotenv import load_dotenv
+from shared.metrics_signals import signal_shopify_retry
 
 load_dotenv()
 
@@ -67,6 +68,41 @@ def _should_fallback_metafields_query(error_message: str) -> bool:
     return any(marker in lowered for marker in fallback_markers)
 
 
+def _parse_retry_after_seconds(value: str | None) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_throttle_message(errors: Any) -> str | None:
+    if not isinstance(errors, list):
+        return None
+    for item in errors:
+        if not isinstance(item, dict):
+            continue
+        extensions = item.get("extensions")
+        code = (
+            str(extensions.get("code") or "").strip().upper()
+            if isinstance(extensions, dict)
+            else ""
+        )
+        message = str(item.get("message") or "").strip()
+        lowered = message.lower()
+        if code == "THROTTLED" or "throttle" in lowered or "too many requests" in lowered:
+            return message or "Shopify GraphQL throttled"
+    return None
+
+
+class _ShopifyThrottledError(RuntimeError):
+    def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
 class ShopifyClient:
     """
     Minimal async Shopify GraphQL helper.
@@ -94,7 +130,12 @@ class ShopifyClient:
             else None
         )
 
-    _RETRYABLE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)
+    _RETRYABLE_ERRORS = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        _ShopifyThrottledError,
+    )
     _MAX_RETRIES = 3
     _BACKOFF_BASE = 1.0
 
@@ -110,10 +151,27 @@ class ShopifyClient:
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
                 resp = await self._client.post(self.url, json=payload)
+                if resp.status_code == 429:
+                    request_id = (
+                        resp.headers.get("x-request-id")
+                        or resp.headers.get("x-request-id".title())
+                    )
+                    message = "Shopify GraphQL throttled (HTTP 429)"
+                    if request_id:
+                        message = f"{message} request_id={request_id}"
+                    raise _ShopifyThrottledError(
+                        message,
+                        retry_after_seconds=_parse_retry_after_seconds(
+                            resp.headers.get("Retry-After")
+                        ),
+                    )
                 resp.raise_for_status()
                 body = resp.json()
                 top_level_errors = body.get("errors")
                 if isinstance(top_level_errors, list) and top_level_errors:
+                    throttle_message = _extract_throttle_message(top_level_errors)
+                    if throttle_message:
+                        raise _ShopifyThrottledError(throttle_message)
                     messages: list[str] = []
                     for err in top_level_errors:
                         if isinstance(err, dict):
@@ -142,6 +200,21 @@ class ShopifyClient:
             except self._RETRYABLE_ERRORS as exc:
                 last_exc = exc
                 if attempt < self._MAX_RETRIES:
+                    retry_after_seconds = (
+                        exc.retry_after_seconds
+                        if isinstance(exc, _ShopifyThrottledError)
+                        else None
+                    )
+                    signal_shopify_retry(
+                        shop=self.shop,
+                        attempt=attempt,
+                        max_attempts=self._MAX_RETRIES,
+                        reason="throttled"
+                        if isinstance(exc, _ShopifyThrottledError)
+                        else "retryable_error",
+                        retry_after_seconds=retry_after_seconds,
+                        error=str(exc),
+                    )
                     LOG.warning(
                         "Shopify GraphQL retry attempt=%s/%s shop=%s error=%s",
                         attempt,
@@ -149,7 +222,11 @@ class ShopifyClient:
                         self.shop,
                         exc,
                     )
-                    await asyncio.sleep(self._BACKOFF_BASE * (2 ** (attempt - 1)))
+                    await asyncio.sleep(
+                        retry_after_seconds
+                        if retry_after_seconds is not None
+                        else self._BACKOFF_BASE * (2 ** (attempt - 1))
+                    )
         if last_exc is not None:
             LOG.error(
                 "Shopify GraphQL failed after retries shop=%s url=%s error=%s",

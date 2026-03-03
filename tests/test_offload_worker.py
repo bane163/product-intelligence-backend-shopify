@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -376,6 +377,7 @@ async def test_run_once_requeues_document_import_job_before_max_attempts(monkeyp
 @pytest.mark.asyncio
 async def test_run_once_marks_document_import_job_dead_letter_after_max_attempts(
     monkeypatch,
+    caplog: pytest.LogCaptureFixture,
 ):
     import application.services.offload_worker as offload_worker
 
@@ -443,6 +445,7 @@ async def test_run_once_marks_document_import_job_dead_letter_after_max_attempts
     worker = offload_worker.OffloadWorker(
         ctx=ctx, queue_name="offload", worker_id="worker-1"
     )
+    caplog.set_level(logging.INFO, logger="metrics.signals")
     processed = await worker.run_once()
     assert processed is True
 
@@ -461,6 +464,12 @@ async def test_run_once_marks_document_import_job_dead_letter_after_max_attempts
 
     run = ctx.supabase.runs.get_run(run_id)
     assert run is None or run["status"] == "failed"
+    signal_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        '"event": "offload.worker_job"' in message
+        and '"dead_letter": true' in message
+        for message in signal_messages
+    )
 
 
 @pytest.mark.asyncio

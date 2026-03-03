@@ -16,6 +16,7 @@ from application.services.document_formats import (
     classify_document,
     supported_extensions_display,
 )
+from shared.observability import current_observability_fields
 from .files_helper import generate_thumbnail_bytes
 from .schemas import (
     BatchExtractSubmitAcceptedItem,
@@ -163,12 +164,26 @@ def _save_draft_state(
     existing_submit_run_id = _optional_str(existing, "submit_run_id")
     existing_submit_error = _optional_str(existing, "submit_error")
     existing_shop_domain = _optional_str(existing, "shop_domain")
+    normalized_fallback_name = fallback_name
+    normalized_fallback_input_filename = fallback_input_filename
+    if (
+        isinstance(fallback_input_file_id, str)
+        and fallback_input_file_id
+        and normalized_fallback_name == fallback_input_file_id
+    ):
+        normalized_fallback_name = None
+    if (
+        isinstance(fallback_input_file_id, str)
+        and fallback_input_file_id
+        and normalized_fallback_input_filename == fallback_input_file_id
+    ):
+        normalized_fallback_input_filename = None
     resolved_draft_name = _resolved_draft_name(
         draft_id=draft_id,
         existing_draft_name=existing_draft_name,
-        fallback_name=fallback_name,
+        fallback_name=normalized_fallback_name,
         existing_input_filename=existing_input_filename,
-        fallback_input_filename=fallback_input_filename,
+        fallback_input_filename=normalized_fallback_input_filename,
     )
 
     save_draft_execute(
@@ -179,7 +194,7 @@ def _save_draft_state(
         draft_name=resolved_draft_name,
         shop_domain=existing_shop_domain or shop_domain,
         input_file_id=existing_input_file_id or fallback_input_file_id,
-        input_filename=existing_input_filename or fallback_input_filename,
+        input_filename=existing_input_filename or normalized_fallback_input_filename,
         output_file_id=output_file_id if output_file_id is not None else existing_output_file_id,
         output_filename=(
             output_filename if output_filename is not None else existing_output_filename
@@ -321,6 +336,7 @@ def _queue_batch_extract_submit_for_file(
 ) -> BatchExtractSubmitAcceptedItem:
     from application.use_cases.files.get_file import execute as get_file_execute
 
+    observability_fields = current_observability_fields()
     file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not isinstance(file_entry, dict):
         raise LookupError("File not found")
@@ -415,6 +431,7 @@ def _queue_batch_extract_submit_for_file(
             "input_size_bytes": file_size,
             "attempt": 1,
             "shop_domain": shop_domain,
+            **observability_fields,
         },
     )
     ctx.supabase.runs.enqueue_offload_job(
@@ -427,6 +444,7 @@ def _queue_batch_extract_submit_for_file(
             "draft_id": draft_id,
             "file_id": file_id,
             "shop_domain": shop_domain,
+            **observability_fields,
             "payload": {
                 "input_filename": input_name,
                 "input_content_type": input_content_type,
@@ -796,6 +814,7 @@ async def process_excel(
         )
 
     if offload:
+        observability_fields = current_observability_fields()
         if not file_id:
             raise HTTPException(
                 status_code=400,
@@ -874,6 +893,7 @@ async def process_excel(
                     "input_size_bytes": len(file_bytes_data),
                     "attempt": 1,
                     "shop_domain": shop_domain,
+                    **observability_fields,
                 },
             )
             ctx.supabase.runs.enqueue_offload_job(
@@ -886,6 +906,7 @@ async def process_excel(
                     "draft_id": draft_id,
                     "file_id": file_id,
                     "shop_domain": shop_domain,
+                    **observability_fields,
                     "payload": {
                         "input_filename": input_name,
                         "input_content_type": input_content_type,

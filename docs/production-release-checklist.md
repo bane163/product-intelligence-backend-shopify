@@ -100,3 +100,23 @@ Mark release as **GO** only if all sections above pass with no open blockers.
 - Supabase + Backend Contract: PASS / FAIL
 
 **Overall release decision:** GO / NO-GO
+
+---
+
+## 8) Release Readiness Gates (Roadmap item #5)
+
+### Contract + flow gate evidence
+- [ ] Frontend proxy contract tests pass (`cd ../extractor-v3 && npm run -s test:contract`).
+- [ ] Backend intelligence release gates pass (`PYTHONPATH=. uv run pytest -q tests/test_release_readiness_gates.py`).
+- [ ] Backend intelligence route spot-checks pass (`PYTHONPATH=. uv run pytest -q tests/test_agents_routes.py -k "test_run_and_get_product_intelligence_audit or test_apply_bulk_with_idempotency_key_replays_without_reapplying or test_apply_bulk_idempotency_key_conflict_on_payload_mismatch"`).
+- [ ] Critical intelligence path is green: audit -> suggestions -> apply -> revert.
+- [ ] Apply-bulk idempotency replay/conflict assertions are green.
+
+### Tenant isolation + rollback safety evidence
+- [ ] Tenant negative-path checks are green for intelligence endpoints (missing/mismatched tenant context).
+- [ ] Migration/rollback plan is documented for release batch (including owner and rollback trigger criteria).
+- [ ] Release artifact includes command output links/logs for all gate checks above.
+
+### Fail conditions (do not release)
+- Any contract gate command fails or is skipped.
+- Rollback trigger/owner is undefined for the release batch.

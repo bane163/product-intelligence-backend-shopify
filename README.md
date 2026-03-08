@@ -142,3 +142,32 @@ The frontend is a Shopify App built with React Router (formerly Remix).
 
 Each directory has its own `.env` file. Ensure they are populated with the
 necessary keys (Supabase URL, Service Role Key, Shopify API keys, etc.).
+
+### Vault-backed OpenAI key for install seeding
+
+The backend install seeding flow now resolves OpenAI keys from Supabase Vault first.
+
+Lookup order for a shop domain (for example `seed-shop.myshopify.com`):
+1. `openai_api_key__seed-shop.myshopify.com` (shop-specific override)
+2. `openai_api_key` (global fallback)
+3. `OPENAI_API_KEY` env var (last-resort fallback)
+
+Local SQL examples (using your local DB URL):
+
+```sql
+-- Global fallback key
+select vault.create_secret('sk-your-global-key', 'openai_api_key', 'Global OpenAI key');
+
+-- Shop-specific override key
+select vault.create_secret(
+  'sk-your-shop-key',
+  'openai_api_key__seed-shop.myshopify.com',
+  'Shop-specific OpenAI key'
+);
+```
+
+Update an existing secret:
+
+```sql
+select vault.update_secret('<secret-uuid>', 'sk-new-key', 'openai_api_key', 'Global OpenAI key');
+```

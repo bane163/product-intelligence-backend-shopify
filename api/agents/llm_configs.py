@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+import auth
 from app_context import AppContext, get_ctx
 
 router = APIRouter()
@@ -40,6 +41,24 @@ class LLMConfigUpdatePayload(BaseModel):
 
 class ActivatePayload(BaseModel):
     shop_domain: str = Field(min_length=3)
+
+
+class SeedDefaultsPayload(BaseModel):
+    name: str = "OpenAI"
+    provider: str = "openai"
+    base_url: str = "https://api.openai.com/v1"
+    model_id: str = "gpt-5-mini-2025-08-07"
+    version: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    timeout_seconds: int | None = None
+    enable_file_search: bool = False
+    is_active: bool = True
+
+
+class SeedPayload(BaseModel):
+    shop_domain: str = Field(min_length=3)
+    defaults: SeedDefaultsPayload | None = None
 
 
 @router.get("/llm-configs", summary="List llm model configs for shop")
@@ -89,6 +108,20 @@ async def create_llm_config(payload: LLMConfigCreatePayload, ctx: AppContext = D
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return {"config": created}
+
+
+@router.post("/llm-configs/seed", summary="Seed default OpenAI llm model config")
+async def seed_llm_config(payload: SeedPayload) -> dict[str, Any]:
+    return auth._seed_default_llm_configs_on_install(
+        payload.shop_domain,
+        include_ollama=False,
+        seed_source="llm_seed_endpoint",
+        openai_defaults=(
+            payload.defaults.model_dump(exclude_unset=True)
+            if payload.defaults is not None
+            else None
+        ),
+    )
 
 
 @router.patch("/llm-configs/{config_id}", summary="Update llm model config")

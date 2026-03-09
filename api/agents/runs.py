@@ -144,6 +144,35 @@ async def get_llm_run(
     return {"run": run}
 
 
+@router.delete("/runs/{run_id}", summary="Delete persisted LLM run")
+async def delete_llm_run(
+    run_id: str,
+    request: Request,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.runs.delete_run import execute as delete_run_execute
+    from application.use_cases.runs.get_run import execute as get_run_execute
+
+    tenant = require_shop_domain(request, shop_domain)
+    run = get_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    current_status = _normalize_run_status(run.get("status"), "running")
+    if current_status in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run cannot be deleted from status '{current_status}'",
+        )
+
+    deleted = delete_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return {"ok": True, "run_id": run_id}
+
+
 @router.get("/runs/{run_id}/history", summary="Get persisted LLM run history")
 async def get_llm_run_history(
     run_id: str,

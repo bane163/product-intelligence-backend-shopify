@@ -634,6 +634,35 @@ class SupabaseRunsMixin:
             LOG.exception("Failed fetching llm_runs for run_id=%s", run_id)
             return None
 
+    def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool:
+        client = self._get_supabase_client()
+        if not client:
+            return False
+
+        normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+        try:
+            query = client.table("llm_runs").delete().eq("run_id", run_id)
+            if normalized_shop_domain:
+                query = query.eq("shop_domain", normalized_shop_domain)
+            res = query.execute()
+            deleted_rows = res.data or []
+            if not deleted_rows:
+                return False
+        except Exception:
+            LOG.exception("Failed deleting llm_runs row for run_id=%s", run_id)
+            return False
+
+        # Keep durable queue hygiene aligned with deleted run logs.
+        try:
+            cleanup_query = client.table("offload_jobs").delete().eq("run_id", run_id)
+            if normalized_shop_domain:
+                cleanup_query = cleanup_query.eq("shop_domain", normalized_shop_domain)
+            cleanup_query.execute()
+        except Exception:
+            LOG.exception("Failed deleting offload_jobs rows for run_id=%s", run_id)
+
+        return True
+
     def get_run_history(
         self, run_id: str, *, shop_domain: str | None = None
     ) -> dict[str, Any]:

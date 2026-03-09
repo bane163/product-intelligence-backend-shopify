@@ -119,6 +119,9 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None:
         return self._service.get_run(run_id, shop_domain=shop_domain)
 
+    def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool:
+        return self._service.delete_run(run_id, shop_domain=shop_domain)
+
     def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]:
         return self._service.get_run_history(run_id, shop_domain=shop_domain)
 

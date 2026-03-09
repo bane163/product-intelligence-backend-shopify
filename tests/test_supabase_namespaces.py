@@ -35,6 +35,16 @@ def test_runs_namespace_alias_maps_history_method():
     assert target.calls[0][0] == "get_run_history"
 
 
+def test_runs_namespace_alias_maps_delete_method():
+    target = _FakeSupabaseTarget()
+    domains = SupabaseDomainAccessors(target)
+
+    result = domains.runs.delete("run-1")
+
+    assert result == "delete_run"
+    assert target.calls[0][0] == "delete_run"
+
+
 def test_runs_namespace_alias_maps_queue_enqueue_method():
     target = _FakeSupabaseTarget()
     domains = SupabaseDomainAccessors(target)

@@ -158,6 +158,68 @@ async def test_run_control_resume_retry_cancel(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_delete_run_removes_terminal_run(monkeypatch):
+    ctx = get_app_context()
+    captured: dict[str, object] = {}
+
+    def fake_get_run(run_id: str, *, shop_domain=None):
+        captured["lookup"] = {"run_id": run_id, "shop_domain": shop_domain}
+        if run_id != "run-delete" or shop_domain != "test-shop.myshopify.com":
+            return None
+        return {"run_id": run_id, "status": "succeeded", "shop_domain": shop_domain}
+
+    def fake_delete_run(run_id: str, *, shop_domain=None):
+        captured["delete"] = {"run_id": run_id, "shop_domain": shop_domain}
+        return run_id == "run-delete" and shop_domain == "test-shop.myshopify.com"
+
+    monkeypatch.setattr(ctx.services.supabase, "get_run", fake_get_run)
+    monkeypatch.setattr(ctx.services.supabase, "delete_run", fake_delete_run)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.delete(
+            "/agents/runs/run-delete",
+            headers={"x-shop-domain": "TEST-SHOP.myshopify.com"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "run_id": "run-delete"}
+    assert captured == {
+        "lookup": {"run_id": "run-delete", "shop_domain": "test-shop.myshopify.com"},
+        "delete": {"run_id": "run-delete", "shop_domain": "test-shop.myshopify.com"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_delete_run_rejects_active_runs(monkeypatch):
+    ctx = get_app_context()
+    delete_called = {"value": False}
+
+    def fake_get_run(run_id: str, *, shop_domain=None):
+        if run_id != "run-active" or shop_domain != "test-shop.myshopify.com":
+            return None
+        return {"run_id": run_id, "status": "running", "shop_domain": shop_domain}
+
+    def fake_delete_run(run_id: str, *, shop_domain=None):
+        delete_called["value"] = True
+        return False
+
+    monkeypatch.setattr(ctx.services.supabase, "get_run", fake_get_run)
+    monkeypatch.setattr(ctx.services.supabase, "delete_run", fake_delete_run)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        response = await ac.delete(
+            "/agents/runs/run-active",
+            headers={"x-shop-domain": "test-shop.myshopify.com"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Run cannot be deleted from status 'running'"
+    assert delete_called["value"] is False
+
+
+@pytest.mark.asyncio
 async def test_workflow_snapshot_returns_run_draft_and_events(monkeypatch):
     ctx = get_app_context()
 

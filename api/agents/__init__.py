@@ -2,11 +2,12 @@
 
 from fastapi import APIRouter
 
-from . import drafts, files, intelligence, llm_configs, runs, submit, submitted, wopi
+from . import billing, drafts, files, intelligence, llm_configs, runs, submit, submitted, wopi
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 # Preserve the original endpoint paths by including each sub-router intact.
+router.include_router(billing.router)
 router.include_router(files.router)
 router.include_router(drafts.router)
 router.include_router(intelligence.router)

@@ -2,6 +2,7 @@ import os
 from typing import Any
 
 from .interfaces import SupabaseServiceInterface
+from .supabase_billing_mixin import SupabaseBillingMixin
 from .supabase_drafts_mixin import SupabaseDraftsMixin
 from .supabase_file_mixin import SupabaseFileMixin
 from .supabase_intelligence_mixin import SupabaseIntelligenceMixin
@@ -15,6 +16,7 @@ class SupabaseService(
     SupabaseDraftsMixin,
     SupabaseIntelligenceMixin,
     SupabaseLlmConfigMixin,
+    SupabaseBillingMixin,
     SupabaseServiceInterface,
 ):
     def _utc_now(self) -> str:
@@ -34,3 +36,4 @@ class SupabaseService(
         self.product_intelligence_bulk_operations: dict[str, dict[str, Any]] = {}
         self.product_intelligence_normalization_settings: dict[str, dict[str, Any]] = {}
         self.llm_model_configs: dict[str, dict[str, Any]] = {}
+        self._billing_store: dict[str, dict[str, Any]] = {}

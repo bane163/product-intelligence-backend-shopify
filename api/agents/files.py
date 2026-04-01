@@ -30,6 +30,7 @@ from .schemas import (
     BulkUploadResult,
 )
 from .utils import require_shop_domain
+from api.agents.billing import _get_billing_svc
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -568,9 +569,16 @@ async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict[str, Any
 
 @router.post("/upload", summary="Upload a file for preview and processing")
 async def upload_file(
-    file: UploadFile = File(...), ctx: AppContext = Depends(get_ctx)
+    request: Request,
+    file: UploadFile = File(...),
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     """Upload a file and return a file_id for WOPI preview."""
+    shop_domain = require_shop_domain(request)
+    billing_svc = _get_billing_svc(ctx)
+    if not billing_svc.can_process(shop_domain):
+        raise HTTPException(status_code=402, detail="Active subscription required to process files")
+
     prepared = await _prepare_uploaded_file(file, ctx=ctx)
 
     from application.use_cases.files.save_file import execute as save_file_execute
@@ -585,6 +593,11 @@ async def upload_file(
     )
     thumbnail_generated = False
 
+    try:
+        billing_svc.increment_usage(shop_domain, files=1, tokens=0)
+    except Exception as usage_err:
+        LOG.warning("Failed to increment usage for %s: %s", shop_domain, usage_err)
+
     return {
         "file_id": prepared["file_id"],
         "filename": prepared["name"],
@@ -595,9 +608,15 @@ async def upload_file(
 
 @router.post("/upload/bulk", summary="Upload multiple files for preview and processing")
 async def upload_files_bulk(
+    request: Request,
     files: list[UploadFile] = File(...),
     ctx: AppContext = Depends(get_ctx),
 ) -> BulkUploadResult:
+    shop_domain = require_shop_domain(request)
+    billing_svc = _get_billing_svc(ctx)
+    if not billing_svc.can_process(shop_domain):
+        raise HTTPException(status_code=402, detail="Active subscription required to process files")
+
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
@@ -646,6 +665,13 @@ async def upload_files_bulk(
         )
         for item in prepared_items
     ]
+    successful_count = len(uploaded)
+    if successful_count > 0:
+        try:
+            billing_svc.increment_usage(shop_domain, files=successful_count, tokens=0)
+        except Exception as usage_err:
+            LOG.warning("Failed to increment usage for %s: %s", shop_domain, usage_err)
+
     return BulkUploadResult(
         total=len(files),
         succeeded=len(uploaded),
@@ -750,6 +776,7 @@ async def queue_batch_extract_submit(
 @router.post("/excel", summary="Process an Excel file through the AI agent workflow")
 @router.post("/import", summary="Process a document through the AI agent workflow")
 async def process_excel(
+    request: Request,
     run_id: str | None = Form(None),
     file_id: str | None = Form(None),
     file: UploadFile | None = File(None),
@@ -765,6 +792,11 @@ async def process_excel(
 
     Accepts either file_id or direct upload.
     """
+    tenant = require_shop_domain(request, shop_domain)
+    billing_svc = _get_billing_svc(ctx)
+    if not billing_svc.can_process(tenant):
+        raise HTTPException(status_code=402, detail="Active subscription required to process files")
+
     from application.use_cases.processing.process_document import (
         execute as process_document_execute,
     )
@@ -947,6 +979,11 @@ async def process_excel(
         output_path=output_path,
         shop_domain=shop_domain,
     )
+
+    try:
+        billing_svc.increment_usage(tenant, files=1, tokens=0)
+    except Exception as usage_err:
+        LOG.warning("Failed to increment usage for %s: %s", tenant, usage_err)
 
     return result
 

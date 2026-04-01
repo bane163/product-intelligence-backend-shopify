@@ -257,7 +257,21 @@ class SupabaseBillingMixin:
     # ------------------------------------------------------------------
 
     def can_process(self, shop_domain: str) -> bool:
+        """Check if a merchant can process files based on subscription status."""
         subscription = self.get_subscription(shop_domain)
         if not subscription:
             return False
-        return subscription.get("status") in ("active", "trial")
+        status = subscription.get("status")
+        if status == "active":
+            return True
+        if status == "trial":
+            trial_ends = subscription.get("trial_ends_at")
+            if trial_ends:
+                from datetime import datetime, timezone
+                try:
+                    end_dt = datetime.fromisoformat(trial_ends.replace("Z", "+00:00"))
+                    return datetime.now(timezone.utc) < end_dt
+                except (ValueError, TypeError):
+                    return False
+            return True  # No trial_ends_at set — allow (graceful)
+        return False

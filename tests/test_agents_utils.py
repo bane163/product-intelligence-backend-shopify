@@ -3,8 +3,10 @@ from urllib.parse import urlencode
 from fastapi import HTTPException
 from starlette.requests import Request
 
+import api.agents.utils as utils
 from api.agents.utils import (
     normalize_shop_domain,
+    resolve_dev_billing_simulator_plan,
     require_shop_domain,
     resolve_shop_access_token,
     resolve_shop_domain,
@@ -74,8 +76,55 @@ def test_resolve_shop_domain_rejects_header_and_query_mismatch():
         assert exc.detail == "shop_domain mismatch"
 
 
-def testresolve_shop_access_token_prefers_header():
+def testresolve_shop_access_token_keeps_development_compatibility():
     request = _make_request({"x-shop-access-token": " header-token "})
     assert resolve_shop_access_token(request, "body-token") == "header-token"
-    assert resolve_shop_access_token(_make_request(), " body-token ") == "body-token"
-    assert resolve_shop_access_token(_make_request(), None) is None
+
+
+def test_resolve_shop_access_token_accepts_trusted_forwarded_token_in_production(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("INTERNAL_SERVICE_KEY", "service-secret")
+    monkeypatch.setattr(utils.shopify_session_store, "get_offline_access_token", lambda shop: "stored-token")
+    request = _make_request({
+        "x-shop-access-token": "header-token",
+        "x-stockpile-service-key": "service-secret",
+    })
+    assert resolve_shop_access_token(request, "body-token", shop_domain="store.myshopify.com") == "header-token"
+
+
+def test_resolve_shop_access_token_requires_internal_auth(monkeypatch):
+    monkeypatch.setenv("INTERNAL_SERVICE_KEY", "service-secret")
+    monkeypatch.setattr(utils.shopify_session_store, "get_offline_access_token", lambda shop: "stored-token")
+    request = _make_request({"x-shop-domain": "store.myshopify.com"})
+    try:
+        resolve_shop_access_token(request, None, shop_domain="store.myshopify.com")
+        raise AssertionError("Expected HTTPException for missing service authentication")
+    except HTTPException as exc:
+        assert exc.status_code == 401
+
+
+def test_resolve_shop_access_token_uses_stored_token_when_forwarded_token_missing(monkeypatch):
+    monkeypatch.setenv("INTERNAL_SERVICE_KEY", "service-secret")
+    monkeypatch.setattr(utils.shopify_session_store, "get_offline_access_token", lambda shop: "stored-token")
+    assert (
+        resolve_shop_access_token(
+            _make_request({"x-stockpile-service-key": "service-secret"}),
+            None,
+            shop_domain="store.myshopify.com",
+        )
+        == "stored-token"
+    )
+
+
+def test_resolve_dev_billing_simulator_plan_reads_forwarded_plan_in_development(monkeypatch):
+    monkeypatch.delenv("NODE_ENV", raising=False)
+    request = _make_request({"x-dev-billing-simulator-plan": "Starter"})
+
+    assert resolve_dev_billing_simulator_plan(request) == "starter"
+
+
+def test_resolve_dev_billing_simulator_plan_ignores_forwarded_plan_in_production(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "production")
+    request = _make_request({"x-dev-billing-simulator-plan": "Starter"})
+
+    assert resolve_dev_billing_simulator_plan(request) is None

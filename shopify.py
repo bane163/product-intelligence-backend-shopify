@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-import token_store
+import shopify_session_store
 from application.domain.shopify_product_normalization import (
     build_product_payload,
     build_product_set_identifier,
@@ -125,7 +125,7 @@ class ShopifyClient:
         self._client: Optional[httpx.AsyncClient] = None
         # Build URL lazily when shop known; store template now if shop present
         self.url = (
-            f"https://{self.shop}/admin/api/2025-10/graphql.json"
+            f"https://{self.shop}/admin/api/2026-07/graphql.json"
             if self.shop
             else None
         )
@@ -239,7 +239,8 @@ class ShopifyClient:
     async def _ensure_client(self) -> None:
         """Create the httpx.AsyncClient if not already created.
 
-        This resolves the token (from provided value, env, or token_store)
+        This resolves the token from an explicit value, environment, or the
+        canonical encrypted Supabase app session.
         and ensures `self.url` is set. Raises RuntimeError if shop or token
         still missing.
         """
@@ -252,7 +253,7 @@ class ShopifyClient:
             self.shop = _normalize_shop(self.shop)
             if self.shop:
                 self.url = (
-                    f"https://{self.shop}/admin/api/2025-10/graphql.json"
+                    f"https://{self.shop}/admin/api/2026-07/graphql.json"
                 )
 
         if not self.shop:
@@ -260,11 +261,11 @@ class ShopifyClient:
                 "SHOPIFY_STORE must be set (either pass `shop=` or set SHOPIFY_STORE env)"
             )
 
-        # Resolve token: explicit, env, or token_store
+        # Resolve token: explicit, env, or canonical app session.
         if not self._token:
             self._token = os.getenv("SHOPIFY_ACCESS_TOKEN")
         if not self._token:
-            self._token = token_store.get_token(self.shop)
+            self._token = shopify_session_store.get_offline_access_token(self.shop)
 
         if not self._token:
             raise RuntimeError(
@@ -285,12 +286,11 @@ class ShopifyClient:
     def set_token(self, token: str, persist: bool = False) -> None:
         """Attach a token to the client at runtime.
 
-        If `persist` is True the token will also be saved to `token_store` for
-        future runs.
+        Persistence is owned by Shopify's canonical app session store.
         """
         self._token = token
-        if persist and self.shop:
-            token_store.save_token(self.shop, token)
+        if persist:
+            raise RuntimeError("Shopify credentials are persisted by the canonical app session store")
         # If client already exists, update its header in-place
         if self._client is not None:
             self._client.headers["X-Shopify-Access-Token"] = token

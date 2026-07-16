@@ -14,6 +14,8 @@ from application.domain.product_intelligence_patching import (
 from application.ports.llm_port import LLMPort
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
+from application.services.document_formats import classify_document, validate_document_content
+from application.services.spreadsheet_source_refs import enrich_spreadsheet_source_refs
 from application.use_cases.intelligence_generate_suggestions import (
     execute as generate_suggestions_execute,
 )
@@ -37,6 +39,7 @@ async def execute(
     write_to_file: bool = False,
     output_path: str | None = None,
     shop_domain: str | None = None,
+    manage_lifecycle: bool = True,
 ):
     """Extracted application use-case for processing an uploaded document.
 
@@ -63,9 +66,8 @@ async def execute(
         def trace_event(*args, **kwargs):
             return None
 
-    supabase.runs.create_or_update_run(
-        run_id,
-        {
+    if manage_lifecycle:
+        supabase.runs.create_or_update_run(run_id, {
             "status": "queued",
             "source": "document_import",
             "started_at": started_at.isoformat(),
@@ -74,8 +76,7 @@ async def execute(
             "attempt": 1,
             "shop_domain": shop_domain,
             **observability_fields,
-        },
-    )
+        })
     try:
         emit_and_persist(
             phase="request_received",
@@ -88,7 +89,8 @@ async def execute(
         )
 
         # Persist input metadata
-        supabase.runs.create_or_update_run(
+        if manage_lifecycle:
+            supabase.runs.create_or_update_run(
             run_id,
             {
                 "input_file_id": None,
@@ -97,6 +99,16 @@ async def execute(
                 "input_size_bytes": len(file_bytes),
             },
         )
+
+        document_format = classify_document(
+            filename=input_name,
+            content_type=input_content_type,
+            file_bytes=file_bytes,
+        )
+        try:
+            validate_document_content(document_format, file_bytes=file_bytes)
+        except ValueError as exc:
+            raise ValueError(f"Invalid file content: {exc}") from exc
 
         model_env = None
         model_provider = None
@@ -144,7 +156,8 @@ async def execute(
             message="Starting document workflow execution",
             payload_preview={"input_bytes": len(file_bytes)},
         )
-        supabase.runs.create_or_update_run(
+        if manage_lifecycle:
+            supabase.runs.create_or_update_run(
             run_id,
             {
                 "status": "running",
@@ -209,6 +222,8 @@ async def execute(
             )
             if isinstance(raw_products, list):
                 result["products"] = products
+            if products and document_format.is_spreadsheet:
+                enrich_spreadsheet_source_refs(products, file_bytes, input_name)
             if products:
                 if not shop_domain:
                     enrichment_warning = "Import enrichment skipped: missing shop_domain"
@@ -334,12 +349,16 @@ async def execute(
             (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
         )
         try:
+            if not manage_lifecycle:
+                raise RuntimeError("lifecycle managed by offload worker")
             supabase.runs.finalize_run(
                 run_id, status="error", duration_ms=duration_ms, error=str(exc)
             )
         except Exception:
             pass
         try:
+            if not manage_lifecycle:
+                raise RuntimeError("lifecycle managed by offload worker")
             tracing.complete_run(run_id)
         except Exception:
             pass
@@ -406,12 +425,16 @@ async def execute(
         }
     duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
     try:
+        if not manage_lifecycle:
+            raise RuntimeError("lifecycle managed by offload worker")
         supabase.runs.finalize_run(
             run_id, status="success", duration_ms=duration_ms, extra_fields=output_meta
         )
     except Exception:
         pass
     try:
+        if not manage_lifecycle:
+            raise RuntimeError("lifecycle managed by offload worker")
         tracing.complete_run(run_id)
     except Exception:
         pass

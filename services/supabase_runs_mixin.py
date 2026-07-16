@@ -9,6 +9,7 @@ LOG = logging.getLogger(__name__)
 
 
 class SupabaseRunsMixin:
+    TERMINAL_WORKFLOW_STATUSES = {"cancelled", "succeeded", "failed"}
     def _get_supabase_client(self) -> Optional[Any]:
         """Stub for typing — actual implementation provided by host class (e.g. SupabaseFileMixin)."""
         raise NotImplementedError(
@@ -116,8 +117,6 @@ class SupabaseRunsMixin:
 
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None:
         client = self._get_supabase_client()
-        if not client:
-            return
         payload = {"run_id": run_id, **fields}
         if "shop_domain" in payload:
             payload["shop_domain"] = self._normalize_shop_domain(
@@ -131,6 +130,11 @@ class SupabaseRunsMixin:
         for key in ("prompt", "writer_prompt", "error"):
             if key in payload:
                 payload[key] = sanitize_text(payload.get(key))
+        memory_runs = getattr(self, "llm_runs", None)
+        if isinstance(memory_runs, dict):
+            memory_runs[run_id] = {**memory_runs.get(run_id, {}), **payload}
+        if not client:
+            return
         try:
             client.table("llm_runs").upsert(payload, on_conflict="run_id").execute()
         except Exception as exc:
@@ -154,8 +158,6 @@ class SupabaseRunsMixin:
 
     def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None:
         client = self._get_supabase_client()
-        if not client:
-            return
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else None
         request_id = self._normalize_identifier(event.get("request_id"))
         correlation_id = self._normalize_identifier(event.get("correlation_id"))
@@ -164,6 +166,18 @@ class SupabaseRunsMixin:
             correlation_id = correlation_id or self._normalize_identifier(
                 metadata.get("correlation_id")
             )
+        memory_events = getattr(self, "llm_run_events", None)
+        if isinstance(memory_events, dict):
+            memory_events.setdefault(run_id, []).append(
+                {
+                    **event,
+                    "run_id": run_id,
+                    "message": sanitize_text(event.get("message")) or "",
+                    "seq": seq,
+                }
+            )
+        if not client:
+            return
         try:
             client.table("llm_run_events").insert(
                 {
@@ -209,6 +223,36 @@ class SupabaseRunsMixin:
                         run_id,
                     )
             LOG.exception("Failed inserting llm_run_events row for run_id=%s", run_id)
+
+    def get_latest_run_event_seq(self, run_id: str) -> int:
+        memory_events = getattr(self, "llm_run_events", None)
+        latest = 0
+        if isinstance(memory_events, dict):
+            for item in memory_events.get(run_id, []):
+                if isinstance(item, dict):
+                    try:
+                        latest = max(latest, int(item.get("seq") or 0))
+                    except (TypeError, ValueError):
+                        continue
+
+        client = self._get_supabase_client()
+        if not client:
+            return latest
+        try:
+            result = (
+                client.table("llm_run_events")
+                .select("seq")
+                .eq("run_id", run_id)
+                .order("seq", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            if rows:
+                latest = max(latest, int(rows[0].get("seq") or 0))
+        except Exception:
+            LOG.exception("Failed resolving latest event sequence for run_id=%s", run_id)
+        return latest
 
     def append_run_message(
         self,
@@ -518,6 +562,85 @@ class SupabaseRunsMixin:
         memory_jobs[job_id] = merged
         return merged
 
+    def cancel_run_cascade(self, run_id: str, shop_domain: str | None) -> dict[str, Any] | None:
+        """Atomically cancel a run, its runnable jobs, draft and control event."""
+        tenant = self._normalize_shop_domain(shop_domain)
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.rpc(
+                    "cancel_run_cascade",
+                    {"p_run_id": run_id, "p_shop_domain": tenant},
+                ).execute()
+                rows = response.data or []
+                return rows[0] if isinstance(rows, list) and rows else rows
+            except Exception:
+                LOG.exception("Failed cancelling workflow cascade run_id=%s", run_id)
+                return None
+
+        run = getattr(self, "llm_runs", {}).get(run_id)
+        if not isinstance(run, dict):
+            return None
+        if tenant and self._normalize_shop_domain(run.get("shop_domain")) != tenant:
+            return None
+        if self._normalize_run_status(run.get("status")) not in {"queued", "running"}:
+            return None
+        now = self._utc_now()
+        run.update(status="cancelled", ended_at=now, error=None,
+                   failure_code="cancelled_by_operator", failure_message="Run cancelled",
+                   resume_token=None)
+        jobs = getattr(self, "offload_jobs", {})
+        for job in jobs.values() if isinstance(jobs, dict) else ():
+            if job.get("run_id") == run_id and self._normalize_offload_job_status(job.get("status")) not in self.TERMINAL_WORKFLOW_STATUSES:
+                job.update(status="cancelled", error=None, worker_id=None,
+                           claimed_at=None, claim_expires_at=None, updated_at=now)
+        seq = self.get_latest_run_event_seq(run_id) + 1
+        self.append_run_event(run_id, {"ts": now, "phase": "run_cancelled", "level": "info", "message": "Run cancelled", "metadata": {"operation": "cancel"}}, seq)
+        return dict(run)
+
+    def transition_offload_workflow(
+        self, job_id: str, target_status: str, *, error: str | None = None,
+        failure_code: str | None = None, result: dict[str, Any] | None = None,
+        available_at: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Compare-and-set a job/run/draft workflow transition."""
+        status = self._normalize_offload_job_status(target_status)
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.rpc("transition_offload_workflow", {
+                    "p_job_id": job_id, "p_target_status": status,
+                    "p_error": sanitize_text(error), "p_failure_code": failure_code,
+                    "p_result": result, "p_available_at": available_at,
+                }).execute()
+                rows = response.data or []
+                return rows[0] if isinstance(rows, list) and rows else rows
+            except Exception:
+                LOG.exception("Failed workflow transition job_id=%s status=%s", job_id, status)
+                return None
+        jobs = getattr(self, "offload_jobs", {})
+        job = jobs.get(job_id) if isinstance(jobs, dict) else None
+        if not isinstance(job, dict):
+            return None
+        current = self._normalize_offload_job_status(job.get("status"))
+        if current in self.TERMINAL_WORKFLOW_STATUSES and current != status:
+            return dict(job)
+        now = self._utc_now()
+        job.update(status=status, error=error, result=result, updated_at=now)
+        if available_at is not None:
+            job["available_at"] = available_at
+        if status in {"retryable", "succeeded", "failed", "cancelled"}:
+            job.update(worker_id=None, claimed_at=None, claim_expires_at=None)
+        run = getattr(self, "llm_runs", {}).get(job.get("run_id"))
+        mapped = "queued" if status == "retryable" else status
+        if isinstance(run, dict) and self._normalize_run_status(run.get("status")) not in self.TERMINAL_WORKFLOW_STATUSES:
+            run.update(status=mapped, error=error if mapped == "failed" else None)
+            if mapped in self.TERMINAL_WORKFLOW_STATUSES:
+                run["ended_at"] = now
+            else:
+                run.update(ended_at=None, duration_ms=None, failure_code=None, failure_message=None)
+        return dict(job)
+
     def get_offload_job(self, job_id: str) -> dict[str, Any] | None:
         client = self._get_supabase_client()
         if client:
@@ -621,7 +744,13 @@ class SupabaseRunsMixin:
     ) -> dict[str, Any] | None:
         client = self._get_supabase_client()
         if not client:
-            return None
+            run = getattr(self, "llm_runs", {}).get(run_id)
+            normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+            if run and normalized_shop_domain and self._normalize_shop_domain(
+                run.get("shop_domain")
+            ) != normalized_shop_domain:
+                return None
+            return dict(run) if isinstance(run, dict) else None
         try:
             query = client.table("llm_runs").select("*").eq("run_id", run_id)
             normalized_shop_domain = self._normalize_shop_domain(shop_domain)
@@ -633,6 +762,102 @@ class SupabaseRunsMixin:
         except Exception:
             LOG.exception("Failed fetching llm_runs for run_id=%s", run_id)
             return None
+
+    def get_run_summaries(
+        self, run_ids: list[str], *, shop_domain: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        client = self._get_supabase_client()
+        if not client:
+            normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+            summaries: dict[str, dict[str, Any]] = {}
+            memory_runs = getattr(self, "llm_runs", {})
+            memory_events = getattr(self, "llm_run_events", {})
+            for run_id in run_ids:
+                run = memory_runs.get(run_id) if isinstance(memory_runs, dict) else None
+                if not isinstance(run, dict):
+                    continue
+                if normalized_shop_domain and self._normalize_shop_domain(
+                    run.get("shop_domain")
+                ) != normalized_shop_domain:
+                    continue
+                summary = {
+                    "status": self._normalize_run_status(run.get("status")),
+                    "error": sanitize_text(run.get("error")),
+                }
+                events = memory_events.get(run_id, []) if isinstance(memory_events, dict) else []
+                for event in reversed(events):
+                    message = sanitize_text(event.get("message")) if isinstance(event, dict) else None
+                    if message:
+                        summary["processing_message"] = message
+                        break
+                summaries[run_id] = summary
+            return summaries
+
+        normalized_run_ids: list[str] = []
+        seen_run_ids: set[str] = set()
+        for run_id in run_ids:
+            normalized_run_id = self._normalize_identifier(run_id)
+            if not normalized_run_id or normalized_run_id in seen_run_ids:
+                continue
+            seen_run_ids.add(normalized_run_id)
+            normalized_run_ids.append(normalized_run_id)
+
+        if not normalized_run_ids:
+            return {}
+
+        normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+        summaries: dict[str, dict[str, Any]] = {}
+        try:
+            query = client.table("llm_runs").select("run_id,status,error")
+            query = query.in_("run_id", normalized_run_ids)
+            if normalized_shop_domain:
+                query = query.eq("shop_domain", normalized_shop_domain)
+            res = query.execute()
+            for row in res.data or []:
+                run_id = self._normalize_identifier(row.get("run_id"))
+                if not run_id:
+                    continue
+                summaries[run_id] = {
+                    "status": self._normalize_run_status(row.get("status")),
+                    "error": sanitize_text(row.get("error")),
+                }
+        except Exception:
+            LOG.exception(
+                "Failed fetching batched llm_runs summaries for %s runs",
+                len(normalized_run_ids),
+            )
+            return {}
+
+        if not summaries:
+            return {}
+
+        try:
+            event_limit = max(1000, len(summaries) * 20)
+            res_events = (
+                client.table("llm_run_events")
+                .select("run_id,message,seq")
+                .in_("run_id", list(summaries.keys()))
+                .order("run_id")
+                .order("seq", desc=True)
+                .limit(event_limit)
+                .execute()
+            )
+            for event in res_events.data or []:
+                run_id = self._normalize_identifier(event.get("run_id"))
+                if not run_id or run_id not in summaries:
+                    continue
+                if summaries[run_id].get("processing_message"):
+                    continue
+                message = sanitize_text(event.get("message"))
+                if message:
+                    summaries[run_id]["processing_message"] = message
+        except Exception:
+            LOG.exception(
+                "Failed fetching batched llm_run_events summaries for %s runs",
+                len(summaries),
+            )
+
+        return summaries
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool:
         client = self._get_supabase_client()
@@ -668,7 +893,9 @@ class SupabaseRunsMixin:
     ) -> dict[str, Any]:
         client = self._get_supabase_client()
         if not client:
-            return {"run": None, "events": [], "messages": []}
+            run = self.get_run(run_id, shop_domain=shop_domain)
+            events = list(getattr(self, "llm_run_events", {}).get(run_id, []))
+            return {"run": run, "events": events, "messages": []}
         run = self.get_run(run_id, shop_domain=shop_domain)
         if not run:
             return {"run": None, "events": [], "messages": []}

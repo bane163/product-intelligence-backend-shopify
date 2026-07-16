@@ -14,7 +14,12 @@ from shared.observability import current_observability_fields
 from shopify import (
     ShopifyClient,
 )  # kept for route-level monkeypatch compatibility in tests
-from .utils import parse_products_json, resolve_shop_access_token, resolve_shop_domain
+from .utils import (
+    parse_products_json,
+    require_internal_service_key,
+    resolve_shop_access_token,
+    resolve_shop_domain,
+)
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -93,7 +98,6 @@ async def submit_products_to_shopify(
     submitted_id: str | None = Form(None),
     document_name: str | None = Form(None),
     shop_domain: str | None = Form(None),
-    shop_access_token: str | None = Form(None),
     offload: bool = Form(False),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
@@ -107,8 +111,12 @@ async def submit_products_to_shopify(
         execute as get_submitted_execute,
     )
 
+    require_internal_service_key(request)
     resolved_shop_domain = resolve_shop_domain(request, shop_domain)
-    resolved_shop_access_token = resolve_shop_access_token(request, shop_access_token)
+    resolved_shop_access_token = resolve_shop_access_token(
+        request,
+        shop_domain=resolved_shop_domain,
+    )
     resolved_draft_id = draft_id
     if offload:
         observability_fields = current_observability_fields()
@@ -187,7 +195,6 @@ async def submit_products_to_shopify(
                         "import_mode": import_mode,
                         "document_name": document_name,
                         "products_json": products_json,
-                        "shop_access_token": resolved_shop_access_token,
                         "has_shop_access_token": bool(resolved_shop_access_token),
                     },
                 },

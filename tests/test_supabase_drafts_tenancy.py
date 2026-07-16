@@ -7,10 +7,17 @@ class _Result:
 
 
 class _Query:
-    def __init__(self, table_name: str, rows: dict[str, list[dict]], eq_calls: list[tuple]):
+    def __init__(
+        self,
+        table_name: str,
+        rows: dict[str, list[dict]],
+        eq_calls: list[tuple],
+        limit_calls: list[tuple],
+    ):
         self._table_name = table_name
         self._rows = rows
         self._eq_calls = eq_calls
+        self._limit_calls = limit_calls
 
     def select(self, *_args, **_kwargs):
         return self
@@ -22,7 +29,8 @@ class _Query:
     def order(self, *_args, **_kwargs):
         return self
 
-    def limit(self, *_args, **_kwargs):
+    def limit(self, value, *_args, **_kwargs):
+        self._limit_calls.append((self._table_name, value))
         return self
 
     def execute(self):
@@ -33,9 +41,15 @@ class _FakeClient:
     def __init__(self, rows: dict[str, list[dict]]):
         self._rows = rows
         self.eq_calls: list[tuple] = []
+        self.limit_calls: list[tuple] = []
 
     def table(self, table_name: str):
-        return _Query(table_name=table_name, rows=self._rows, eq_calls=self.eq_calls)
+        return _Query(
+            table_name=table_name,
+            rows=self._rows,
+            eq_calls=self.eq_calls,
+            limit_calls=self.limit_calls,
+        )
 
 
 def test_tenant_filtered_reads_exclude_null_shop_domain(monkeypatch):
@@ -117,3 +131,30 @@ def test_tenant_filtered_submitted_query_includes_shop_domain_predicate(monkeypa
         "shop_domain",
         "shop-a.myshopify.com",
     ) in fake_client.eq_calls
+
+
+def test_list_product_drafts_respects_requested_limit(monkeypatch):
+    rows = {
+        "product_drafts": [],
+        "submitted_documents": [],
+    }
+    fake_client = _FakeClient(rows)
+    service = SupabaseService()
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: fake_client)
+
+    service.list_product_drafts(limit=25, shop_domain="shop-a.myshopify.com")
+
+    assert ("product_drafts", 25) in fake_client.limit_calls
+
+
+def test_list_submitted_documents_respects_requested_limit(monkeypatch):
+    rows = {
+        "submitted_documents": [],
+    }
+    fake_client = _FakeClient(rows)
+    service = SupabaseService()
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: fake_client)
+
+    service.list_submitted_documents(limit=25, shop_domain="shop-a.myshopify.com")
+
+    assert ("submitted_documents", 25) in fake_client.limit_calls

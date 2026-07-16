@@ -206,6 +206,9 @@ class SupabaseDraftsMixin:
         sort_dir: str = "desc",
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
+        safe_limit = max(limit, 0)
+        safe_offset = max(offset, 0)
+        query_limit = max(safe_limit + safe_offset, 1)
         db_drafts: list[dict[str, Any]] = []
         submitted_draft_ids: set[str] = set()
         db_drafts_loaded = False
@@ -216,7 +219,7 @@ class SupabaseDraftsMixin:
                 query = client.table("product_drafts").select("*")
                 if normalized_shop_domain:
                     query = query.eq("shop_domain", normalized_shop_domain)
-                res = query.order("created_at", desc=True).limit(1000).execute()
+                res = query.order("created_at", desc=True).limit(query_limit).execute()
                 db_drafts = res.data or []
                 db_drafts_loaded = True
             except Exception as exc:
@@ -228,7 +231,7 @@ class SupabaseDraftsMixin:
                             client.table("product_drafts")
                             .select("*")
                             .order("created_at", desc=True)
-                            .limit(1000)
+                            .limit(query_limit)
                             .execute()
                         )
                         db_drafts = res.data or []
@@ -335,7 +338,7 @@ class SupabaseDraftsMixin:
             )
         else:
             drafts.sort(key=lambda item: item.get("created_at") or "", reverse=reverse)
-        return drafts[offset : offset + limit]
+        return drafts[safe_offset : safe_offset + safe_limit]
 
     def get_product_draft(
         self, draft_id: str, *, shop_domain: str | None = None
@@ -499,6 +502,9 @@ class SupabaseDraftsMixin:
         sort_dir: str = "desc",
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
+        safe_limit = max(limit, 0)
+        safe_offset = max(offset, 0)
+        query_limit = max(safe_limit + safe_offset, 1)
         db_docs: list[dict[str, Any]] = []
         db_docs_loaded = False
         normalized_shop_domain = _normalize_shop_domain(shop_domain)
@@ -508,7 +514,7 @@ class SupabaseDraftsMixin:
                 query = client.table("submitted_documents").select("*")
                 if normalized_shop_domain:
                     query = query.eq("shop_domain", normalized_shop_domain)
-                res = query.limit(1000).execute()
+                res = query.limit(query_limit).execute()
                 db_docs = res.data or []
                 db_docs_loaded = True
             except Exception as exc:
@@ -519,7 +525,7 @@ class SupabaseDraftsMixin:
                         res = (
                             client.table("submitted_documents")
                             .select("*")
-                            .limit(1000)
+                            .limit(query_limit)
                             .execute()
                         )
                         db_docs = res.data or []
@@ -593,7 +599,7 @@ class SupabaseDraftsMixin:
                 key=lambda doc: doc.get("submitted_at") or doc.get("created_at") or "",
                 reverse=reverse,
             )
-        return docs[offset : offset + limit]
+        return docs[safe_offset : safe_offset + safe_limit]
 
     def get_submitted_document(
         self, submitted_id: str, *, shop_domain: str | None = None

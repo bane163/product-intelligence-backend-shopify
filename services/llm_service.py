@@ -204,7 +204,7 @@ class LLMService(LLMServiceInterface):
 
             _trace(
                 "extract_done",
-                "Document extraction completed",
+                "File content extracted",
                 payload_preview={"chars": len(text), "kind": document_format.kind},
             )
             await ctx.send_message({"extracted": text})

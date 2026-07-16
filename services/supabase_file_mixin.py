@@ -129,6 +129,7 @@ class SupabaseFileMixin:
         content: bytes,
         content_type: str | None = None,
         file_origin: str | None = None,
+        shop_domain: str | None = None,
     ) -> None:
         self.save_files(
             [
@@ -138,6 +139,7 @@ class SupabaseFileMixin:
                     "content": content,
                     "content_type": content_type,
                     "file_origin": file_origin,
+                    "shop_domain": shop_domain,
                 }
             ]
         )
@@ -149,6 +151,7 @@ class SupabaseFileMixin:
         bucket = self._try_get_bucket()
         metadata_payloads: list[dict[str, Any]] = []
         legacy_metadata_payloads: list[dict[str, Any]] = []
+        persisted_file_ids: list[str] = []
 
         for item in files:
             file_id = str(item.get("file_id") or "").strip()
@@ -168,6 +171,7 @@ class SupabaseFileMixin:
             normalized_origin = self._normalize_file_origin(
                 item.get("file_origin")
             ) or self._infer_file_origin_from_filename(name)
+            normalized_shop = str(item.get("shop_domain") or "").strip().lower() or None
 
             if bucket is None:
                 self.file_storage[file_id] = {
@@ -176,9 +180,11 @@ class SupabaseFileMixin:
                     "content_type": content_type,
                     "storage_path": file_id,
                     "file_origin": normalized_origin,
+                    "shop_domain": normalized_shop,
                     "thumbnail_storage_path": None,
                     "thumbnail_content": None,
                 }
+                persisted_file_ids.append(file_id)
             else:
                 safe_content_type = content_type
                 if safe_content_type.startswith("text/"):
@@ -192,7 +198,8 @@ class SupabaseFileMixin:
                             "content-type": safe_content_type,
                             "metadata": {"name": name},
                         },
-                    )
+                        )
+                    persisted_file_ids.append(file_id)
                 except Exception:
                     try:
                         bucket.update(
@@ -209,6 +216,7 @@ class SupabaseFileMixin:
                             content_bytes,
                             {"content-type": safe_content_type, "upsert": "true"},
                         )
+                    persisted_file_ids.append(file_id)
 
             payload = {
                 "storage_path": file_id,
@@ -217,6 +225,8 @@ class SupabaseFileMixin:
                 "size": len(content_bytes),
                 "file_origin": normalized_origin,
             }
+            if normalized_shop:
+                payload["shop_domain"] = normalized_shop
             metadata_payloads.append(payload)
             legacy_payload = dict(payload)
             legacy_payload.pop("file_origin", None)
@@ -225,10 +235,10 @@ class SupabaseFileMixin:
         if not metadata_payloads:
             return
 
+        client = self._get_supabase_client()
+        if not client:
+            return
         try:
-            client = self._get_supabase_client()
-            if not client:
-                return
             try:
                 client.table("file_metadata").upsert(
                     metadata_payloads, on_conflict="storage_path"
@@ -248,19 +258,30 @@ class SupabaseFileMixin:
                             client.table("file_metadata").insert(payload).execute()
         except Exception:
             LOG.exception("Failed inserting file metadata for bulk save")
+            if bucket is not None and persisted_file_ids:
+                try:
+                    bucket.remove(persisted_file_ids)
+                except Exception:
+                    LOG.exception("Failed rolling back uploaded storage objects")
+            for file_id in persisted_file_ids:
+                self.file_storage.pop(file_id, None)
+            raise
 
-    def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    def list_files(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        normalized_shop = str(shop_domain or "").strip().lower() or None
         try:
             client = self._get_supabase_client()
             if client:
                 db_limit = min(max(limit + offset, 1000), 5000)
-                res = (
-                    client.table("file_metadata")
-                    .select("*")
-                    .order("created_at", desc=True)
-                    .limit(db_limit)
-                    .execute()
-                )
+                query = client.table("file_metadata").select("*")
+                if normalized_shop:
+                    query = query.eq("shop_domain", normalized_shop)
+                res = query.order("created_at", desc=True).limit(db_limit).execute()
                 raw_rows = res.data or []
                 normalized_rows = [
                     cast(Mapping[str, Any], row)
@@ -281,12 +302,19 @@ class SupabaseFileMixin:
                     "filename": v["name"],
                     "content_type": v["content_type"],
                     "file_origin": v.get("file_origin"),
+                    "shop_domain": v.get("shop_domain"),
                     "created_at": v.get("created_at") or self._utc_now(),
                     "thumbnail_storage_path": v.get("thumbnail_storage_path"),
                 }
                 for k, v in self.file_storage.items()
             ]
             filtered_rows = self._dedupe_and_filter_document_rows(rows)
+            if normalized_shop:
+                filtered_rows = [
+                    row
+                    for row in filtered_rows
+                    if str(row.get("shop_domain") or "").strip().lower() == normalized_shop
+                ]
             return filtered_rows[offset : offset + limit]
 
         try:
@@ -376,6 +404,18 @@ class SupabaseFileMixin:
             "storage_path": file_id,
             "thumbnail_storage_path": thumbnail_storage_path,
         }
+
+    def set_file_shop_domain(self, file_id: str, shop_domain: str) -> None:
+        normalized_shop = str(shop_domain or "").strip().lower()
+        if not normalized_shop:
+            raise ValueError("shop_domain is required")
+        if file_id in self.file_storage:
+            self.file_storage[file_id]["shop_domain"] = normalized_shop
+        client = self._get_supabase_client()
+        if client:
+            client.table("file_metadata").update({"shop_domain": normalized_shop}).eq(
+                "storage_path", file_id
+            ).execute()
 
     def save_file_thumbnail(self, *, file_id: str, content: bytes) -> str | None:
         bucket = self._try_get_bucket()

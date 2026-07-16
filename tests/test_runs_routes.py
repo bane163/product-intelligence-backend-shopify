@@ -26,7 +26,7 @@ async def test_list_runs_passes_tenant_scope(monkeypatch):
         captured["shop_domain"] = shop_domain
         return [{"run_id": "run-tenant", "status": "running", "shop_domain": shop_domain}]
 
-    monkeypatch.setattr(ctx.services.supabase, "list_runs", fake_list_runs)
+    monkeypatch.setattr(ctx.supabase.runs, "list_runs", fake_list_runs)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -54,7 +54,7 @@ async def test_list_runs_echoes_observability_headers(monkeypatch):
         _ = (limit, offset, status, shop_domain)
         return []
 
-    monkeypatch.setattr(ctx.services.supabase, "list_runs", fake_list_runs)
+    monkeypatch.setattr(ctx.supabase.runs, "list_runs", fake_list_runs)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -108,10 +108,10 @@ async def test_run_control_resume_retry_cancel(monkeypatch):
     def fake_emit_run_event(run_id: str, **kwargs):
         return {"run_id": run_id, **kwargs}
 
-    monkeypatch.setattr(ctx.services.supabase, "get_run", fake_get_run)
-    monkeypatch.setattr(ctx.services.supabase, "get_run_history", fake_get_run_history)
-    monkeypatch.setattr(ctx.services.supabase, "create_or_update_run", fake_create_or_update_run)
-    monkeypatch.setattr(ctx.services.supabase, "append_run_event", fake_append_run_event)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run", fake_get_run)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run_history", fake_get_run_history)
+    monkeypatch.setattr(ctx.supabase.runs, "create_or_update_run", fake_create_or_update_run)
+    monkeypatch.setattr(ctx.supabase.runs, "append_run_event", fake_append_run_event)
     monkeypatch.setattr(ctx.services.tracing, "emit_run_event", fake_emit_run_event)
     monkeypatch.setattr(ctx.services.tracing, "complete_run", lambda run_id: None)
 
@@ -172,8 +172,8 @@ async def test_delete_run_removes_terminal_run(monkeypatch):
         captured["delete"] = {"run_id": run_id, "shop_domain": shop_domain}
         return run_id == "run-delete" and shop_domain == "test-shop.myshopify.com"
 
-    monkeypatch.setattr(ctx.services.supabase, "get_run", fake_get_run)
-    monkeypatch.setattr(ctx.services.supabase, "delete_run", fake_delete_run)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run", fake_get_run)
+    monkeypatch.setattr(ctx.supabase.runs, "delete_run", fake_delete_run)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -204,8 +204,8 @@ async def test_delete_run_rejects_active_runs(monkeypatch):
         delete_called["value"] = True
         return False
 
-    monkeypatch.setattr(ctx.services.supabase, "get_run", fake_get_run)
-    monkeypatch.setattr(ctx.services.supabase, "delete_run", fake_delete_run)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run", fake_get_run)
+    monkeypatch.setattr(ctx.supabase.runs, "delete_run", fake_delete_run)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -249,9 +249,9 @@ async def test_workflow_snapshot_returns_run_draft_and_events(monkeypatch):
             "messages": [],
         }
 
-    monkeypatch.setattr(ctx.services.supabase, "get_run", fake_get_run)
-    monkeypatch.setattr(ctx.services.supabase, "get_product_draft", fake_get_product_draft)
-    monkeypatch.setattr(ctx.services.supabase, "get_run_history", fake_get_run_history)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run", fake_get_run)
+    monkeypatch.setattr(ctx.supabase.drafts, "get_product_draft", fake_get_product_draft)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run_history", fake_get_run_history)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
@@ -320,9 +320,9 @@ async def test_run_diagnostics_includes_offload_and_retry_metadata(monkeypatch):
             {"job_id": "job-ok", "status": "succeeded"},
         ]
 
-    monkeypatch.setattr(ctx.services.supabase, "get_run_history", fake_get_run_history)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run_history", fake_get_run_history)
     monkeypatch.setattr(
-        ctx.services.supabase,
+        ctx.supabase.runs,
         "list_offload_jobs_for_run",
         fake_list_offload_jobs_for_run,
     )
@@ -374,9 +374,9 @@ async def test_run_diagnostics_returns_404_for_other_tenant(monkeypatch):
         captured["history_shop_domain"] = shop_domain
         return {"run": None, "events": [], "messages": []}
 
-    monkeypatch.setattr(ctx.services.supabase, "get_run_history", fake_get_run_history)
+    monkeypatch.setattr(ctx.supabase.runs, "get_run_history", fake_get_run_history)
     monkeypatch.setattr(
-        ctx.services.supabase,
+        ctx.supabase.runs,
         "list_offload_jobs_for_run",
         lambda run_id, *, shop_domain=None, limit=20: [],
     )

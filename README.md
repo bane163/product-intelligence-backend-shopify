@@ -1,4 +1,4 @@
-# Supa Shop AI - Project Overview & Setup Guide
+# Stockpile - Project Overview & Setup Guide
 
 This project consists of a **Shopify App Frontend** (React/Remix/Vite) and a
 **Python Backend** (FastAPI/Supabase).
@@ -8,6 +8,103 @@ This project consists of a **Shopify App Frontend** (React/Remix/Vite) and a
 - `shopify_supabase_backend/` (Current Directory): The Python backend code,
   running in Docker.
 - `extractor-v3/`: The Shopify App frontend and extensions.
+
+---
+
+## 🧩 Run the Full Stack Locally (Backend + Supabase + Frontend)
+
+The full Stockpile stack is three processes: the local Supabase stack, the
+FastAPI backend (in Docker), and the Shopify App frontend (`shopify app dev`).
+`./run.sh` starts the first two; the frontend is started separately.
+
+### Prerequisites (one-time per machine)
+
+- Docker & Docker Compose
+- Node.js v20+ and Shopify CLI (`npm install -g @shopify/cli`)
+- `npx supabase` (the Supabase CLI; `run.sh` invokes it via `npx`)
+- The Shopify CLI must be logged in to a Partner account that owns the
+  `extractor_v3` app. On a fresh machine run this once and complete the
+  device-code OAuth in your browser:
+
+  ```bash
+  shopify auth login
+  ```
+
+  The CLI caches the session under `~/Library/Preferences/shopify-cli-*`
+  (macOS) so subsequent `shopify app dev` runs are silent.
+
+- The dev store (`teststore163`) must exist in that Partner account and have
+  the `extractor_v3` app installed. If the app is not yet installed, the first
+  `npm run dev` will surface an install URL to click through.
+
+### Start order (always backend first, frontend second)
+
+```bash
+# 1. Backend + local Supabase + offload worker + Collabora sidecar (reuses any
+#    already-running collabora container from the same compose project).
+cd shopify_supabase_backend
+./run.sh
+# OpenAI is the default provider; set OPENAI_API_KEY or use Supabase Vault.
+```
+
+`run.sh` does, in order:
+1. `npx supabase start` — local Supabase stack.
+2. `docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml
+   up -d shopify-backend offload-worker` — FastAPI + worker (+ debugpy :5678).
+
+Wait until `curl http://localhost:8000/health` returns `200` before starting
+the frontend. The first run downloads/builds Docker images and can take a few
+minutes; subsequent runs are fast.
+
+```bash
+# 2. Frontend (separate terminal). Must run AFTER the backend is healthy.
+cd ../extractor-v3
+npm install        # first time only
+npm run dev        # == shopify app dev ; provisions the Cloudflare tunnel
+```
+
+`shopify app dev` provisions a fresh Cloudflare tunnel each run, so the
+tunnel URL (e.g. `https://<words>.trycloudflare.com`) CHANGES on every
+restart. The stable entry point is always the Shopify admin app route:
+
+```
+https://admin.shopify.com/store/teststore163/apps/extractor_v3
+```
+
+Press `P` in the `shopify app dev` terminal to open that URL in your browser.
+
+### Expected ports (host)
+
+| Service            | Port   | Notes                                            |
+| ------------------ | ------ | ------------------------------------------------ |
+| FastAPI backend    | 8000   | Swagger at `/docs`, debugpy at `5678`            |
+| Supabase Kong/API  | 54321  | root returns 404 — that's normal                 |
+| Supabase Studio    | 54323  | local DB UI                                       |
+| Supabase Postgres  | 54322  | reserved; do not collide with host :5432         |
+| Mailpit (SMTP UI)  | 54324  |                                                   |
+| Collabora Online   | 9980   | sidecar; reused across `run.sh` invocations       |
+| Shopify app dev    | 3000+  | `shopify app dev` picks a free port (e.g. 60688)  |
+| Cloudflare tunnel  | random| URL changes every `shopify app dev` restart       |
+
+### Stop everything
+
+```bash
+cd shopify_supabase_backend
+./stop.sh          # stops backend, offload-worker, supabase, collabora
+```
+
+### Notes / gotchas
+
+- The backend image must be built at least once (Python 3.13-slim + uv +
+  debugpy). First `run.sh` builds it; subsequent runs reuse the cached image.
+- Collabora is part of the same compose project (`shopify_supabase_backend`),
+  so if `collabora-online` is already running from a previous `run.sh`, the
+  next `run.sh` reuses it rather than starting a duplicate.
+- Other Supabase projects on the same machine (e.g. `agent-services-lk`) use
+  different port ranges (57xxx) — they do not conflict with this stack, which
+  uses 54xxx.
+- If `shopify app dev` dies with `Token expired` on a fresh machine, the CLI
+  session isn't logged in. Run `shopify auth login`, then restart `npm run dev`.
 
 ---
 
@@ -52,17 +149,14 @@ helper script.
    ```bash
    ./run.sh
    ```
-   _Note: Add `--llm` if you want to also start the Ollama model:_
-   ```bash
-   ./run.sh --llm
-   ```
-   _This script runs `docker-compose` (API + offload worker) and optionally starts the LLM._
+   _This script runs `docker-compose` (API + offload worker). Configure the
+   OpenAI credential through the environment or Supabase Vault before processing._
 
 3. The backend will be available at: `http://localhost:8000`
    - **Swagger UI**: `http://localhost:8000/docs`
    - **Collabora**: `http://localhost:9980` (running as a sidecar service)
-   - **LLM**: Starts `ollama run kimi-k2-thinking:cloud` (only if the `--llm`
-     flag is passed).
+   - **LLM**: OpenAI `gpt-5.4-mini` is seeded by default. Custom compatible
+     endpoints, including Ollama, can still be configured in Settings.
 
 ### Offload Queue Worker
 
@@ -171,3 +265,24 @@ Update an existing secret:
 ```sql
 select vault.update_secret('<secret-uuid>', 'sk-new-key', 'openai_api_key', 'Global OpenAI key');
 ```
+
+---
+
+## Shopify App Store submission workspace
+
+Reviewer-facing submission materials live in:
+
+`specs/001-app-store-readiness/submission/`
+
+Before submitting to Shopify, make sure this workspace includes current values for:
+
+- deployed frontend URL and backend API URL,
+- review store domain and reviewer login path,
+- sample upload file guidance,
+- App Store listing copy and screenshots,
+- screencast script,
+- support and emergency contact details,
+- latest reviewer dry-run evidence.
+
+Use `specs/001-app-store-readiness/quickstart.md` as the release verification
+and reviewer rehearsal script.

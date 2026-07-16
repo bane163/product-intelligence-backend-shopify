@@ -26,3 +26,8 @@ dev = [
     "respx>=0.20",
     "pytest-httpx>=0.18",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires live local infrastructure such as Supabase or Collabora",
+]

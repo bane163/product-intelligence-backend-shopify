@@ -103,9 +103,30 @@ def _is_retryable_job_failure(*, job_type: str, error_message: str) -> bool:
         "file not found",
         "missing file_id",
         "content is invalid",
+        "file content is invalid",
+        "file content does not match",
+        "file is not a zip file",
         "lifecycle columns missing",
+        "collabora_storage_low",
+        "out of storage",
+        "low disk",
     )
     return not any(marker in lowered for marker in non_retryable_markers)
+
+
+def _exception_message(exc: Exception) -> str:
+    return str(exc).strip() or type(exc).__name__
+
+
+def _failure_code(error_message: str) -> str:
+    lowered = error_message.lower()
+    if "storage" in lowered or "low disk" in lowered:
+        return "collabora_storage_low"
+    if "timeout" in lowered or "readtimeout" in lowered:
+        return "collabora_timeout"
+    if "collabora" in lowered or "connection" in lowered:
+        return "collabora_unavailable"
+    return "workflow_failed"
 
 
 def _estimate_queue_backlog(ctx: AppContext, queue_name: str) -> int | None:
@@ -292,6 +313,7 @@ class OffloadWorker:
             write_to_file=write_to_file,
             output_path=output_path,
             shop_domain=shop_domain,
+            manage_lifecycle=False,
         )
         result_payload = result.get("result") if isinstance(result, dict) else None
 
@@ -622,31 +644,16 @@ class OffloadWorker:
                 self.queue_name,
             )
 
-            self.ctx.supabase.runs.update_offload_job(
-                job_id,
-                {
-                    "status": "running",
-                    "error": None,
-                    "request_id": request_id,
-                    "correlation_id": correlation_id,
-                },
-            )
+            transitioned = self.ctx.supabase.runs.transition_offload_workflow(job_id, "running")
+            if not transitioned or str(transitioned.get("status") or "").lower() == "cancelled":
+                return True
 
             try:
                 result = await self._process_job(job)
-                self.ctx.supabase.runs.update_offload_job(
-                    job_id,
-                    {
-                        "status": "succeeded",
-                        "error": None,
-                        "result": result,
-                        "request_id": request_id,
-                        "correlation_id": correlation_id,
-                    },
-                )
+                self.ctx.supabase.runs.transition_offload_workflow(job_id, "succeeded", result=result)
                 LOG.info("Offload job succeeded: job_id=%s type=%s", job_id, job_type)
             except Exception as exc:
-                error_message = str(exc)
+                error_message = _exception_message(exc)
                 LOG.exception("Offload job failed: job_id=%s", job_id)
                 attempt_count = _safe_int(job.get("attempt_count"), 1, minimum=0)
                 max_attempts = _safe_int(job.get("max_attempts"), 5, minimum=1)
@@ -668,38 +675,17 @@ class OffloadWorker:
                     retry_at = datetime.now(timezone.utc) + timedelta(
                         seconds=_compute_retry_delay_seconds(attempt_count)
                     )
-                    self.ctx.supabase.runs.update_offload_job(
-                        job_id,
-                        {
-                            "status": "retryable",
-                            "error": error_message,
-                            "available_at": retry_at.isoformat(),
-                            "claimed_at": None,
-                            "claim_expires_at": None,
-                            "worker_id": None,
-                            "request_id": request_id,
-                            "correlation_id": correlation_id,
-                            "result": {
+                    self.ctx.supabase.runs.transition_offload_workflow(
+                        job_id, "retryable", error=error_message,
+                        available_at=retry_at.isoformat(), result={
                                 "error": error_message,
                                 "dead_letter": False,
                                 "attempt_count": attempt_count,
                                 "max_attempts": max_attempts,
                                 "retry_at": retry_at.isoformat(),
                             },
-                        },
                     )
                     continue_run_id = _optional_str(job.get("run_id"))
-                    if continue_run_id:
-                        self.ctx.supabase.runs.create_or_update_run(
-                            continue_run_id,
-                            {
-                                "status": "queued",
-                                "shop_domain": _optional_str(job.get("shop_domain")),
-                                "error": None,
-                                "request_id": request_id,
-                                "correlation_id": correlation_id,
-                            },
-                        )
                     signal_offload_queue(
                         queue_name=self.queue_name,
                         status="retryable",
@@ -719,20 +705,14 @@ class OffloadWorker:
                             "Failed marking related offload failure state for job_id=%s",
                             job_id,
                         )
-                    self.ctx.supabase.runs.update_offload_job(
-                        job_id,
-                        {
-                            "status": "failed",
-                            "error": error_message,
-                            "request_id": request_id,
-                            "correlation_id": correlation_id,
-                            "result": {
+                    self.ctx.supabase.runs.transition_offload_workflow(
+                        job_id, "failed", error=error_message,
+                        failure_code=_failure_code(error_message), result={
                                 "error": error_message,
                                 "dead_letter": True,
                                 "attempt_count": attempt_count,
                                 "max_attempts": max_attempts,
                             },
-                        },
                     )
                     signal_offload_queue(
                         queue_name=self.queue_name,

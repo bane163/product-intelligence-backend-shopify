@@ -106,9 +106,12 @@ Mark release as **GO** only if all sections above pass with no open blockers.
 ## 8) Release Readiness Gates (Roadmap item #5)
 
 ### Contract + flow gate evidence
-- [ ] Frontend proxy contract tests pass (`cd ../extractor-v3 && npm run -s test:contract`).
-- [ ] Backend intelligence release gates pass (`PYTHONPATH=. uv run pytest -q tests/test_release_readiness_gates.py`).
-- [ ] Backend intelligence route spot-checks pass (`PYTHONPATH=. uv run pytest -q tests/test_agents_routes.py -k "test_run_and_get_product_intelligence_audit or test_apply_bulk_with_idempotency_key_replays_without_reapplying or test_apply_bulk_idempotency_key_conflict_on_payload_mismatch"`).
+- [x] Frontend proxy contract tests pass (`cd ../extractor-v3 && npm run -s test:contract`).
+- [x] Backend app-store readiness gates pass (`PYTHONPATH=. uv run pytest -q tests/test_app_store_readiness.py`).
+- [x] Default backend suite is offline and deterministic (`PYTHONPATH=. uv run pytest -q -m "not integration"`).
+- [x] Live-infrastructure tests have an opt-in `integration` marker and manual CI job.
+- [x] Backend intelligence release gates pass (`PYTHONPATH=. uv run pytest -q tests/test_release_readiness_gates.py`).
+- [x] Backend intelligence route spot-checks pass (`PYTHONPATH=. uv run pytest -q tests/test_agents_routes.py -k "test_run_and_get_product_intelligence_audit or test_apply_bulk_with_idempotency_key_replays_without_reapplying or test_apply_bulk_idempotency_key_conflict_on_payload_mismatch"`).
 - [ ] Critical intelligence path is green: audit -> suggestions -> apply -> revert.
 - [ ] Apply-bulk idempotency replay/conflict assertions are green.
 
@@ -116,6 +119,8 @@ Mark release as **GO** only if all sections above pass with no open blockers.
 - [ ] Tenant negative-path checks are green for intelligence endpoints (missing/mismatched tenant context).
 - [ ] Migration/rollback plan is documented for release batch (including owner and rollback trigger criteria).
 - [ ] Release artifact includes command output links/logs for all gate checks above.
+- [ ] Reviewer dry-run evidence is captured in `specs/001-app-store-readiness/submission/reviewer-dry-run.md`.
+- [ ] Submission workspace artifacts are current in `specs/001-app-store-readiness/submission/`.
 
 ### Fail conditions (do not release)
 - Any contract gate command fails or is skipped.

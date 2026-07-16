@@ -391,10 +391,12 @@ async def run_agent_on_inputs(
         "which is an array of product objects. Each product should follow the ProductInput shape: "
         "title (string), optional body_html, optional vendor, optional options (list of {name, values}), "
         "optional variants (list of variant objects with option1/2/3, sku, price, inventory_quantity), "
-        "optional source_refs (list of {field, document_kind, sheet, cell, cell_range, page, bbox, value}), "
+        "optional source_refs (list of {field, document_kind, source_file_id, anchor_id, sheet, cell, cell_range, page, bbox, value}), "
         "and optional images (list of {src, alt}).\n"
-        "When spreadsheet text includes [CELL_REFS] tokens, map product evidence to sheet/cell entries "
-        "and include source_refs for key fields when confidence is reasonable.\n\n"
+        "When spreadsheet text includes [CELL_REFS] tokens, map product evidence to sheet/cell entries. "
+        "Explicitly include separate, exact source_refs with canonical field names title, vendor, sku, "
+        "and price (sku and price refer to the first displayed variant) for every extracted displayed value. "
+        "Copy exact CELL_REFS coordinates; never guess a cell, page, anchor ID, or bounding box.\n\n"
         "Only output the JSON object (no additional commentary)."
     )
 

@@ -15,6 +15,7 @@ from typing import Any
 from application.services.document_formats import (
     classify_document,
     supported_extensions_display,
+    validate_document_content,
 )
 from shared.observability import current_observability_fields
 from .files_helper import generate_thumbnail_bytes
@@ -29,12 +30,57 @@ from .schemas import (
     BulkUploadItem,
     BulkUploadResult,
 )
-from .utils import require_shop_domain
+from .utils import require_shop_domain, resolve_dev_billing_simulator_plan
 from api.agents.billing import _get_billing_svc
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
 MERCHANT_UPLOAD_FILE_ORIGIN = "merchant_upload"
+
+
+@router.post("/source-link-traces", summary="Record a sampled source-link trace event")
+async def record_source_link_trace_event(
+    request: Request,
+    attempt_id: str = Form(...),
+    component: str = Form("frontend"),
+    stage: str = Form(...),
+    status: str = Form("info"),
+    source_file_id: str | None = Form(None),
+    highlight_file_id: str | None = Form(None),
+    details_json: str | None = Form(None),
+) -> dict[str, bool]:
+    from services.source_link_trace import record, valid_attempt_id
+
+    if not valid_attempt_id(attempt_id):
+        raise HTTPException(status_code=422, detail="Invalid source-link trace attempt id")
+    details: dict[str, Any] = {}
+    if details_json:
+        try:
+            parsed = json.loads(details_json)
+            if isinstance(parsed, dict):
+                details = parsed
+        except json.JSONDecodeError:
+            pass
+    fields = current_observability_fields()
+    record(
+        component=component,
+        stage=stage,
+        status=status,
+        attempt_id=attempt_id,
+        shop_domain=require_shop_domain(request),
+        source_file_id=source_file_id,
+        highlight_file_id=highlight_file_id,
+        request_id=fields.get("request_id"),
+        correlation_id=fields.get("correlation_id"),
+        details=details,
+    )
+    return {"recorded": True}
+
+
+def _has_processing_access(request: Request, billing_svc: Any, shop_domain: str) -> bool:
+    return resolve_dev_billing_simulator_plan(request) is not None or billing_svc.can_process(
+        shop_domain
+    )
 
 
 def _optional_str(entry: dict[str, object] | None, key: str) -> str | None:
@@ -326,6 +372,72 @@ def _bulk_upload_error_code(status_code: int) -> str:
     return f"http_{status_code}"
 
 
+def _upload_failure_code(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        if exc.status_code == 415:
+            return "unsupported_file_type"
+        if exc.status_code == 422:
+            return "invalid_file_content"
+        if exc.status_code == 402:
+            return "upload_access_denied"
+        if "conversion failed" in str(exc.detail).lower():
+            return "upload_conversion_failed"
+    return "upload_persistence_failed"
+
+
+def _record_failed_upload_activity(
+    *,
+    ctx: AppContext,
+    shop_domain: str,
+    filename: str | None,
+    content_type: str | None,
+    size: int | None,
+    error: Exception | str,
+    started_at: datetime,
+) -> None:
+    """Persist a failed upload without allowing telemetry failure to mask the API error."""
+    try:
+        run_id = str(uuid.uuid4())
+        ended_at = datetime.now(timezone.utc)
+        message = str(error.detail) if isinstance(error, HTTPException) else str(error)
+        failure_code = _upload_failure_code(error) if isinstance(error, Exception) else "upload_failed"
+        observability = current_observability_fields()
+        duration_ms = max(0, int((ended_at - started_at).total_seconds() * 1000))
+        ctx.supabase.runs.create_or_update_run(
+            run_id,
+            {
+                "source": "file_upload",
+                "status": "failed",
+                "shop_domain": shop_domain,
+                "input_filename": filename,
+                "input_content_type": content_type,
+                "input_size_bytes": size,
+                "started_at": started_at.isoformat(),
+                "ended_at": ended_at.isoformat(),
+                "duration_ms": duration_ms,
+                "attempt": 1,
+                "error": message,
+                "failure_code": failure_code,
+                "failure_message": message,
+                **observability,
+            },
+        )
+        ctx.supabase.runs.append_run_event(
+            run_id,
+            {
+                "ts": ended_at.isoformat(),
+                "phase": "upload_failed",
+                "level": "error",
+                "message": "File upload failed",
+                "error": message,
+                **observability,
+            },
+            1,
+        )
+    except Exception:
+        LOG.exception("Failed recording upload activity for %s", filename)
+
+
 def _queue_batch_extract_submit_for_file(
     *,
     ctx: AppContext,
@@ -490,6 +602,11 @@ async def _prepare_uploaded_file(
             ),
         )
 
+    try:
+        validate_document_content(document_format, file_bytes=file_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     stored_name = original_name
     stored_content_type = (
         file.content_type
@@ -533,6 +650,16 @@ async def _prepare_uploaded_file(
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+    stored_format = classify_document(
+        filename=stored_name,
+        content_type=stored_content_type,
+        file_bytes=file_bytes,
+    )
+    try:
+        validate_document_content(stored_format, file_bytes=file_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     return {
         "file_id": file_id,
         "name": stored_name,
@@ -544,27 +671,68 @@ async def _prepare_uploaded_file(
 
 @router.get("/files", summary="List uploaded files")
 async def list_uploaded_files(
-    limit: int = 1000, offset: int = 0, ctx: AppContext = Depends(get_ctx)
+    request: Request,
+    limit: int = 1000,
+    offset: int = 0,
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     """List all uploaded files."""
     from application.use_cases.files.list_files import execute as list_files_execute
 
     resolved_limit = max(1, min(limit, 5000))
     resolved_offset = max(0, offset)
+    shop_domain = require_shop_domain(request)
     files = list_files_execute(
-        supabase=ctx.supabase, limit=resolved_limit, offset=resolved_offset
+        supabase=ctx.supabase,
+        limit=resolved_limit,
+        offset=resolved_offset,
+        shop_domain=shop_domain,
     )
     return {"files": files}
 
 
 @router.get("/collabora-url", summary="Get current Collabora URL")
-async def get_collabora_url(ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
+async def get_collabora_url(
+    request: Request,
+    trace_attempt_id: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+):
     """Get the current Collabora URL and WOPI base URL for interactive viewer."""
     from application.use_cases.collabora.get_collabora_url import (
         execute as get_collabora_execute,
     )
 
-    return get_collabora_execute(collabora=ctx.services.collabora)
+    try:
+        ctx.services.collabora.readiness()
+        payload = get_collabora_execute(collabora=ctx.services.collabora)
+        from urllib.parse import urlparse
+        from services.source_link_trace import record
+        record(
+            component="backend",
+            stage="viewer_url_resolved",
+            status="ok",
+            attempt_id=trace_attempt_id,
+            shop_domain=request.headers.get("x-shop-domain"),
+            details={"url_host": urlparse(str(payload.get("collabora_url") or "")).hostname or ""},
+        )
+        return payload
+    except RuntimeError as exc:
+        from services.source_link_trace import record
+        record(
+            component="backend",
+            stage="viewer_url_unavailable",
+            status="error",
+            attempt_id=trace_attempt_id,
+            shop_domain=request.headers.get("x-shop-domain"),
+            details={"reason": str(exc)},
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": str(exc),
+                "code": getattr(exc, "code", "COLLABORA_UNAVAILABLE"),
+            },
+        )
 
 
 @router.post("/upload", summary="Upload a file for preview and processing")
@@ -575,28 +743,45 @@ async def upload_file(
 ) -> dict[str, Any]:
     """Upload a file and return a file_id for WOPI preview."""
     shop_domain = require_shop_domain(request)
-    billing_svc = _get_billing_svc(ctx)
-    if not billing_svc.can_process(shop_domain):
-        raise HTTPException(status_code=402, detail="Active subscription required to process files")
-
-    prepared = await _prepare_uploaded_file(file, ctx=ctx)
-
-    from application.use_cases.files.save_file import execute as save_file_execute
-
-    save_file_execute(
-        supabase=ctx.supabase,
-        file_id=prepared["file_id"],
-        name=prepared["name"],
-        content=prepared["content"],
-        content_type=prepared["content_type"],
-        file_origin=MERCHANT_UPLOAD_FILE_ORIGIN,
-    )
-    thumbnail_generated = False
-
+    started_at = datetime.now(timezone.utc)
+    prepared: dict[str, Any] | None = None
     try:
-        billing_svc.increment_usage(shop_domain, files=1, tokens=0)
-    except Exception as usage_err:
-        LOG.warning("Failed to increment usage for %s: %s", shop_domain, usage_err)
+        billing_svc = _get_billing_svc(ctx)
+        simulator_plan = resolve_dev_billing_simulator_plan(request)
+        if not _has_processing_access(request, billing_svc, shop_domain):
+            raise HTTPException(status_code=402, detail="Active subscription required to process files")
+
+        prepared = await _prepare_uploaded_file(file, ctx=ctx)
+
+        from application.use_cases.files.save_file import execute as save_file_execute
+
+        save_file_execute(
+            supabase=ctx.supabase,
+            file_id=prepared["file_id"],
+            name=prepared["name"],
+            content=prepared["content"],
+            content_type=prepared["content_type"],
+            file_origin=MERCHANT_UPLOAD_FILE_ORIGIN,
+            shop_domain=shop_domain,
+        )
+        thumbnail_generated = False
+    except Exception as exc:
+        _record_failed_upload_activity(
+            ctx=ctx,
+            shop_domain=shop_domain,
+            filename=(prepared or {}).get("name") or file.filename,
+            content_type=(prepared or {}).get("content_type") or file.content_type,
+            size=(prepared or {}).get("size") or getattr(file, "size", None),
+            error=exc,
+            started_at=started_at,
+        )
+        raise
+
+    if simulator_plan is None:
+        try:
+            billing_svc.increment_usage(shop_domain, files=1, tokens=0)
+        except Exception as usage_err:
+            LOG.warning("Failed to increment usage for %s: %s", shop_domain, usage_err)
 
     return {
         "file_id": prepared["file_id"],
@@ -614,8 +799,20 @@ async def upload_files_bulk(
 ) -> BulkUploadResult:
     shop_domain = require_shop_domain(request)
     billing_svc = _get_billing_svc(ctx)
-    if not billing_svc.can_process(shop_domain):
-        raise HTTPException(status_code=402, detail="Active subscription required to process files")
+    simulator_plan = resolve_dev_billing_simulator_plan(request)
+    if not _has_processing_access(request, billing_svc, shop_domain):
+        exc = HTTPException(status_code=402, detail="Active subscription required to process files")
+        for file in files:
+            _record_failed_upload_activity(
+                ctx=ctx,
+                shop_domain=shop_domain,
+                filename=file.filename,
+                content_type=file.content_type,
+                size=getattr(file, "size", None),
+                error=exc,
+                started_at=datetime.now(timezone.utc),
+            )
+        raise exc
 
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
@@ -624,11 +821,21 @@ async def upload_files_bulk(
     errors: list[BulkUploadError] = []
 
     for index, file in enumerate(files):
+        item_started_at = datetime.now(timezone.utc)
         try:
             prepared = await _prepare_uploaded_file(file, ctx=ctx)
             prepared["index"] = index
             prepared_items.append(prepared)
         except HTTPException as exc:
+            _record_failed_upload_activity(
+                ctx=ctx,
+                shop_domain=shop_domain,
+                filename=file.filename or f"file-{index + 1}",
+                content_type=file.content_type,
+                size=getattr(file, "size", None),
+                error=exc,
+                started_at=item_started_at,
+            )
             errors.append(
                 BulkUploadError(
                     index=index,
@@ -646,12 +853,23 @@ async def upload_files_bulk(
                 "content": item["content"],
                 "content_type": item["content_type"],
                 "file_origin": MERCHANT_UPLOAD_FILE_ORIGIN,
+                "shop_domain": shop_domain,
             }
             for item in prepared_items
         ]
         try:
             ctx.supabase.file.save_files(payloads)
         except Exception as exc:
+            for item in prepared_items:
+                _record_failed_upload_activity(
+                    ctx=ctx,
+                    shop_domain=shop_domain,
+                    filename=item.get("name"),
+                    content_type=item.get("content_type"),
+                    size=item.get("size"),
+                    error=exc,
+                    started_at=datetime.now(timezone.utc),
+                )
             raise HTTPException(
                 status_code=500, detail=f"Failed saving uploaded files: {exc}"
             )
@@ -666,7 +884,7 @@ async def upload_files_bulk(
         for item in prepared_items
     ]
     successful_count = len(uploaded)
-    if successful_count > 0:
+    if successful_count > 0 and simulator_plan is None:
         try:
             billing_svc.increment_usage(shop_domain, files=successful_count, tokens=0)
         except Exception as usage_err:
@@ -794,7 +1012,7 @@ async def process_excel(
     """
     tenant = require_shop_domain(request, shop_domain)
     billing_svc = _get_billing_svc(ctx)
-    if not billing_svc.can_process(tenant):
+    if not _has_processing_access(request, billing_svc, tenant):
         raise HTTPException(status_code=402, detail="Active subscription required to process files")
 
     from application.use_cases.processing.process_document import (
@@ -855,7 +1073,7 @@ async def process_excel(
         active_draft = _find_active_import_draft_for_file(
             ctx=ctx,
             file_id=file_id,
-            shop_domain=shop_domain,
+            shop_domain=tenant,
         )
         active_draft_id = _optional_str(active_draft, "draft_id")
         if active_draft and active_draft_id:
@@ -874,7 +1092,7 @@ async def process_excel(
                 _save_draft_state(
                     ctx=ctx,
                     draft_id=active_draft_id,
-                    shop_domain=shop_domain,
+                    shop_domain=tenant,
                     fallback_run_id=active_run_id,
                     fallback_import_mode=(
                         _first_non_empty_str(_optional_str(active_draft, "import_mode"))
@@ -899,7 +1117,7 @@ async def process_excel(
             _save_draft_state(
                 ctx=ctx,
                 draft_id=draft_id,
-                shop_domain=shop_domain,
+                shop_domain=tenant,
                 fallback_run_id=effective_run_id,
                 fallback_import_mode="auto",
                 fallback_name=input_name,
@@ -924,7 +1142,7 @@ async def process_excel(
                     "input_content_type": input_content_type,
                     "input_size_bytes": len(file_bytes_data),
                     "attempt": 1,
-                    "shop_domain": shop_domain,
+                    "shop_domain": tenant,
                     **observability_fields,
                 },
             )
@@ -937,7 +1155,7 @@ async def process_excel(
                     "run_id": effective_run_id,
                     "draft_id": draft_id,
                     "file_id": file_id,
-                    "shop_domain": shop_domain,
+                    "shop_domain": tenant,
                     **observability_fields,
                     "payload": {
                         "input_filename": input_name,
@@ -977,7 +1195,7 @@ async def process_excel(
         extraction_mode=extraction_mode,
         write_to_file=write_to_file,
         output_path=output_path,
-        shop_domain=shop_domain,
+        shop_domain=tenant,
     )
 
     try:
@@ -1021,12 +1239,14 @@ async def get_file_info(
 )
 async def create_source_highlight(
     file_id: str,
+    request: Request,
     sheet: str | None = Form(None),
     cell: str | None = Form(None),
     cell_range: str | None = Form(None),
     source_refs_json: str | None = Form(None),
     preferred_sheet: str | None = Form(None),
     highlight_file_id: str | None = Form(None),
+    trace_attempt_id: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.files.create_source_highlight_file import (
@@ -1052,8 +1272,34 @@ async def create_source_highlight(
             )
         parsed_source_refs = decoded_source_refs
 
+    tenant = require_shop_domain(request)
+    from services.source_link_trace import record as record_source_link_trace
+    trace_fields = current_observability_fields()
+    record_source_link_trace(
+        component="backend",
+        stage="highlight_start",
+        attempt_id=trace_attempt_id,
+        shop_domain=tenant,
+        source_file_id=file_id,
+        highlight_file_id=highlight_file_id,
+        request_id=trace_fields.get("request_id"),
+        correlation_id=trace_fields.get("correlation_id"),
+        details={"range_count": len(parsed_source_refs or [])},
+    )
+    def record_highlight_failure(exc: Exception) -> None:
+        record_source_link_trace(
+            component="backend",
+            stage="highlight_failed",
+            status="error",
+            attempt_id=trace_attempt_id,
+            shop_domain=tenant,
+            source_file_id=file_id,
+            highlight_file_id=highlight_file_id,
+            details={"error": type(exc).__name__, "reason": str(exc)},
+        )
+
     try:
-        return await create_source_highlight_execute(
+        result = await create_source_highlight_execute(
             supabase=ctx.supabase,
             collabora=ctx.services.collabora,
             source_file_id=file_id,
@@ -1064,11 +1310,32 @@ async def create_source_highlight(
             preferred_sheet=preferred_sheet,
             highlight_file_id=highlight_file_id,
         )
+        ctx.supabase.file.set_file_shop_domain(str(result["file_id"]), tenant)
+        record_source_link_trace(
+            component="backend",
+            stage="highlight_complete",
+            status="ok",
+            attempt_id=trace_attempt_id,
+            shop_domain=tenant,
+            source_file_id=file_id,
+            highlight_file_id=str(result["file_id"]),
+            request_id=trace_fields.get("request_id"),
+            correlation_id=trace_fields.get("correlation_id"),
+            details={
+                "sheet": result.get("sheet"),
+                "target": result.get("cell_range"),
+                "range_count": len(result.get("selection_ranges") or []),
+            },
+        )
+        return result
     except LookupError as exc:
+        record_highlight_failure(exc)
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
+        record_highlight_failure(exc)
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
+        record_highlight_failure(exc)
         raise HTTPException(
             status_code=500, detail=f"Source highlight generation failed: {exc}"
         )
@@ -1080,6 +1347,7 @@ async def create_source_highlight(
 )
 async def resolve_source_target(
     file_id: str,
+    request: Request,
     value: str | None = None,
     document_kind: str | None = None,
     page: int | None = None,
@@ -1092,6 +1360,7 @@ async def resolve_source_target(
     if page is not None and page < 1:
         raise HTTPException(status_code=422, detail="page must be greater than 0")
 
+    require_shop_domain(request)
     try:
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
         return await resolve_source_target_execute(
@@ -1113,12 +1382,57 @@ async def resolve_source_target(
         )
 
 
+def _contains_file_reference(value: Any, file_id: str) -> bool:
+    if isinstance(value, str):
+        return value == file_id
+    if isinstance(value, dict):
+        return any(_contains_file_reference(item, file_id) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_file_reference(item, file_id) for item in value)
+    return False
+
+
+def _referencing_imports(
+    *, ctx: AppContext, file_id: str, shop_domain: str
+) -> list[dict[str, str]]:
+    from application.use_cases.drafts.list_product_drafts import execute as list_drafts
+    from application.use_cases.submitted.list_submitted_documents import (
+        execute as list_submitted,
+    )
+
+    references: list[dict[str, str]] = []
+    collections = (
+        ("draft", list_drafts(supabase=ctx.supabase, limit=5000, offset=0, shop_domain=shop_domain)),
+        ("submitted", list_submitted(supabase=ctx.supabase, limit=5000, offset=0, shop_domain=shop_domain)),
+    )
+    for kind, rows in collections:
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("input_file_id") == file_id or _contains_file_reference(row.get("products"), file_id):
+                identifier = str(row.get("draft_id") or row.get("submitted_id") or row.get("id") or "")
+                references.append({"kind": kind, "id": identifier, "name": str(row.get("draft_name") or row.get("name") or identifier)})
+    return references
+
+
 @router.delete("/files/{file_id}", summary="Delete an uploaded file")
 async def delete_file_route(
-    file_id: str, ctx: AppContext = Depends(get_ctx)
+    file_id: str, request: Request, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, Any]:  # rename to avoid shadowing helper
     """Delete an uploaded file from storage."""
     from application.use_cases.files.delete_file import execute as delete_file_execute
+
+    tenant = require_shop_domain(request)
+    references = _referencing_imports(ctx=ctx, file_id=file_id, shop_domain=tenant)
+    if references:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SOURCE_FILE_IN_USE",
+                "reference_count": len(references),
+                "affected_imports": references[:20],
+            },
+        )
 
     if not delete_file_execute(supabase=ctx.supabase, file_id=file_id):
         raise HTTPException(status_code=404, detail="File not found")
@@ -1128,13 +1442,22 @@ async def delete_file_route(
 
 @router.post("/files/bulk-delete", summary="Bulk delete uploaded files")
 async def bulk_delete_files(
-    payload: BulkDeletePayload, ctx: AppContext = Depends(get_ctx)
+    payload: BulkDeletePayload, request: Request, ctx: AppContext = Depends(get_ctx)
 ) -> BulkDeleteResult:
     from application.use_cases.files.bulk_delete_files import (
         execute as bulk_delete_files_execute,
     )
 
-    result = bulk_delete_files_execute(supabase=ctx.supabase, ids=payload.ids)
+    tenant = require_shop_domain(request)
+    protected_ids = [
+        file_id
+        for file_id in payload.ids
+        if _referencing_imports(ctx=ctx, file_id=file_id, shop_domain=tenant)
+    ]
+    deletable_ids = [file_id for file_id in payload.ids if file_id not in protected_ids]
+    result = bulk_delete_files_execute(supabase=ctx.supabase, ids=deletable_ids)
+    result["failed_ids"] = [*result["failed_ids"], *protected_ids]
+    result["protected_ids"] = protected_ids
     return BulkDeleteResult(**result)
 
 
@@ -1164,6 +1487,11 @@ async def get_file_preview(
         return Response(content=thumbnail_bytes, media_type="image/png")
 
     try:
+        from services.collabora_service import CollaboraUnavailable
+        try:
+            ctx.services.collabora.readiness()
+        except CollaboraUnavailable as exc:
+            return JSONResponse(status_code=503, content={"code": exc.code, "detail": str(exc)}, headers={"Cache-Control": "no-store"})
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
         preview_png = await generate_thumbnail_bytes(
             file_bytes=bytes(file_content),
@@ -1182,4 +1510,6 @@ async def get_file_preview(
 
         return Response(content=preview_png, media_type="image/png")
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Preview generation failed: {exc}")
+        message = str(exc).strip() or type(exc).__name__
+        code = "COLLABORA_TIMEOUT" if "timeout" in message.lower() else "COLLABORA_UNAVAILABLE"
+        return JSONResponse(status_code=503, content={"code": code, "detail": f"Preview generation failed: {message}"}, headers={"Cache-Control": "no-store"})

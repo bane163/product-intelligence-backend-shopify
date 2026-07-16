@@ -9,11 +9,24 @@ from pydantic import BaseModel
 from app_context import AppContext, get_ctx
 from services.supabase_service import SupabaseService
 
-from .utils import require_shop_domain
+from .utils import (
+    require_authenticated_shop_domain,
+    require_shop_domain,
+    resolve_dev_billing_simulator_plan,
+)
 
 LOG = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _empty_usage_payload() -> dict[str, int]:
+    return {
+        "files_processed": 0,
+        "files_included": 0,
+        "overage_files": 0,
+        "tokens_used": 0,
+    }
 
 
 class UsageIncrementBody(BaseModel):
@@ -80,6 +93,8 @@ async def increment_usage(
 ) -> dict[str, Any]:
     tenant = require_shop_domain(request, shop_domain)
     svc = _get_billing_svc(ctx)
+    if resolve_dev_billing_simulator_plan(request) is not None:
+        return {"usage": svc.get_current_usage(tenant) or _empty_usage_payload()}
     if not svc.can_process(tenant):
         raise HTTPException(
             status_code=402, detail="Subscription required to process files"
@@ -94,7 +109,7 @@ async def sync_subscription(
     body: SubscriptionSyncBody,
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
-    tenant = require_shop_domain(request, body.shop_domain)
+    tenant = require_authenticated_shop_domain(request, body.shop_domain)
     svc = _get_billing_svc(ctx)
     sub = svc.upsert_subscription(tenant, body.subscription)
     svc.record_billing_event(tenant, "subscription_synced", body.subscription)
@@ -109,5 +124,7 @@ async def can_process(
 ) -> dict[str, Any]:
     tenant = require_shop_domain(request, shop_domain)
     svc = _get_billing_svc(ctx)
-    allowed = svc.can_process(tenant)
+    allowed = resolve_dev_billing_simulator_plan(request) is not None or svc.can_process(
+        tenant
+    )
     return {"can_process": allowed}

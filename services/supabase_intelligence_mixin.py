@@ -119,7 +119,9 @@ class SupabaseIntelligenceMixin:
             try:
                 res = (
                     client.table("product_intelligence_audits")
-                    .select("*")
+                    .select(
+                        "audit_id,submitted_id,status,overall_score,findings_count,totals,run_id,created_at"
+                    )
                     .eq("shop_domain", tenant)
                     .order("created_at", desc=True)
                     .range(offset, offset + limit - 1)
@@ -135,6 +137,110 @@ class SupabaseIntelligenceMixin:
         ]
         audits.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return audits[offset : offset + limit]
+
+    def list_product_intelligence_audit_artifacts(
+        self,
+        *,
+        audit_ids: list[str],
+        shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return []
+
+        normalized_audit_ids: list[str] = []
+        seen_ids: set[str] = set()
+        for audit_id in audit_ids:
+            normalized_id = str(audit_id or "").strip()
+            if not normalized_id or normalized_id in seen_ids:
+                continue
+            seen_ids.add(normalized_id)
+            normalized_audit_ids.append(normalized_id)
+        if not normalized_audit_ids:
+            return []
+
+        client = self._get_supabase_client()
+        if client:
+            try:
+                audits_res = (
+                    client.table("product_intelligence_audits")
+                    .select(
+                        "audit_id,run_id,submitted_id,status,overall_score,findings_count,component_scores,totals,created_at"
+                    )
+                    .eq("shop_domain", tenant)
+                    .in_("audit_id", normalized_audit_ids)
+                    .execute()
+                )
+                findings_res = (
+                    client.table("product_intelligence_findings")
+                    .select("*")
+                    .eq("shop_domain", tenant)
+                    .in_("audit_id", normalized_audit_ids)
+                    .order("created_at", desc=False)
+                    .execute()
+                )
+                suggestions_res = (
+                    client.table("product_intelligence_suggestions")
+                    .select("*")
+                    .eq("shop_domain", tenant)
+                    .in_("audit_id", normalized_audit_ids)
+                    .order("created_at", desc=False)
+                    .execute()
+                )
+
+                audits_by_id = {
+                    str(item.get("audit_id")): dict(item)
+                    for item in (audits_res.data or [])
+                    if item.get("audit_id")
+                }
+                findings_by_id: dict[str, list[dict[str, Any]]] = {}
+                for item in findings_res.data or []:
+                    audit_id = str(item.get("audit_id") or "").strip()
+                    if not audit_id:
+                        continue
+                    findings_by_id.setdefault(audit_id, []).append(dict(item))
+                suggestions_by_id: dict[str, list[dict[str, Any]]] = {}
+                for item in suggestions_res.data or []:
+                    audit_id = str(item.get("audit_id") or "").strip()
+                    if not audit_id:
+                        continue
+                    suggestions_by_id.setdefault(audit_id, []).append(dict(item))
+
+                artifacts: list[dict[str, Any]] = []
+                for audit_id in normalized_audit_ids:
+                    audit = audits_by_id.get(audit_id)
+                    if not isinstance(audit, dict):
+                        continue
+                    artifacts.append(
+                        {
+                            "audit_id": audit_id,
+                            "audit": {
+                                **audit,
+                                "findings": findings_by_id.get(audit_id, []),
+                            },
+                            "suggestions": suggestions_by_id.get(audit_id, []),
+                        }
+                    )
+                return artifacts
+            except Exception:
+                LOG.exception("Failed listing batched product intelligence artifacts")
+
+        artifacts = []
+        for audit_id in normalized_audit_ids:
+            audit = self.get_product_intelligence_audit(audit_id, shop_domain=tenant)
+            if not audit:
+                continue
+            artifacts.append(
+                {
+                    "audit_id": audit_id,
+                    "audit": audit,
+                    "suggestions": self.list_product_intelligence_suggestions(
+                        audit_id=audit_id,
+                        shop_domain=tenant,
+                    ),
+                }
+            )
+        return artifacts
 
     def get_product_intelligence_audit(
         self,

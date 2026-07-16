@@ -18,10 +18,4 @@ else
   echo "⚠️ npx not available; skipping Supabase stop"
 fi
 
-# Optionally stop Ollama if it's running the specific model
-if command -v ollama &> /dev/null; then
-    echo "🦙 Stopping Ollama model (kimi-k2-thinking:cloud) if running..."
-    ollama stop kimi-k2-thinking:cloud || true
-fi
-
 echo "✅ All services stopped."

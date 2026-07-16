@@ -12,6 +12,7 @@ class BulkDeletePayload(BaseModel):
 class BulkDeleteResult(BaseModel):
     deleted_ids: list[str] = Field(default_factory=list)
     failed_ids: list[str] = Field(default_factory=list)
+    protected_ids: list[str] = Field(default_factory=list)
 
 
 class BulkUploadItem(BaseModel):

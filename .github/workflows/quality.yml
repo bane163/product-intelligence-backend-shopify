@@ -1,0 +1,30 @@
+name: Stockpile backend quality
+on:
+  workflow_dispatch:
+    inputs:
+      run_integration:
+        description: Run tests that require live local infrastructure
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run python -m compileall -q api application services infrastructure
+      - run: PYTHONPATH=. uv run pytest -q -m "not integration"
+  integration:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - name: Run opt-in infrastructure tests
+        run: PYTHONPATH=. uv run pytest -q -m integration || test $? -eq 5

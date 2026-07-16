@@ -9,11 +9,14 @@ class SupabasePort(Protocol):
         content: bytes,
         content_type: str | None = None,
         file_origin: str | None = None,
+        shop_domain: str | None = None,
     ) -> None: ...
 
     def save_files(self, files: list[dict[str, Any]]) -> None: ...
 
-    def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]: ...
+    def list_files(
+        self, limit: int = 100, offset: int = 0, shop_domain: str | None = None
+    ) -> list[dict[str, Any]]: ...
 
     def get_file(self, file_id: str) -> dict[str, Any] | None: ...
 
@@ -26,6 +29,8 @@ class SupabasePort(Protocol):
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None: ...
 
     def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None: ...
+
+    def get_latest_run_event_seq(self, run_id: str) -> int: ...
 
     def append_run_message(
         self,
@@ -56,6 +61,10 @@ class SupabasePort(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None: ...
+
+    def get_run_summaries(
+        self, run_ids: list[str], *, shop_domain: str | None = None
+    ) -> dict[str, dict[str, Any]]: ...
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool: ...
 
@@ -200,6 +209,13 @@ class SupabasePort(Protocol):
         shop_domain: str | None = None,
     ) -> dict[str, Any] | None: ...
 
+    def list_product_intelligence_audit_artifacts(
+        self,
+        *,
+        audit_ids: list[str],
+        shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
     def save_product_intelligence_suggestions(
         self,
         *,
@@ -328,11 +344,14 @@ class SupabaseFileNamespacePort(Protocol):
         content: bytes,
         content_type: str | None = None,
         file_origin: str | None = None,
+        shop_domain: str | None = None,
     ) -> None: ...
 
     def save_files(self, files: list[dict[str, Any]]) -> None: ...
 
-    def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]: ...
+    def list_files(
+        self, limit: int = 100, offset: int = 0, shop_domain: str | None = None
+    ) -> list[dict[str, Any]]: ...
 
     def get_file(self, file_id: str) -> dict[str, Any] | None: ...
 
@@ -347,6 +366,8 @@ class SupabaseRunsNamespacePort(Protocol):
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None: ...
 
     def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None: ...
+
+    def get_latest_run_event_seq(self, run_id: str) -> int: ...
 
     def append_run_message(
         self,
@@ -377,6 +398,10 @@ class SupabaseRunsNamespacePort(Protocol):
     ) -> list[dict[str, Any]]: ...
 
     def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None: ...
+
+    def get_run_summaries(
+        self, run_ids: list[str], *, shop_domain: str | None = None
+    ) -> dict[str, dict[str, Any]]: ...
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool: ...
 
@@ -526,6 +551,13 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         *,
         shop_domain: str | None = None,
     ) -> dict[str, Any] | None: ...
+
+    def list_product_intelligence_audit_artifacts(
+        self,
+        *,
+        audit_ids: list[str],
+        shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]: ...
 
     def save_product_intelligence_suggestions(
         self,

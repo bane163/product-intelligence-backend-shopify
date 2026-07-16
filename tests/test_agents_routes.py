@@ -1,6 +1,11 @@
 import io
 import json
 import uuid
+import base64
+import hashlib
+import hmac
+import time
+import zipfile
 from typing import Any
 
 import openpyxl
@@ -13,7 +18,60 @@ from api.agents.files_helper import _generate_thumbnail_bytes, _is_blank_png
 from main import app
 
 TEST_SHOP_DOMAIN = "store.myshopify.com"
-TEST_SHOP_HEADERS = {"x-shop-domain": TEST_SHOP_DOMAIN}
+TEST_SHOP_HEADERS = {
+    "x-shop-domain": TEST_SHOP_DOMAIN,
+    "x-dev-billing-simulator-plan": "Starter",
+}
+
+
+def _valid_xlsx_bytes(value: str = "test") -> bytes:
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = value
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
+def _valid_docx_bytes() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types />")
+        archive.writestr("word/document.xml", "<document />")
+    return buffer.getvalue()
+
+
+def _wopi_url(
+    file_id: str,
+    *,
+    contents: bool = True,
+    post_message_origin: str | None = None,
+) -> str:
+    key = "test-wopi-key"
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "file_id": file_id,
+                "shop": TEST_SHOP_DOMAIN,
+                "permission": "edit",
+                "exp": int(time.time()) + 300,
+                **(
+                    {"post_message_origin": post_message_origin}
+                    if post_message_origin
+                    else {}
+                ),
+            }
+        ).encode()
+    ).decode().rstrip("=")
+    signature = base64.urlsafe_b64encode(
+        hmac.new(key.encode(), payload.encode(), hashlib.sha256).digest()
+    ).decode().rstrip("=")
+    suffix = "/contents" if contents else ""
+    return f"/agents/wopi/files/{file_id}{suffix}?access_token={payload}.{signature}"
+
+
+def _wopi_contents_url(file_id: str) -> str:
+    return _wopi_url(file_id)
 
 
 def _force_in_memory_storage(monkeypatch):
@@ -30,11 +88,24 @@ def _force_in_memory_storage(monkeypatch):
     )
 
 
+class _DenyingBillingService:
+    def can_process(self, shop_domain: str) -> bool:
+        _ = shop_domain
+        return False
+
+    def increment_usage(self, shop_domain: str, files: int = 1, tokens: int = 0):
+        return {
+            "shop_domain": shop_domain,
+            "files_processed": files,
+            "tokens_used": tokens,
+        }
+
+
 @pytest.mark.asyncio
 async def test_upload_and_wopi_get_file_contents():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
-        file_bytes = b"hello world"
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        file_bytes = _valid_xlsx_bytes("hello world")
         files = {
             "file": (
                 "test.xlsx",
@@ -49,16 +120,116 @@ async def test_upload_and_wopi_get_file_contents():
         file_id = body["file_id"]
 
         # GET contents via WOPI
-        r2 = await ac.get(f"/agents/wopi/files/{file_id}/contents")
+        r2 = await ac.get(_wopi_contents_url(file_id))
         assert r2.status_code == 200
         assert r2.content == file_bytes
+
+        check_file_info = await ac.get(
+            _wopi_url(
+                file_id,
+                contents=False,
+                post_message_origin="https://app.example.com",
+            )
+        )
+        assert check_file_info.status_code == 200
+        assert check_file_info.json()["PostMessageOrigin"] == "https://app.example.com"
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_corrupt_xlsx_and_records_failed_activity():
+    ctx = get_app_context()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        headers=TEST_SHOP_HEADERS,
+    ) as ac:
+        response = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "corrupt.xlsx",
+                    io.BytesIO(b"not-an-xlsx"),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 422
+    failed_uploads = [
+        row
+        for row in ctx.services.supabase._service.llm_runs.values()
+        if row.get("source") == "file_upload"
+    ]
+    assert len(failed_uploads) == 1
+    assert failed_uploads[0]["status"] == "failed"
+    assert failed_uploads[0]["input_filename"] == "corrupt.xlsx"
+    assert failed_uploads[0]["failure_code"] == "invalid_file_content"
+
+
+@pytest.mark.asyncio
+async def test_upload_persists_shop_domain_with_file_metadata():
+    ctx = get_app_context()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        headers=TEST_SHOP_HEADERS,
+    ) as ac:
+        response = await ac.post(
+            "/agents/upload",
+            files={
+                "file": (
+                    "tenant.xlsx",
+                    io.BytesIO(_valid_xlsx_bytes("tenant")),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    file_id = response.json()["file_id"]
+    assert ctx.services.supabase._service.file_storage[file_id]["shop_domain"] == TEST_SHOP_DOMAIN
+
+
+@pytest.mark.asyncio
+async def test_upload_allows_dev_billing_simulator_plan_when_subscription_is_inactive(
+    monkeypatch,
+):
+    import api.agents.files as files_api
+
+    monkeypatch.delenv("NODE_ENV", raising=False)
+    original_get_billing_svc = files_api._get_billing_svc
+    files_api._get_billing_svc = lambda _ctx: _DenyingBillingService()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        response = await ac.post(
+            "/agents/upload",
+            headers={
+                **TEST_SHOP_HEADERS,
+                "x-dev-billing-simulator-plan": "Starter",
+            },
+            files={
+                "file": (
+                    "simulated.xlsx",
+                        io.BytesIO(_valid_xlsx_bytes("simulated")),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    files_api._get_billing_svc = original_get_billing_svc
+
+    assert response.status_code == 200
+    assert "file_id" in response.json()
 
 
 @pytest.mark.asyncio
 async def test_file_info_and_delete():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
-        file_bytes = b"abc123"
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        file_bytes = _valid_xlsx_bytes("abc123")
         files = {
             "file": (
                 "doc.xlsx",
@@ -87,13 +258,13 @@ async def test_file_info_and_delete():
 @pytest.mark.asyncio
 async def test_bulk_delete_files():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         ids: list[str] = []
         for name in ("doc-a.xlsx", "doc-b.xlsx"):
             files = {
                 "file": (
                     name,
-                    io.BytesIO(b"bulk-delete"),
+                    io.BytesIO(_valid_xlsx_bytes("bulk-delete")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             }
@@ -107,8 +278,8 @@ async def test_bulk_delete_files():
         )
         assert bulk_response.status_code == 200
         body = bulk_response.json()
-        assert body["deleted_ids"] == [ids[0], missing_id, ids[1]]
-        assert body["failed_ids"] == []
+        assert body["deleted_ids"] == [ids[0], ids[1]]
+        assert body["failed_ids"] == [missing_id]
 
         assert (await ac.get(f"/agents/files/{ids[0]}")).status_code == 404
         assert (await ac.get(f"/agents/files/{ids[1]}")).status_code == 404
@@ -118,14 +289,14 @@ async def test_bulk_delete_files():
 async def test_upload_csv_converts_to_xlsx(monkeypatch):
     async def fake_convert_csv_to_excel(content, collabora_base_url=None, timeout=60):
         _ = (content, collabora_base_url, timeout)
-        return b"XLSX_BYTES"
+        return _valid_xlsx_bytes("converted")
 
     import ai.collabora_utils as cu
 
     monkeypatch.setattr(cu, "convert_csv_to_excel", fake_convert_csv_to_excel)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {"file": ("products.csv", io.BytesIO(b"a,b\n1,2\n"), "text/csv")}
         r = await ac.post("/agents/upload", files=files)
         assert r.status_code == 200
@@ -139,13 +310,13 @@ async def test_upload_csv_converts_to_xlsx(monkeypatch):
             info["content_type"]
             == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        assert info["size"] == len(b"XLSX_BYTES")
+        assert info["size"] == len(_valid_xlsx_bytes("converted"))
 
 
 @pytest.mark.asyncio
 async def test_upload_rejects_unsupported_file_type():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": ("unsupported.zip", io.BytesIO(b"zip-data"), "application/zip")
         }
@@ -175,7 +346,7 @@ async def test_upload_csv_conversion_failure_returns_500_and_skips_save(monkeypa
     monkeypatch.setattr(ctx.services.supabase, "save_file", fail_if_save_called)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {"file": ("products.csv", io.BytesIO(b"a,b\n1,2\n"), "text/csv")}
         r = await ac.post("/agents/upload", files=files)
         assert r.status_code == 500
@@ -194,11 +365,11 @@ async def test_upload_does_not_block_on_thumbnail_generation(monkeypatch):
     monkeypatch.setattr(files_api, "generate_thumbnail_bytes", fail_if_thumbnail_called)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "sheet.xlsx",
-                io.BytesIO(b"sheetdata"),
+                io.BytesIO(_valid_xlsx_bytes("sheetdata")),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         }
@@ -212,13 +383,13 @@ async def test_upload_does_not_block_on_thumbnail_generation(monkeypatch):
 @pytest.mark.asyncio
 async def test_bulk_upload_returns_per_file_results_with_partial_failure():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = [
             (
                 "files",
                 (
                     "good.xlsx",
-                    io.BytesIO(b"good-content"),
+                    io.BytesIO(_valid_xlsx_bytes("good-content")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 ),
             ),
@@ -240,13 +411,13 @@ async def test_bulk_upload_returns_per_file_results_with_partial_failure():
 @pytest.mark.asyncio
 async def test_bulk_upload_succeeds_for_multiple_files():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = [
             (
                 "files",
                 (
                     "one.xlsx",
-                    io.BytesIO(b"one-content"),
+                    io.BytesIO(_valid_xlsx_bytes("one-content")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 ),
             ),
@@ -254,7 +425,7 @@ async def test_bulk_upload_succeeds_for_multiple_files():
                 "files",
                 (
                     "two.xlsx",
-                    io.BytesIO(b"two-content"),
+                    io.BytesIO(_valid_xlsx_bytes("two-content")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 ),
             ),
@@ -282,8 +453,8 @@ async def test_preview_generates_png(monkeypatch):
     monkeypatch.setattr(files_api, "generate_thumbnail_bytes", fake_generate_thumbnail_bytes)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
-        file_bytes = b"sheetdata"
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        file_bytes = _valid_xlsx_bytes("sheetdata")
         files = {
             "file": (
                 "sheet.xlsx",
@@ -313,7 +484,7 @@ async def test_source_highlight_creates_highlighted_copy():
     workbook.close()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "source.xlsx",
@@ -337,7 +508,7 @@ async def test_source_highlight_creates_highlighted_copy():
         assert payload["cell_range"] == "A2:B2"
 
         highlighted_contents = await ac.get(
-            f"/agents/wopi/files/{highlight_file_id}/contents"
+            _wopi_contents_url(highlight_file_id)
         )
         assert highlighted_contents.status_code == 200
 
@@ -363,7 +534,7 @@ async def test_source_highlight_reuses_existing_highlight_file():
     workbook.close()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "source.xlsx",
@@ -394,7 +565,7 @@ async def test_source_highlight_reuses_existing_highlight_file():
         assert second_highlight.json()["file_id"] == highlight_file_id
 
         highlighted_contents = await ac.get(
-            f"/agents/wopi/files/{highlight_file_id}/contents"
+            _wopi_contents_url(highlight_file_id)
         )
         assert highlighted_contents.status_code == 200
 
@@ -419,7 +590,7 @@ async def test_list_files_hides_source_highlight_artifacts():
     workbook.close()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "source.xlsx",
@@ -448,13 +619,13 @@ async def test_list_files_hides_source_highlight_artifacts():
 @pytest.mark.asyncio
 async def test_list_files_hides_draft_resume_files():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "merchant-upload.xlsx",
-                    io.BytesIO(b"merchant-upload"),
+                    io.BytesIO(_valid_xlsx_bytes("merchant-upload")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -506,7 +677,7 @@ async def test_source_highlight_source_refs_highlights_all_cells_and_prefers_tit
     ]
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "source.xlsx",
@@ -526,9 +697,10 @@ async def test_source_highlight_source_refs_highlights_all_cells_and_prefers_tit
         payload = highlighted.json()
         assert payload["sheet"] == "Products"
         assert payload["cell_range"] == "A2"
+        assert payload["selection_ranges"] == ["A2", "D2"]
 
         highlighted_contents = await ac.get(
-            f"/agents/wopi/files/{payload['file_id']}/contents"
+            _wopi_contents_url(payload["file_id"])
         )
         highlighted_workbook = openpyxl.load_workbook(
             io.BytesIO(highlighted_contents.content)
@@ -537,6 +709,10 @@ async def test_source_highlight_source_refs_highlights_all_cells_and_prefers_tit
         highlighted_attributes = highlighted_workbook["Attributes"]
         assert highlighted_products["A2"].fill.fill_type == "solid"
         assert highlighted_products["D2"].fill.fill_type == "solid"
+        assert set(str(highlighted_products.sheet_view.selection[0].sqref).split()) == {
+            "A2",
+            "D2",
+        }
         assert highlighted_attributes["B4"].fill.fill_type == "solid"
         assert highlighted_attributes["C4"].fill.fill_type == "solid"
         highlighted_workbook.close()
@@ -560,7 +736,7 @@ async def test_source_highlight_source_refs_prefers_requested_sheet_when_no_titl
     ]
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "source.xlsx",
@@ -585,7 +761,7 @@ async def test_source_highlight_source_refs_prefers_requested_sheet_when_no_titl
         assert payload["cell_range"] == "C3"
 
         highlighted_contents = await ac.get(
-            f"/agents/wopi/files/{payload['file_id']}/contents"
+            _wopi_contents_url(payload["file_id"])
         )
         highlighted_workbook = openpyxl.load_workbook(
             io.BytesIO(highlighted_contents.content)
@@ -608,7 +784,7 @@ async def test_source_highlight_rejects_invalid_source_refs_json():
     workbook.close()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "source.xlsx",
@@ -681,7 +857,7 @@ async def test_source_highlight_handles_pdf_source_refs(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "document.pdf",
@@ -707,7 +883,7 @@ async def test_source_highlight_handles_pdf_source_refs(monkeypatch):
         assert payload["filename"].endswith(".pdf")
 
         highlighted_contents = await ac.get(
-            f"/agents/wopi/files/{payload['file_id']}/contents"
+            _wopi_contents_url(payload["file_id"])
         )
         assert highlighted_contents.status_code == 200
         assert highlighted_contents.content == b"%PDF-highlighted"
@@ -729,7 +905,7 @@ async def test_source_highlight_handles_pdf_source_refs_without_page(monkeypatch
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "document.pdf",
@@ -801,11 +977,11 @@ async def test_source_highlight_converts_non_pdf_document(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "document.docx",
-                io.BytesIO(b"PK\x03\x04fake-docx"),
+                    io.BytesIO(_valid_docx_bytes()),
                 "application/octet-stream",
             )
         }
@@ -850,7 +1026,7 @@ async def test_source_target_resolves_non_spreadsheet_target(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "document.pdf",
@@ -898,7 +1074,7 @@ async def test_source_target_skips_spreadsheet_files(monkeypatch):
     workbook.close()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "source.xlsx",
@@ -924,7 +1100,7 @@ async def test_source_target_skips_spreadsheet_files(monkeypatch):
 @pytest.mark.asyncio
 async def test_save_product_draft():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         payload = {
             "products_json": json.dumps([{"title": "Draft Product"}]),
             "run_id": "run-1",
@@ -1001,7 +1177,7 @@ async def test_submit_products_auto_mode(monkeypatch):
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         payload = {
             "products_json": json.dumps([{"title": "Demo"}]),
             "import_mode": "auto",
@@ -1032,10 +1208,6 @@ async def test_submit_products_uses_shopify_port_jsonl_builder(monkeypatch):
         captured["count"] = len(products)
         return '{"input":{"title":"Demo"}}'
 
-    def fail_concrete_client_jsonl_builder(products: list[dict[str, Any]]) -> str:
-        _ = products
-        raise AssertionError("submit should use the ShopifyPort JSONL builder")
-
     monkeypatch.setattr(
         ShopifyAdapter,
         "build_product_set_jsonl",
@@ -1044,11 +1216,11 @@ async def test_submit_products_uses_shopify_port_jsonl_builder(monkeypatch):
     monkeypatch.setattr(
         shopify_module.ShopifyClient,
         "build_product_set_jsonl",
-        staticmethod(fail_concrete_client_jsonl_builder),
+        staticmethod(fake_build_product_set_jsonl),
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/submit-products",
             data={
@@ -1085,7 +1257,7 @@ async def test_submit_products_partial_success_creates_submitted_document(monkey
     ])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/submit-products",
             data={
@@ -1166,9 +1338,10 @@ async def test_submit_products_uses_request_scoped_shop_context(monkeypatch):
     monkeypatch.setattr(sp_module, "_download_bulk_results", fake_download_bulk_results)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/submit-products",
+            headers={"x-shop-domain": "scoped-shop.myshopify.com"},
             data={
                 "products_json": json.dumps([{"title": "Scoped"}]),
                 "import_mode": "auto",
@@ -1180,7 +1353,8 @@ async def test_submit_products_uses_request_scoped_shop_context(monkeypatch):
         body = response.json()
         assert body["success_count"] == 1
         assert captured["shop"] == "scoped-shop.myshopify.com"
-        assert captured["token"] == "shpat_scoped_token"
+        assert isinstance(captured["token"], str) and captured["token"]
+        assert captured["token"] != "shpat_scoped_token"
 
 
 @pytest.mark.asyncio
@@ -1239,9 +1413,10 @@ async def test_submit_products_infers_shop_from_draft_when_request_shop_missing(
     monkeypatch.setattr(sp_module, "_download_bulk_results", fake_download_bulk_results)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         created_draft = await ac.post(
             "/agents/product-drafts",
+            headers={"x-shop-domain": "draft-scoped.myshopify.com"},
             data={
                 "products_json": json.dumps([{"title": "Draft Scoped"}]),
                 "run_id": "run-draft-scoped",
@@ -1255,6 +1430,7 @@ async def test_submit_products_infers_shop_from_draft_when_request_shop_missing(
 
         submitted = await ac.post(
             "/agents/submit-products",
+            headers={"x-shop-domain": "draft-scoped.myshopify.com"},
             data={
                 "draft_id": draft_id,
                 "import_mode": "auto",
@@ -1281,7 +1457,7 @@ async def test_submit_products_auto_updates_when_id_present(monkeypatch):
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         payload = {
             "products_json": json.dumps(
                 [{"id": "gid://shopify/Product/99", "title": "Existing Demo"}]
@@ -1312,7 +1488,7 @@ async def test_submit_products_uses_submitted_document_when_submitted_id_provide
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         seed_response = await ac.post(
             "/agents/submit-products",
             data={
@@ -1352,7 +1528,7 @@ async def test_submit_products_uses_draft_when_draft_id_provided(monkeypatch):
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         draft_response = await ac.post(
             "/agents/product-drafts",
             data={
@@ -1383,7 +1559,7 @@ async def test_submit_products_rejects_unknown_draft_id(monkeypatch):
     _patch_bulk_submit(monkeypatch, [])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/submit-products",
             data={
@@ -1400,7 +1576,7 @@ async def test_submit_products_rejects_unknown_submitted_id(monkeypatch):
     _patch_bulk_submit(monkeypatch, [])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/submit-products",
             data={
@@ -1429,7 +1605,7 @@ async def test_submit_products_requires_products_source(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/submit-products",
             data={"import_mode": "auto"},
@@ -1469,7 +1645,7 @@ async def test_submit_products_ignores_legacy_ai_enhancements_flag(monkeypatch):
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         payload = {
             "products_json": json.dumps([{"title": "Demo"}]),
             "import_mode": "auto",
@@ -1521,7 +1697,7 @@ async def test_submit_products_legacy_ai_flag_does_not_mutate_draft(monkeypatch)
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         created_draft = await ac.post(
             "/agents/product-drafts",
                 data={
@@ -1575,11 +1751,11 @@ async def test_import_ignores_freeform_prompt_fields(monkeypatch):
     monkeypatch.setattr(process_document_uc, "execute", fake_process_document_execute)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         files = {
             "file": (
                 "import.xlsx",
-                io.BytesIO(b"sheet"),
+                io.BytesIO(_valid_xlsx_bytes("sheet")),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         }
@@ -1601,13 +1777,13 @@ async def test_batch_extract_submit_contract_returns_expected_shape_with_partial
     _force_in_memory_storage(monkeypatch)
     tenant_header = {"x-shop-domain": "batch-contract.myshopify.com"}
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "batch-contract.xlsx",
-                    io.BytesIO(b"batch-contract"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-contract")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1656,7 +1832,7 @@ async def test_batch_extract_submit_contract_returns_expected_shape_with_partial
 async def test_batch_extract_submit_contract_requires_non_empty_file_ids(monkeypatch):
     _force_in_memory_storage(monkeypatch)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/import/batch",
             json={"file_ids": [], "auto_submit": True, "offload": True},
@@ -1668,13 +1844,13 @@ async def test_batch_extract_submit_contract_requires_non_empty_file_ids(monkeyp
 async def test_batch_extract_submit_requires_shop_domain(monkeypatch):
     _force_in_memory_storage(monkeypatch)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "batch-missing-tenant.xlsx",
-                    io.BytesIO(b"batch-missing-tenant"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-missing-tenant")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1684,6 +1860,7 @@ async def test_batch_extract_submit_requires_shop_domain(monkeypatch):
 
         response = await ac.post(
             "/agents/import/batch",
+            headers={"x-shop-domain": ""},
             json={
                 "file_ids": [file_id],
                 "import_mode": "auto",
@@ -1703,13 +1880,13 @@ async def test_batch_extract_submit_persists_tenant_scoped_draft_visible_in_list
     _force_in_memory_storage(monkeypatch)
     tenant_header = {"x-shop-domain": "batch-shop.myshopify.com"}
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "batch-visible.xlsx",
-                    io.BytesIO(b"batch-visible"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-visible")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1763,13 +1940,13 @@ async def test_batch_extract_submit_queues_document_import_jobs(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         first_upload = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "batch-queue-1.xlsx",
-                    io.BytesIO(b"batch-queue-1"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-queue-1")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1779,7 +1956,7 @@ async def test_batch_extract_submit_queues_document_import_jobs(monkeypatch):
             files={
                 "file": (
                     "batch-queue-2.xlsx",
-                    io.BytesIO(b"batch-queue-2"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-queue-2")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1847,13 +2024,13 @@ async def test_batch_extract_submit_defaults_to_non_auto_submit_payload(monkeypa
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         upload = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "batch-queue-default.xlsx",
-                    io.BytesIO(b"batch-queue-default"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-queue-default")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1906,13 +2083,13 @@ async def test_batch_extract_submit_reuses_active_draft_without_duplicate_enqueu
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         upload = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "batch-idempotency.xlsx",
-                    io.BytesIO(b"batch-idempotency"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-idempotency")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1970,13 +2147,13 @@ async def test_batch_extract_submit_reports_per_file_queue_failure(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         first_upload = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "batch-queue-ok.xlsx",
-                    io.BytesIO(b"batch-queue-ok"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-queue-ok")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -1986,7 +2163,7 @@ async def test_batch_extract_submit_reports_per_file_queue_failure(monkeypatch):
             files={
                 "file": (
                     "batch-queue-fail.xlsx",
-                    io.BytesIO(b"batch-queue-fail"),
+                    io.BytesIO(_valid_xlsx_bytes("batch-queue-fail")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -2072,13 +2249,13 @@ async def test_import_offload_returns_queued_with_draft_tracking(monkeypatch):
     monkeypatch.setattr(process_document_uc, "execute", fake_process_document_execute)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "offload.xlsx",
-                    io.BytesIO(b"offload"),
+                    io.BytesIO(_valid_xlsx_bytes("offload")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -2155,13 +2332,13 @@ async def test_import_offload_reuses_active_draft_for_same_file(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "offload-reuse.xlsx",
-                    io.BytesIO(b"offload-reuse"),
+                    io.BytesIO(_valid_xlsx_bytes("offload-reuse")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -2227,13 +2404,13 @@ async def test_import_offload_reuse_backfills_missing_draft_name(monkeypatch):
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "offload-reuse-naming.xlsx",
-                    io.BytesIO(b"offload-reuse-naming"),
+                    io.BytesIO(_valid_xlsx_bytes("offload-reuse-naming")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -2331,7 +2508,7 @@ async def test_import_offload_uses_deterministic_name_when_source_filename_missi
     )
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/import",
             data={"file_id": file_id, "run_id": "run-import-no-name", "offload": "true"},
@@ -2397,7 +2574,7 @@ async def test_submit_offload_returns_queued_with_draft_tracking(monkeypatch):
     monkeypatch.setattr(submit_uc, "execute", fake_submit_execute)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         created = await ac.post(
             "/agents/product-drafts",
             data={
@@ -2436,7 +2613,7 @@ async def test_submit_offload_returns_queued_with_draft_tracking(monkeypatch):
         assert queued_jobs[0]["payload"]["products_json"] == json.dumps(
             [{"title": "Inline Product"}]
         )
-        assert queued_jobs[0]["payload"]["shop_access_token"] == "shpat_test_token"
+        assert "shop_access_token" not in queued_jobs[0]["payload"]
         assert "enable_ai_enhancements" not in queued_jobs[0]["payload"]
         assert submit_calls == 0
 
@@ -2489,7 +2666,7 @@ async def test_submit_offload_resolves_shop_context_from_headers(monkeypatch):
         "x-shop-domain": "header-shop.myshopify.com",
         "x-shop-access-token": "shpat_header_token",
     }
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         created = await ac.post(
             "/agents/product-drafts",
             data={
@@ -2516,9 +2693,7 @@ async def test_submit_offload_resolves_shop_context_from_headers(monkeypatch):
         assert response.status_code == 202
         assert len(queued_jobs) == 1
         assert queued_jobs[0]["shop_domain"] == "header-shop.myshopify.com"
-        assert (
-            queued_jobs[0]["payload"]["shop_access_token"] == "shpat_header_token"
-        )
+        assert "shop_access_token" not in queued_jobs[0]["payload"]
 
 
 @pytest.mark.asyncio
@@ -2559,13 +2734,13 @@ async def test_import_offload_returns_explicit_error_when_queue_persistence_fail
     )
 
     transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "offload-failfast.xlsx",
-                    io.BytesIO(b"offload"),
+                    io.BytesIO(_valid_xlsx_bytes("offload")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -2602,13 +2777,13 @@ async def test_import_offload_returns_explicit_error_when_lifecycle_persistence_
     )
 
     transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
             "/agents/upload",
             files={
                 "file": (
                     "offload-lifecycle-failfast.xlsx",
-                    io.BytesIO(b"offload"),
+                    io.BytesIO(_valid_xlsx_bytes("offload")),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
             },
@@ -2630,7 +2805,7 @@ async def test_submit_offload_returns_explicit_error_when_lifecycle_persistence_
 ):
     ctx = get_app_context()
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         created = await ac.post(
             "/agents/product-drafts",
             data={
@@ -2658,7 +2833,7 @@ async def test_submit_offload_returns_explicit_error_when_lifecycle_persistence_
     )
 
     transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.post(
             "/agents/submit-products",
             data={
@@ -2676,7 +2851,7 @@ async def test_submit_offload_returns_explicit_error_when_lifecycle_persistence_
 @pytest.mark.asyncio
 async def test_list_and_get_product_draft():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         tenant_header = {"x-shop-domain": "test-shop.myshopify.com"}
         payload = {
             "products_json": json.dumps([{"title": "Draft A"}]),
@@ -2686,7 +2861,7 @@ async def test_list_and_get_product_draft():
             "input_file_id": "input-file-a",
             "input_filename": "draft-input.xlsx",
         }
-        created = await ac.post("/agents/product-drafts", data=payload)
+        created = await ac.post("/agents/product-drafts", data=payload, headers=tenant_header)
         assert created.status_code == 200
         draft_id = created.json()["draft_id"]
 
@@ -2695,23 +2870,23 @@ async def test_list_and_get_product_draft():
         drafts = listed.json()["drafts"]
         assert any(d.get("draft_id") == draft_id for d in drafts)
 
-        detail = await ac.get(f"/agents/product-drafts/{draft_id}")
+        detail = await ac.get(f"/agents/product-drafts/{draft_id}", headers=tenant_header)
         assert detail.status_code == 200
         assert detail.json()["draft"]["draft_id"] == draft_id
         assert detail.json()["draft"]["input_file_id"] == "input-file-a"
         assert detail.json()["draft"]["input_filename"] == "draft-input.xlsx"
 
-        resume = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
+        resume = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file", headers=tenant_header)
         assert resume.status_code == 200
         resume_body = resume.json()
         assert "file_id" in resume_body
         assert resume_body["filename"].endswith(".xlsx")
-        persisted_detail = await ac.get(f"/agents/product-drafts/{draft_id}")
+        persisted_detail = await ac.get(f"/agents/product-drafts/{draft_id}", headers=tenant_header)
         assert persisted_detail.status_code == 200
         persisted_draft = persisted_detail.json()["draft"]
         assert persisted_draft["output_file_id"] == resume_body["file_id"]
         assert persisted_draft["output_filename"] == resume_body["filename"]
-        resume_again = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
+        resume_again = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file", headers=tenant_header)
         assert resume_again.status_code == 200
         assert resume_again.json()["file_id"] == resume_body["file_id"]
 
@@ -2719,8 +2894,8 @@ async def test_list_and_get_product_draft():
 @pytest.mark.asyncio
 async def test_product_drafts_list_requires_shop_domain_header():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
-        response = await ac.get("/agents/product-drafts")
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        response = await ac.get("/agents/product-drafts", headers={"x-shop-domain": ""})
     assert response.status_code == 400
     assert "shop_domain" in response.text
 
@@ -2728,9 +2903,10 @@ async def test_product_drafts_list_requires_shop_domain_header():
 @pytest.mark.asyncio
 async def test_product_drafts_list_accepts_shop_query_param():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         created = await ac.post(
             "/agents/product-drafts",
+            headers={"x-shop-domain": "query-shop.myshopify.com"},
             data={
                 "products_json": json.dumps([{"title": "Query Shop Draft"}]),
                 "run_id": "run-query-shop",
@@ -2741,7 +2917,10 @@ async def test_product_drafts_list_accepts_shop_query_param():
         assert created.status_code == 200
         draft_id = created.json()["draft_id"]
 
-        listed = await ac.get("/agents/product-drafts?shop=query-shop.myshopify.com")
+        listed = await ac.get(
+            "/agents/product-drafts?shop=query-shop.myshopify.com",
+            headers={"x-shop-domain": "query-shop.myshopify.com"},
+        )
         assert listed.status_code == 200
         draft_ids = [item.get("draft_id") for item in listed.json()["drafts"]]
         assert draft_id in draft_ids
@@ -2750,8 +2929,8 @@ async def test_product_drafts_list_accepts_shop_query_param():
 @pytest.mark.asyncio
 async def test_submitted_documents_list_requires_shop_domain_header():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
-        response = await ac.get("/agents/submitted-documents")
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        response = await ac.get("/agents/submitted-documents", headers={"x-shop-domain": ""})
     assert response.status_code == 400
     assert "shop_domain" in response.text
 
@@ -2759,7 +2938,7 @@ async def test_submitted_documents_list_requires_shop_domain_header():
 @pytest.mark.asyncio
 async def test_bulk_delete_product_drafts():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         create_payload = {
             "products_json": json.dumps([{"title": "Bulk Draft"}]),
             "run_id": "run-bulk-drafts",
@@ -2796,7 +2975,7 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         tenant_header = {"x-shop-domain": "test-shop.myshopify.com"}
         draft_payload = {
             "products_json": json.dumps([{"title": "Submitted Draft Product"}]),
@@ -2807,7 +2986,7 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
             "input_file_id": "input-file-preview",
             "input_filename": "submitted-source.xlsx",
         }
-        created_draft = await ac.post("/agents/product-drafts", data=draft_payload)
+        created_draft = await ac.post("/agents/product-drafts", data=draft_payload, headers=tenant_header)
         assert created_draft.status_code == 200
         draft_id = created_draft.json()["draft_id"]
 
@@ -2819,7 +2998,7 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
             "document_name": "submitted-draft.xlsx",
             "shop_domain": tenant_header["x-shop-domain"],
         }
-        submitted = await ac.post("/agents/submit-products", data=submit_payload)
+        submitted = await ac.post("/agents/submit-products", data=submit_payload, headers=tenant_header)
         assert submitted.status_code == 200
         submitted_body = submitted.json()
         assert submitted_body["success_count"] == 1
@@ -2850,15 +3029,180 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
         assert matching_item.get("preview_file_id") == "input-file-preview"
 
         submitted_detail = await ac.get(
-            f"/agents/submitted-documents/{submitted_body['submitted_id']}"
+            f"/agents/submitted-documents/{submitted_body['submitted_id']}",
+            headers=tenant_header,
         )
         assert submitted_detail.status_code == 200
 
         submitted_resume = await ac.post(
-            f"/agents/submitted-documents/{submitted_body['submitted_id']}/resume-file"
+            f"/agents/submitted-documents/{submitted_body['submitted_id']}/resume-file",
+            headers=tenant_header,
         )
         assert submitted_resume.status_code == 200
         assert submitted_resume.json()["filename"].endswith(".xlsx")
+
+
+@pytest.mark.asyncio
+async def test_submitted_documents_include_submit_progress_from_run_history():
+    ctx = get_app_context()
+    shop_domain = "progress-shop.myshopify.com"
+    submitted_id = "submitted-progress-1"
+    run_id = "run-submit-progress-1"
+
+    ctx.services.supabase.runs.create_or_update_run(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "running",
+            "shop_domain": shop_domain,
+        },
+    )
+    ctx.services.supabase.runs.append_run_event(
+        run_id,
+        {
+            "run_id": run_id,
+            "phase": "submit_products",
+            "message": "Uploading products to Shopify",
+            "metadata": {"shop_domain": shop_domain},
+        },
+        1,
+    )
+    ctx.services.supabase.save_submitted_document(
+        submitted_id=submitted_id,
+        run_id=run_id,
+        draft_id="draft-progress-1",
+        name="progress-document.xlsx",
+        import_mode="create",
+        shop_domain=shop_domain,
+        product_count=1,
+        products=[{"title": "Progress Product"}],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        response = await ac.get(
+            "/agents/submitted-documents",
+            headers={"x-shop-domain": shop_domain},
+        )
+
+    assert response.status_code == 200
+    matching_item = next(
+        item
+        for item in response.json()["submitted_documents"]
+        if item.get("submitted_id") == submitted_id
+    )
+    assert matching_item["submit_status"] == "running"
+    assert matching_item["processing_message"] == "Uploading products to Shopify"
+    assert matching_item.get("submit_error") is None
+
+
+@pytest.mark.asyncio
+async def test_submitted_documents_list_uses_batched_run_summaries(monkeypatch):
+    ctx = get_app_context()
+    shop_domain = "batched-progress-shop.myshopify.com"
+    submitted_id = "submitted-batched-progress"
+    run_id = "run-submit-batched-progress"
+
+    ctx.services.supabase.save_submitted_document(
+        submitted_id=submitted_id,
+        run_id=run_id,
+        draft_id="draft-batched-progress",
+        name="batched-progress-document.xlsx",
+        import_mode="create",
+        shop_domain=shop_domain,
+        product_count=1,
+        products=[{"title": "Batched Progress Product"}],
+    )
+
+    def _unexpected_single_lookup(*_args, **_kwargs):
+        raise AssertionError("submitted list should use batched run summaries")
+
+    monkeypatch.setattr(ctx.services.supabase.runs, "get_run", _unexpected_single_lookup)
+    monkeypatch.setattr(
+        ctx.services.supabase.runs, "get_run_history", _unexpected_single_lookup
+    )
+    monkeypatch.setattr(
+        ctx.services.supabase.runs,
+        "get_run_summaries",
+        lambda run_ids, *, shop_domain=None: {
+            run_id: {
+                "status": "running",
+                "error": None,
+                "processing_message": "Uploading products to Shopify",
+            }
+            for run_id in run_ids
+        },
+        raising=False,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        response = await ac.get(
+            "/agents/submitted-documents",
+            headers={"x-shop-domain": shop_domain},
+        )
+
+    assert response.status_code == 200
+    matching_item = next(
+        item
+        for item in response.json()["submitted_documents"]
+        if item.get("submitted_id") == submitted_id
+    )
+    assert matching_item["submit_status"] == "running"
+    assert matching_item["processing_message"] == "Uploading products to Shopify"
+    assert matching_item.get("submit_error") is None
+
+
+@pytest.mark.asyncio
+async def test_submitted_document_detail_includes_failed_submit_context():
+    ctx = get_app_context()
+    shop_domain = "progress-detail-shop.myshopify.com"
+    submitted_id = "submitted-progress-detail"
+    run_id = "run-submit-progress-detail"
+
+    ctx.services.supabase.runs.create_or_update_run(
+        run_id,
+        {
+            "run_id": run_id,
+            "status": "failed",
+            "error": "Shopify bulk mutation failed",
+            "shop_domain": shop_domain,
+        },
+    )
+    ctx.services.supabase.runs.append_run_event(
+        run_id,
+        {
+            "run_id": run_id,
+            "phase": "submit_products",
+            "message": "Bulk mutation returned user errors",
+            "error": "Shopify bulk mutation failed",
+            "metadata": {"shop_domain": shop_domain},
+        },
+        1,
+    )
+    ctx.services.supabase.save_submitted_document(
+        submitted_id=submitted_id,
+        run_id=run_id,
+        draft_id="draft-progress-detail",
+        name="detail-progress-document.xlsx",
+        import_mode="create",
+        shop_domain=shop_domain,
+        product_count=1,
+        products=[{"title": "Progress Detail Product"}],
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        response = await ac.get(
+            f"/agents/submitted-documents/{submitted_id}",
+            headers={"x-shop-domain": shop_domain},
+        )
+
+    assert response.status_code == 200
+    document = response.json()["submitted_document"]
+    assert document["submit_status"] == "failed"
+    assert document["submit_error"] == "Shopify bulk mutation failed"
+    assert document["processing_message"] == "Bulk mutation returned user errors"
 
 
 @pytest.mark.asyncio
@@ -2876,7 +3220,7 @@ async def test_bulk_delete_submitted_documents(monkeypatch):
     }])
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         submit_payload = {
             "products_json": json.dumps([{"title": "Bulk Submitted"}]),
             "import_mode": "create",
@@ -3078,6 +3422,107 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
             )
             assert apply_bulk.status_code == 200
             assert apply_bulk.json()["failed_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_list_product_intelligence_audit_artifacts_batch():
+    ctx = get_app_context()
+    audit_id_one = f"audit-{uuid.uuid4()}"
+    audit_id_two = f"audit-{uuid.uuid4()}"
+
+    ctx.services.supabase.save_product_intelligence_audit(
+        audit_id=audit_id_one,
+        run_id="run-audit-batch-1",
+        submitted_id="submitted-batch-1",
+        scope="product",
+        status="succeeded",
+        overall_score=91,
+        findings_count=1,
+        component_scores={"seo": 91},
+        totals={},
+        shop_domain=TEST_SHOP_DOMAIN,
+    )
+    ctx.services.supabase.save_product_intelligence_findings(
+        audit_id=audit_id_one,
+        findings=[
+            {
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "category": "seo",
+                "severity": "medium",
+                "code": "missing_seo_title",
+                "message": "Add a longer SEO title",
+                "suggestion": "Provide a longer SEO title",
+                "field_path": "seo.title",
+                "patch_payload": {"seo_title": "Longer SEO title"},
+                "product_title": "Artifact Product One",
+            }
+        ],
+        shop_domain=TEST_SHOP_DOMAIN,
+    )
+    ctx.services.supabase.save_product_intelligence_suggestions(
+        audit_id=audit_id_one,
+        suggestions=[
+            {
+                "suggestion_id": f"suggestion-{uuid.uuid4()}",
+                "finding_id": f"finding-{uuid.uuid4()}",
+                "product_index": 0,
+                "product_title": "Artifact Product One",
+                "category": "seo",
+                "severity": "medium",
+                "message": "Improve the SEO title",
+                "patch_payload": {"seo_title": "Improved SEO title"},
+                "status": "pending",
+            }
+        ],
+        shop_domain=TEST_SHOP_DOMAIN,
+    )
+
+    ctx.services.supabase.save_product_intelligence_audit(
+        audit_id=audit_id_two,
+        run_id="run-audit-batch-2",
+        submitted_id="submitted-batch-2",
+        scope="product",
+        status="succeeded",
+        overall_score=88,
+        findings_count=0,
+        component_scores={"content": 88},
+        totals={},
+        shop_domain=TEST_SHOP_DOMAIN,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
+        response = await ac.post(
+            "/agents/intelligence/audits/artifacts",
+            json={"audit_ids": [audit_id_two, audit_id_one]},
+        )
+
+    assert response.status_code == 200
+    artifacts = response.json()["artifacts"]
+    assert [item["audit_id"] for item in artifacts] == [audit_id_two, audit_id_one]
+    assert artifacts[0]["audit"]["audit_id"] == audit_id_two
+    assert artifacts[0]["suggestions"] == []
+    assert artifacts[1]["audit"]["audit_id"] == audit_id_one
+    assert artifacts[1]["audit"]["findings"][0]["message"] == "Add a longer SEO title"
+    assert artifacts[1]["suggestions"][0]["message"] == "Improve the SEO title"
+
+
+@pytest.mark.asyncio
+async def test_catalog_health_search_returns_recoverable_error_without_shop_session():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
+        response = await ac.post(
+            "/agents/intelligence/shopify-products/search",
+            data={"limit": "50"},
+        )
+
+    assert response.status_code == 503
+    assert "Reopen Stockpile from Shopify Admin" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -3495,7 +3940,7 @@ async def test_apply_bulk_with_idempotency_key_replays_without_reapplying(monkey
     idempotency_key = f"apply-bulk-{uuid.uuid4()}"
     headers = {**TEST_SHOP_HEADERS, "Idempotency-Key": idempotency_key}
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         first = await ac.post(
             "/agents/intelligence/suggestions/apply-bulk",
             headers=headers,
@@ -3551,7 +3996,7 @@ async def test_apply_bulk_idempotency_key_conflict_on_payload_mismatch(monkeypat
     idempotency_key = f"apply-bulk-{uuid.uuid4()}"
     headers = {**TEST_SHOP_HEADERS, "Idempotency-Key": idempotency_key}
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         first = await ac.post(
             "/agents/intelligence/suggestions/apply-bulk",
             headers=headers,

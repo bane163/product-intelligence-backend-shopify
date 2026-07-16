@@ -6,17 +6,13 @@ from fastapi.responses import Response
 from typing import Any
 
 from app_context import AppContext, get_ctx
+from .wopi_tokens import validate_wopi_token
 
 router = APIRouter()
 
 
 def _can_write(request: Request) -> bool:
-    if request.query_params.get("access_token") == "edit":
-        return True
-    auth = request.headers.get("Authorization", "")
-    if auth.lower().startswith("bearer ") and auth.split(" ", 1)[1].strip() == "edit":
-        return True
-    return False
+    return getattr(request.state, "wopi_permission", None) == "edit"
 
 
 @router.get("/wopi/files/{file_id}", summary="WOPI CheckFileInfo")
@@ -27,13 +23,15 @@ async def wopi_check_file_info(
 
     Returns metadata about the file for Collabora Online.
     """
+    token = validate_wopi_token(request, file_id)
+    request.state.wopi_permission = token["permission"]
     from application.use_cases.files.get_file import execute as get_file_execute
     file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
 
     can_write = _can_write(request)
-    return {
+    payload = {
         "BaseFileName": file_data["name"],
         "Size": len(file_data["content"]),
         "OwnerId": "shopify_user",
@@ -45,18 +43,41 @@ async def wopi_check_file_info(
         "UserCanWrite": can_write,
         "UserCanNotWriteRelative": not can_write,
     }
+    post_message_origin = token.get("post_message_origin")
+    if isinstance(post_message_origin, str) and post_message_origin:
+        payload["PostMessageOrigin"] = post_message_origin
+    from services.source_link_trace import record as record_source_link_trace
+    record_source_link_trace(
+        component="wopi",
+        stage="check_file_info",
+        status="ok",
+        attempt_id=token.get("trace_attempt_id"),
+        source_file_id=file_id,
+        details={"origin": post_message_origin or "missing"},
+    )
+    return payload
 
 
 @router.get("/wopi/files/{file_id}/contents", summary="WOPI GetFile")
-async def wopi_get_file(file_id: str, ctx: AppContext = Depends(get_ctx)) -> Response:
+async def wopi_get_file(file_id: str, request: Request, ctx: AppContext = Depends(get_ctx)) -> Response:
     """WOPI GetFile endpoint.
 
     Returns the file contents for Collabora Online to display.
     """
+    token = validate_wopi_token(request, file_id)
     from application.use_cases.files.get_file import execute as get_file_execute
     file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
+
+    from services.source_link_trace import record as record_source_link_trace
+    record_source_link_trace(
+        component="wopi",
+        stage="get_file",
+        status="ok",
+        attempt_id=token.get("trace_attempt_id"),
+        source_file_id=file_id,
+    )
 
     return Response(
         content=file_data["content"],
@@ -72,6 +93,8 @@ async def wopi_put_file(file_id: str, request: Request, ctx: AppContext = Depend
     Persists file content updates from Collabora for editable sessions.
     """
     from application.use_cases.files.get_file import execute as get_file_execute
+    token = validate_wopi_token(request, file_id)
+    request.state.wopi_permission = token["permission"]
     file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")

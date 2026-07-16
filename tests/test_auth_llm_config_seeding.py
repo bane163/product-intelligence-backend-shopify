@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 import respx
@@ -45,8 +46,8 @@ def test_seed_default_llm_configs_uses_env_fallback_when_vault_secret_missing(
     monkeypatch.setenv("OLLAMA_CLOUD_URL", "https://ollama.example/v1")
     monkeypatch.setattr(auth, "_resolve_vault_secret", lambda _name: None)
 
-    auth._seed_default_llm_configs_on_install("Store.MyShopify.com")
-    auth._seed_default_llm_configs_on_install("Store.MyShopify.com")
+    auth._seed_default_llm_configs_on_install("Store.MyShopify.com", include_ollama=True)
+    auth._seed_default_llm_configs_on_install("Store.MyShopify.com", include_ollama=True)
 
     created = llm_namespace.created
     assert len(created) == 2
@@ -96,43 +97,19 @@ def test_get_active_llm_model_config_resolves_env_reference(
 
 
 @pytest.mark.asyncio
-async def test_auth_callback_triggers_llm_config_seed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    shop = "seed-shop.myshopify.com"
-    state = "state-seed-llm"
-    auth._state_store[state] = shop
+async def test_legacy_auth_callback_is_not_mounted() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/shopify/auth/callback")
+    assert response.status_code == 404
 
-    seeded: dict[str, str] = {}
-    monkeypatch.setattr(auth, "_get_client_credentials", lambda: ("id", "secret"))
-    monkeypatch.setattr(auth, "_verify_hmac", lambda params, client_secret: True)
-    monkeypatch.setattr(auth.token_store, "save_token", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        auth,
-        "_seed_default_llm_configs_on_install",
-        lambda shop_domain: seeded.setdefault("shop", shop_domain),
-    )
 
-    with respx.mock(base_url=f"https://{shop}") as mock:
-        mock.post("/admin/oauth/access_token").respond(
-            status_code=200, json={"access_token": "token"}
-        )
-        transport = ASGITransport(app=app)
-        async with AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
-            response = await client.get(
-                "/shopify/auth/callback",
-                params={
-                    "shop": shop,
-                    "code": "auth-code",
-                    "state": state,
-                    "hmac": "ok",
-                },
-            )
-
-    assert response.status_code == 200
-    assert seeded["shop"] == shop
+@pytest.mark.asyncio
+async def test_legacy_auth_install_is_not_mounted() -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/shopify/auth/install")
+    assert response.status_code == 404
 
 
 def test_seed_default_llm_configs_can_use_vault_key_with_shop_fallback(

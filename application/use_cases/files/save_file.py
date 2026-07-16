@@ -9,6 +9,7 @@ def execute(
     content: bytes,
     content_type: str | None = None,
     file_origin: str | None = None,
+    shop_domain: str | None = None,
 ) -> None:
     return supabase.file.save_file(
         file_id,
@@ -16,4 +17,5 @@ def execute(
         content=content,
         content_type=content_type,
         file_origin=file_origin,
+        shop_domain=shop_domain,
     )

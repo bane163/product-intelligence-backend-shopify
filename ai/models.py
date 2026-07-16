@@ -72,6 +72,8 @@ class ProductMetafield(BaseModel):
 
 
 class ProductSourceRef(BaseModel):
+    source_file_id: Optional[str] = None
+    anchor_id: Optional[str] = None
     field: Optional[str] = None
     document_kind: Optional[str] = None
     sheet: Optional[str] = None

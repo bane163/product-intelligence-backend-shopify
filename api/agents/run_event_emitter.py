@@ -16,7 +16,8 @@ class RunEventEmitter:
         self.tracing = tracing
         self.supabase = supabase
         self.run_id = run_id
-        self.event_seq = initial_seq
+        latest_seq = getattr(supabase.runs, "get_latest_run_event_seq", lambda _run_id: 0)
+        self.event_seq = initial_seq or latest_seq(run_id)
         self.message_seq = 0
         self.usage_totals = {
             "prompt_tokens": 0,

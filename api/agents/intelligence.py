@@ -185,7 +185,9 @@ async def run_product_intelligence_audit(
     query = payload.get("query")
     shop_domain = require_shop_domain(request, payload.get("shop_domain"))
     shop_access_token = resolve_shop_access_token(
-        request, payload.get("shop_access_token")
+        request,
+        payload.get("shop_access_token"),
+        shop_domain=shop_domain,
     )
     query_text = (
         str(query).strip() if isinstance(query, str) and query.strip() else None
@@ -348,7 +350,7 @@ async def search_shopify_products_for_audit(
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
         shop_domain=tenant,
-        shop_access_token=resolve_shop_access_token(request),
+        shop_access_token=resolve_shop_access_token(request, shop_domain=tenant),
     )
     products = await shopify_client.list_products_for_audit(
         query=query.strip() if query and query.strip() else None,
@@ -384,8 +386,18 @@ async def search_shopify_products_for_audit_post(
     query = data.get("query")
     shop_domain = require_shop_domain(request, data.get("shop_domain"))
     shop_access_token = resolve_shop_access_token(
-        request, data.get("shop_access_token")
+        request,
+        data.get("shop_access_token"),
+        shop_domain=shop_domain,
     )
+    if not shop_access_token:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Catalog health cannot connect to Shopify because the stored shop session "
+                "is unavailable. Reopen Stockpile from Shopify Admin to refresh the session."
+            ),
+        )
     raw_limit = data.get("limit")
     try:
         safe_limit = int(raw_limit) if raw_limit is not None else 25
@@ -428,6 +440,84 @@ async def list_product_intelligence_audits(
     return {"audits": audits}
 
 
+@router.get(
+    "/intelligence/monitoring-summary",
+    summary="Summarize recent catalog-health drift",
+)
+async def get_product_intelligence_monitoring_summary(
+    request: Request,
+    window_size: int = 20,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.intelligence_list_audits import (
+        execute as list_audits_execute,
+    )
+
+    tenant = require_shop_domain(request, shop_domain)
+    safe_window = max(2, min(window_size, 100))
+    audits = list_audits_execute(
+        supabase=ctx.supabase,
+        shop_domain=tenant,
+        limit=safe_window,
+        offset=0,
+    )
+    current = audits[0] if audits else {}
+    previous = audits[1] if len(audits) > 1 else {}
+    current_score = current.get("overall_score") if current else None
+    previous_score = previous.get("overall_score") if previous else None
+    current_findings = current.get("findings_count") if current else None
+    previous_findings = previous.get("findings_count") if previous else None
+    score_delta = (
+        current_score - previous_score
+        if isinstance(current_score, (int, float))
+        and isinstance(previous_score, (int, float))
+        else 0
+    )
+    findings_delta = (
+        current_findings - previous_findings
+        if isinstance(current_findings, (int, float))
+        and isinstance(previous_findings, (int, float))
+        else 0
+    )
+    magnitude = max(abs(score_delta), abs(findings_delta))
+    severity = "high" if magnitude >= 15 else "medium" if magnitude >= 8 else "low" if magnitude >= 4 else "none"
+    trend = "up" if score_delta > 2 else "down" if score_delta < -2 else "flat"
+    detected_at = current.get("created_at") if current else None
+    alerts: list[dict[str, Any]] = []
+    if severity != "none":
+        metric = "score" if abs(score_delta) >= abs(findings_delta) else "findings"
+        delta = score_delta if metric == "score" else findings_delta
+        label = "Health score" if metric == "score" else "Findings count"
+        direction = "down" if delta < 0 else "up"
+        alerts.append(
+            {
+                "alert_id": f"{metric}_{detected_at or 'latest'}",
+                "metric": metric,
+                "severity": severity,
+                "title": f"{label} drifted {direction}",
+                "message": f"{label} changed by {abs(delta)} versus the previous window.",
+                "delta": delta,
+                "detected_at": detected_at,
+            }
+        )
+    return {
+        "summary": {
+            "current_score": current_score,
+            "previous_score": previous_score,
+            "score_delta": score_delta,
+            "current_findings": current_findings,
+            "previous_findings": previous_findings,
+            "findings_delta": findings_delta,
+            "trend_direction": trend,
+            "drift_severity": severity,
+            "active_alert_count": len(alerts),
+            "last_detected_at": detected_at if alerts else None,
+        },
+        "alerts": alerts,
+    }
+
+
 @router.get("/intelligence/audits/{audit_id}", summary="Get intelligence audit")
 async def get_product_intelligence_audit(
     request: Request,
@@ -448,6 +538,77 @@ async def get_product_intelligence_audit(
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     return {"audit": audit}
+
+
+@router.post(
+    "/intelligence/audits/artifacts",
+    summary="List batched intelligence audit artifacts",
+)
+async def list_product_intelligence_audit_artifacts(
+    request: Request,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, list[dict[str, Any]]]:
+    payload: dict[str, Any] = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            raw_json = await request.json()
+            if isinstance(raw_json, dict):
+                payload.update(raw_json)
+        except Exception:
+            payload = {}
+    elif (
+        "multipart/form-data" in content_type
+        or "application/x-www-form-urlencoded" in content_type
+    ):
+        form = await request.form()
+        for key, value in form.items():
+            payload[key] = value
+
+    raw_audit_ids: Any = payload.get("audit_ids")
+    raw_audit_ids_json = payload.get("audit_ids_json")
+    if (
+        not isinstance(raw_audit_ids, list)
+        and isinstance(raw_audit_ids_json, str)
+        and raw_audit_ids_json.strip()
+    ):
+        try:
+            parsed_audit_ids = json.loads(raw_audit_ids_json)
+            if isinstance(parsed_audit_ids, list):
+                raw_audit_ids = parsed_audit_ids
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Invalid audit_ids_json: {exc}"
+            )
+    if not isinstance(raw_audit_ids, list):
+        raise HTTPException(status_code=400, detail="audit_ids must be a list")
+
+    audit_ids = [str(item).strip() for item in raw_audit_ids if str(item).strip()]
+    if not audit_ids:
+        raise HTTPException(status_code=400, detail="No audit_ids provided")
+
+    tenant = require_shop_domain(request, payload.get("shop_domain") or shop_domain)
+    artifacts = ctx.supabase.intelligence.list_product_intelligence_audit_artifacts(
+        audit_ids=audit_ids,
+        shop_domain=tenant,
+    )
+    return {
+        "artifacts": [
+            {
+                "audit_id": item.get("audit_id"),
+                "audit": item.get("audit"),
+                "suggestions": [
+                    _with_reversibility_flags(suggestion)
+                    if isinstance(suggestion, dict)
+                    else suggestion
+                    for suggestion in item.get("suggestions", [])
+                ],
+            }
+            for item in artifacts
+            if isinstance(item, dict)
+        ]
+    }
 
 
 @router.get(
@@ -526,7 +687,9 @@ async def apply_product_intelligence_suggestion(
         patch_payload = parsed_patch_payload
     shop_domain = require_shop_domain(request, data.get("shop_domain"))
     shop_access_token = resolve_shop_access_token(
-        request, data.get("shop_access_token")
+        request,
+        data.get("shop_access_token"),
+        shop_domain=shop_domain,
     )
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
@@ -585,7 +748,9 @@ async def revert_product_intelligence_suggestion(
             data[key] = value
     shop_domain = require_shop_domain(request, data.get("shop_domain"))
     shop_access_token = resolve_shop_access_token(
-        request, data.get("shop_access_token")
+        request,
+        data.get("shop_access_token"),
+        shop_domain=shop_domain,
     )
     shopify_client = _resolve_shopify_client(
         ctx=ctx,
@@ -793,7 +958,9 @@ async def apply_product_intelligence_suggestions_bulk(
                     "idempotency_replayed": True,
                 }
     shop_access_token = resolve_shop_access_token(
-        request, payload.get("shop_access_token")
+        request,
+        payload.get("shop_access_token"),
+        shop_domain=shop_domain,
     )
     shopify_client = _resolve_shopify_client(
         ctx=ctx,

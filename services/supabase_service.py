@@ -28,6 +28,8 @@ class SupabaseService(
         )
         self.file_storage: dict[str, dict[str, Any]] = {}
         self.offload_jobs: dict[str, dict[str, Any]] = {}
+        self.llm_runs: dict[str, dict[str, Any]] = {}
+        self.llm_run_events: dict[str, list[dict[str, Any]]] = {}
         self.product_drafts: dict[str, dict[str, Any]] = {}
         self.submitted_documents: dict[str, dict[str, Any]] = {}
         self.product_intelligence_audits: dict[str, dict[str, Any]] = {}

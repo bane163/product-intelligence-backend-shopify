@@ -44,6 +44,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         content: bytes,
         content_type: str | None = None,
         file_origin: str | None = None,
+        shop_domain: str | None = None,
     ) -> None:
         return self._service.save_file(
             file_id,
@@ -51,16 +52,25 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             content,
             content_type,
             file_origin=file_origin,
+            shop_domain=shop_domain,
         )
 
     def save_files(self, files: list[dict[str, Any]]) -> None:
         return self._service.save_files(files)
 
-    def list_files(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
-        return self._service.list_files(limit, offset)
+    def list_files(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._service.list_files(limit, offset, shop_domain=shop_domain)
 
     def get_file(self, file_id: str) -> dict[str, Any] | None:
         return self._service.get_file(file_id)
+
+    def set_file_shop_domain(self, file_id: str, shop_domain: str) -> None:
+        self._service.set_file_shop_domain(file_id, shop_domain)
 
     def delete_file(self, file_id: str) -> bool:
         return self._service.delete_file(file_id)
@@ -76,6 +86,9 @@ class SupabaseAdapter(SupabaseNamespacedPort):
 
     def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None:
         return self._service.append_run_event(run_id, event, seq)
+
+    def get_latest_run_event_seq(self, run_id: str) -> int:
+        return self._service.get_latest_run_event_seq(run_id)
 
     def append_run_message(
         self,
@@ -119,6 +132,11 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None:
         return self._service.get_run(run_id, shop_domain=shop_domain)
 
+    def get_run_summaries(
+        self, run_ids: list[str], *, shop_domain: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        return self._service.get_run_summaries(run_ids, shop_domain=shop_domain)
+
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool:
         return self._service.delete_run(run_id, shop_domain=shop_domain)
 
@@ -153,6 +171,19 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         self, job_id: str, fields: dict[str, Any]
     ) -> dict[str, Any] | None:
         return self._service.update_offload_job(job_id, fields)
+
+    def cancel_run_cascade(self, run_id: str, shop_domain: str | None):
+        return self._service.cancel_run_cascade(run_id, shop_domain)
+
+    def transition_offload_workflow(
+        self, job_id: str, target_status: str, *, error: str | None = None,
+        failure_code: str | None = None, result: dict[str, Any] | None = None,
+        available_at: str | None = None,
+    ):
+        return self._service.transition_offload_workflow(
+            job_id, target_status, error=error, failure_code=failure_code,
+            result=result, available_at=available_at,
+        )
 
     def get_offload_job(self, job_id: str) -> dict[str, Any] | None:
         return self._service.get_offload_job(job_id)
@@ -357,6 +388,17 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     ) -> dict[str, Any] | None:
         return self._service.get_product_intelligence_audit(
             audit_id,
+            shop_domain=shop_domain,
+        )
+
+    def list_product_intelligence_audit_artifacts(
+        self,
+        *,
+        audit_ids: list[str],
+        shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._service.list_product_intelligence_audit_artifacts(
+            audit_ids=audit_ids,
             shop_domain=shop_domain,
         )
 

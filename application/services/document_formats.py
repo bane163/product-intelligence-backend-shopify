@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import zipfile
+from io import BytesIO
 from dataclasses import dataclass
 from typing import Literal
 
@@ -102,3 +104,28 @@ def classify_document(
 
 def supported_extensions_display() -> str:
     return ", ".join(SUPPORTED_EXTENSIONS)
+
+
+def validate_document_content(
+    document_format: DocumentFormat,
+    *,
+    file_bytes: bytes,
+) -> None:
+    """Reject mislabeled or corrupt OOXML documents before persistence/queueing."""
+    if document_format.kind not in {"spreadsheet", "docx", "pptx"}:
+        return
+
+    try:
+        with zipfile.ZipFile(BytesIO(file_bytes)) as archive:
+            names = set(archive.namelist())
+            archive.testzip()
+    except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+        raise ValueError("File content is invalid or corrupt") from exc
+
+    required_member = {
+        "spreadsheet": "xl/workbook.xml",
+        "docx": "word/document.xml",
+        "pptx": "ppt/presentation.xml",
+    }[document_format.kind]
+    if "[Content_Types].xml" not in names or required_member not in names:
+        raise ValueError("File content does not match its declared document type")

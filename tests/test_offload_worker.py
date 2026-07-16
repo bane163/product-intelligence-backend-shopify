@@ -8,6 +8,14 @@ from app_context import AppContext, ServiceRegistry
 from infrastructure.adapters.supabase_adapter import SupabaseAdapter
 from services.supabase_service import SupabaseService
 from services.tracing_service import TracingService
+from application.services.offload_worker import _is_retryable_job_failure
+
+
+def test_corrupt_document_failures_are_not_retryable():
+    assert not _is_retryable_job_failure(
+        job_type="document_import",
+        error_message="Invalid file content: File is not a zip file",
+    )
 
 
 class _DummyLLM:

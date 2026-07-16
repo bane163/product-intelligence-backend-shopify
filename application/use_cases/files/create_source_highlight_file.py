@@ -398,6 +398,8 @@ async def execute(
             content_type=_PDF_CONTENT_TYPE,
             file_origin="source_highlight",
         )
+        if not supabase.file.get_file(output_file_id):
+            raise RuntimeError("Highlighted source artifact failed storage verification")
         return {
             "file_id": output_file_id,
             "filename": output_filename,
@@ -507,11 +509,14 @@ async def execute(
         target_sheet = selected_target["sheet"]
         normalized_target_range = selected_target["cell_range"]
         worksheet = workbook[target_sheet]
+        active_sheet_ranges = [
+            item["cell_range"] for item in targets if item["sheet"] == target_sheet
+        ]
         min_col, min_row, _, _ = range_boundaries(normalized_target_range)
         top_left = f"{get_column_letter(min_col)}{min_row}"
         if worksheet.sheet_view.selection:
             worksheet.sheet_view.selection[0].activeCell = top_left
-            worksheet.sheet_view.selection[0].sqref = normalized_target_range
+            worksheet.sheet_view.selection[0].sqref = " ".join(active_sheet_ranges)
         workbook.active = workbook.sheetnames.index(target_sheet)
 
         output = io.BytesIO()
@@ -532,10 +537,13 @@ async def execute(
         content_type=output_content_type,
         file_origin="source_highlight",
     )
+    if not supabase.file.get_file(output_file_id):
+        raise RuntimeError("Highlighted source artifact failed storage verification")
 
     return {
         "file_id": output_file_id,
         "filename": output_filename,
         "sheet": target_sheet,
         "cell_range": normalized_target_range,
+        "selection_ranges": active_sheet_ranges,
     }

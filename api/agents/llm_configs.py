@@ -14,7 +14,7 @@ router = APIRouter()
 class LLMConfigCreatePayload(BaseModel):
     shop_domain: str = Field(min_length=3)
     name: str = Field(min_length=1)
-    provider: str = "ollama/openai-compat"
+    provider: str = "openai"
     base_url: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
     api_key: str = Field(min_length=1)
@@ -47,7 +47,7 @@ class SeedDefaultsPayload(BaseModel):
     name: str = "OpenAI"
     provider: str = "openai"
     base_url: str = "https://api.openai.com/v1"
-    model_id: str = "gpt-5-mini-2025-08-07"
+    model_id: str = "gpt-5.4-mini"
     version: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None

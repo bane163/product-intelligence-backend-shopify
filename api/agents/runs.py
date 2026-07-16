@@ -101,6 +101,32 @@ async def stream_events(
     )
 
 
+@router.get(
+    "/runs/{run_id}/event-snapshot",
+    summary="Get persisted incremental workflow events",
+)
+async def get_event_snapshot(
+    run_id: str,
+    request: Request,
+    after_seq: int = 0,
+    limit: int = 200,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.runs.get_event_snapshot import execute
+
+    tenant = require_shop_domain(request, shop_domain)
+    snapshot = execute(
+        supabase=ctx.supabase,
+        run_id=run_id,
+        shop_domain=tenant,
+        after_seq=max(0, after_seq),
+        limit=limit,
+    )
+    if snapshot["status"] == "unavailable":
+        raise HTTPException(status_code=404, detail="Run not found")
+    return snapshot
+
 @router.get("/runs", summary="List persisted LLM runs")
 async def list_llm_runs(
     request: Request,
@@ -272,6 +298,11 @@ async def control_llm_run(
     run = get_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
+    if str(run.get("source") or "").strip().lower() == "file_upload":
+        raise HTTPException(
+            status_code=409,
+            detail="Upload activities cannot be cancelled, retried, or resumed",
+        )
 
     now = _utc_now_iso()
     current_status = _normalize_run_status(run.get("status"), "running")
@@ -284,24 +315,22 @@ async def control_llm_run(
                 status_code=409,
                 detail=f"Run cannot be cancelled from status '{current_status}'",
             )
-        updates.update(
-            {
-                "status": "cancelled",
-                "ended_at": now,
-                "failure_code": "cancelled_by_operator",
-                "failure_message": "Run cancelled",
-                "resume_token": None,
-            }
-        )
-        _append_control_event(
-            ctx=ctx,
-            run_id=run_id,
-            shop_domain=tenant,
-            phase="run_cancelled",
-            message="Run cancelled",
-            metadata={"operation": normalized_operation, "attempt": current_attempt},
-        )
+        updated = ctx.supabase.runs.cancel_run_cascade(run_id, tenant)
+        if not updated:
+            # Compatibility fallback for test/downgrade adapters; production persistence
+            # uses the atomic RPC above.
+            updates.update({"status": "cancelled", "ended_at": now,
+                "failure_code": "cancelled_by_operator", "failure_message": "Run cancelled",
+                "resume_token": None})
+            _append_control_event(ctx=ctx, run_id=run_id, shop_domain=tenant,
+                phase="run_cancelled", message="Run cancelled",
+                metadata={"operation": normalized_operation, "attempt": current_attempt})
+            ctx.supabase.runs.create_or_update_run(run_id, updates)
+            updated = get_run_execute(supabase=ctx.supabase, run_id=run_id, shop_domain=tenant)
+            if not updated:
+                raise HTTPException(status_code=409, detail="Run state changed before cancellation")
         ctx.services.tracing.complete_run(run_id)
+        return {"ok": True, "run_id": run_id, "operation": normalized_operation, "run": updated}
     elif normalized_operation == "retry":
         if current_status not in {"failed", "cancelled"}:
             raise HTTPException(

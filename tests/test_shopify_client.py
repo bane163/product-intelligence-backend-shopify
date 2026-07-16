@@ -48,19 +48,19 @@ async def test_shopify_client_crud():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=create_resp)
+        mock.post("/admin/api/2026-07/graphql.json").respond(200, json=create_resp)
         resp = await client.create_product("T", "", None)
         assert resp["data"]["productCreate"]["product"]["title"] == "T"
 
-        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=get_resp)
+        mock.post("/admin/api/2026-07/graphql.json").respond(200, json=get_resp)
         resp = await client.get_product("gid://shopify/Product/1")
         assert resp["data"]["node"]["id"].endswith("/1")
 
-        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=update_resp)
+        mock.post("/admin/api/2026-07/graphql.json").respond(200, json=update_resp)
         resp = await client.update_product("gid://shopify/Product/1", "T updated", None)
         assert resp["data"]["productUpdate"]["product"]["title"] == "T updated"
 
-        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=delete_resp)
+        mock.post("/admin/api/2026-07/graphql.json").respond(200, json=delete_resp)
         resp = await client.delete_product("gid://shopify/Product/1")
         assert resp["data"]["productDelete"]["deletedProductId"].endswith("/1")
 
@@ -99,7 +99,7 @@ async def test_update_product_with_metafields_triggers_metafields_set():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        route = mock.post("/admin/api/2025-10/graphql.json")
+        route = mock.post("/admin/api/2026-07/graphql.json")
         route.side_effect = [
             httpx.Response(200, json=update_resp),
             httpx.Response(200, json=metafields_resp),
@@ -144,7 +144,7 @@ async def test_get_product_metafields_uses_keys_and_returns_connection_nodes():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        route = mock.post("/admin/api/2025-10/graphql.json").respond(200, json=query_resp)
+        route = mock.post("/admin/api/2026-07/graphql.json").respond(200, json=query_resp)
         resp = await client.get_product_metafields(
             "gid://shopify/Product/1",
             [{"namespace": "specbrain", "key": "material"}],
@@ -189,7 +189,7 @@ async def test_get_product_metafields_falls_back_when_keys_argument_not_supporte
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        route = mock.post("/admin/api/2025-10/graphql.json")
+        route = mock.post("/admin/api/2026-07/graphql.json")
         route.side_effect = [
             httpx.Response(200, json=first_error),
             httpx.Response(200, json=fallback_resp),
@@ -236,7 +236,7 @@ async def test_list_products_for_audit_returns_normalized_rows():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        mock.post("/admin/api/2025-10/graphql.json").respond(200, json=search_resp)
+        mock.post("/admin/api/2026-07/graphql.json").respond(200, json=search_resp)
         rows = await client.list_products_for_audit(query="catalog", limit=10)
         assert len(rows) == 1
         assert rows[0]["title"] == "Catalog Product"
@@ -256,7 +256,7 @@ async def test_update_product_from_input_supports_explicit_clear_payloads():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        route = mock.post("/admin/api/2025-10/graphql.json").respond(200, json=update_resp)
+        route = mock.post("/admin/api/2026-07/graphql.json").respond(200, json=update_resp)
         await client.update_product_from_input(
             {
                 "id": "gid://shopify/Product/1",
@@ -291,7 +291,7 @@ async def test_graphql_raises_on_top_level_errors():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        mock.post("/admin/api/2025-10/graphql.json").respond(
+        mock.post("/admin/api/2026-07/graphql.json").respond(
             200,
             json=error_resp,
             headers={"x-request-id": "req-graphql-error-1"},
@@ -313,7 +313,7 @@ async def test_create_staged_upload_surfaces_graphql_error():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        mock.post("/admin/api/2025-10/graphql.json").respond(
+        mock.post("/admin/api/2026-07/graphql.json").respond(
             200,
             json=error_resp,
             headers={"x-request-id": "req-create-staged-upload-1"},
@@ -342,7 +342,7 @@ async def test_get_bulk_operation_uses_current_bulk_operation_query():
     }
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        route = mock.post("/admin/api/2025-10/graphql.json").respond(200, json=response)
+        route = mock.post("/admin/api/2026-07/graphql.json").respond(200, json=response)
         result = await client.get_bulk_operation("gid://shopify/BulkOperation/1")
         assert result["id"] == "gid://shopify/BulkOperation/1"
         assert route.called
@@ -366,7 +366,7 @@ async def test_graphql_emits_signal_for_throttle_retry(
     success_response = {"data": {"shop": {"name": "Test"}}}
 
     with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
-        route = mock.post("/admin/api/2025-10/graphql.json")
+        route = mock.post("/admin/api/2026-07/graphql.json")
         route.side_effect = [
             httpx.Response(
                 429,

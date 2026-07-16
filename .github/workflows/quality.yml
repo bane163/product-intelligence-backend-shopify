@@ -11,6 +11,15 @@ on:
   push:
     branches: [main]
 jobs:
+  source-viewer-contract:
+    name: source-viewer-required
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: ./scripts/check-collabora-compose-contract.py
+      - run: PYTHONPATH=. uv run pytest -q tests/test_collabora_embedding_readiness.py tests/test_source_link_trace_sampling.py tests/test_collabora_viewer_url.py tests/test_wopi_tokens.py
   test:
     runs-on: ubuntu-latest
     steps:

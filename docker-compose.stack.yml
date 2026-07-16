@@ -1,6 +1,8 @@
 services:
   collabora:
-    image: collabora/code:latest
+    # Production is deliberately pinned. `latest` is exercised only by the
+    # nightly canary workflow; upgrades happen in a dedicated reviewed change.
+    image: ${COLLABORA_IMAGE:-collabora/code:25.04.7.1.1@sha256:b70d5ffb3c88ec365c3685cbd4ce56cd0d29122a1290e98e7f0e9932c2cd8246}
     container_name: collabora-online
     restart: unless-stopped
     environment:

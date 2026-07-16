@@ -1,0 +1,34 @@
+name: Collabora image canary
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+jobs:
+  shell-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - channel: pinned
+            image: collabora/code:25.04.7.1.1@sha256:b70d5ffb3c88ec365c3685cbd4ce56cd0d29122a1290e98e7f0e9932c2cd8246
+          - channel: latest-canary
+            image: collabora/code:latest
+    name: ${{ matrix.channel }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start Collabora
+        env:
+          COLLABORA_IMAGE: ${{ matrix.image }}
+          COLLABORA_FRAME_ANCESTORS: https://app.example.com
+        run: docker compose -f docker-compose.stack.yml up -d collabora
+      - name: Probe discovery and viewer shell
+        run: python scripts/smoke-collabora-shell.py
+      - name: Capture container log
+        if: always()
+        run: docker compose -f docker-compose.stack.yml logs --no-color collabora > collabora-${{ matrix.channel }}.log
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: collabora-${{ matrix.channel }}-failure
+          path: collabora-${{ matrix.channel }}.log

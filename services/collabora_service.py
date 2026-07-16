@@ -2,6 +2,7 @@ import os
 import shutil
 import urllib.request
 import xml.etree.ElementTree as ET
+from urllib.parse import quote
 
 from ai import collabora_utils
 from .interfaces import CollaboraServiceInterface
@@ -14,6 +15,35 @@ class CollaboraUnavailable(RuntimeError):
 
 
 class CollaboraService(CollaboraServiceInterface):
+    @staticmethod
+    def _configured_frame_ancestors() -> list[str]:
+        raw = os.getenv("COLLABORA_FRAME_ANCESTORS", "*").strip()
+        return raw.split() or ["*"]
+
+    @staticmethod
+    def _csp_frame_ancestors(policy: str) -> list[str] | None:
+        for directive in policy.split(";"):
+            parts = directive.strip().split()
+            if parts and parts[0].lower() == "frame-ancestors":
+                return parts[1:]
+        return None
+
+    @classmethod
+    def _embedding_policy_ready(cls, policy: str) -> bool:
+        actual = cls._csp_frame_ancestors(policy)
+        required = cls._configured_frame_ancestors()
+        if not actual:
+            return False
+        return "*" in actual or all(origin in actual for origin in required)
+
+    @classmethod
+    def _viewer_shell_csp(cls, runtime_url: str, discovery: bytes) -> str:
+        viewer = cls._viewer_url_base(discovery, runtime_url)
+        separator = "&" if "?" in viewer else "?"
+        shell_url = f"{viewer}{separator}WOPISrc={quote('https://wopi.invalid/files/readiness', safe='')}"
+        with urllib.request.urlopen(shell_url, timeout=3) as response:
+            return response.headers.get("Content-Security-Policy", "")
+
     def readiness(self) -> dict:
         path = os.getenv("COLLABORA_DISK_PATH", "/tmp")
         usage = shutil.disk_usage(path)
@@ -32,6 +62,12 @@ class CollaboraService(CollaboraServiceInterface):
                 discovery = response.read()
             if not discovery:
                 raise ValueError("empty discovery response")
+            policy = self._viewer_shell_csp(self.get_runtime_url(), discovery)
+            if not self._embedding_policy_ready(policy):
+                raise CollaboraUnavailable(
+                    "The document viewer embedding policy is not configured correctly.",
+                    "COLLABORA_EMBEDDING_MISCONFIGURED",
+                )
         except CollaboraUnavailable:
             raise
         except Exception as exc:
@@ -39,7 +75,7 @@ class CollaboraService(CollaboraServiceInterface):
             raise CollaboraUnavailable(
                 f"The document viewer is temporarily unavailable ({message})."
             ) from exc
-        return {"status": "ready", "free_gib": round(free_gib, 2), "free_percent": round(free_percent, 2), "discovery": discovery}
+        return {"status": "ready", "embedding_ready": True, "free_gib": round(free_gib, 2), "free_percent": round(free_percent, 2), "discovery": discovery}
 
     @staticmethod
     def _viewer_url_base(discovery: bytes, browser_url: str) -> str:

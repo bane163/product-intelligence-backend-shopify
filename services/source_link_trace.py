@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from typing import Any
@@ -29,7 +30,41 @@ def enabled() -> bool:
     explicit = os.getenv("SOURCE_LINK_TRACE_ENABLED", "").strip().lower()
     if explicit:
         return explicit in {"1", "true", "yes", "on"}
-    return os.getenv("DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+    if os.getenv("DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return os.getenv("ENVIRONMENT", "").strip().lower() in {"staging", "production"}
+
+
+def sample_rate() -> float:
+    raw = os.getenv("SOURCE_LINK_TRACE_SAMPLE_RATE", "").strip()
+    if not raw:
+        environment = os.getenv("ENVIRONMENT", "").strip().lower()
+        return (
+            1.0
+            if environment in {"", "development", "debug", "staging", "test"}
+            else 0.05
+        )
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("SOURCE_LINK_TRACE_SAMPLE_RATE must be a number from 0 to 1") from exc
+    if not 0 <= value <= 1:
+        raise ValueError("SOURCE_LINK_TRACE_SAMPLE_RATE must be a number from 0 to 1")
+    return value
+
+
+def sampled(attempt_id: Any) -> bool:
+    """Make one stable sampling decision for every event in an attempt."""
+    normalized = valid_attempt_id(attempt_id)
+    if not normalized:
+        return False
+    rate = sample_rate()
+    if rate <= 0:
+        return False
+    if rate >= 1:
+        return True
+    bucket = int.from_bytes(hashlib.sha256(normalized.encode()).digest()[:8], "big")
+    return bucket / float(2**64) < rate
 
 
 def valid_attempt_id(value: Any) -> str | None:
@@ -67,7 +102,7 @@ def record(
     details: dict[str, Any] | None = None,
 ) -> None:
     """Persist a sanitized event without ever breaking the user flow."""
-    if not enabled():
+    if not enabled() or not sampled(attempt_id):
         return
     payload = {
         "attempt_id": valid_attempt_id(attempt_id),

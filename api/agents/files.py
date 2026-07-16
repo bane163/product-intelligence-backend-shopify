@@ -38,7 +38,7 @@ LOG = logging.getLogger(__name__)
 MERCHANT_UPLOAD_FILE_ORIGIN = "merchant_upload"
 
 
-@router.post("/source-link-traces", summary="Record a development source-link trace event")
+@router.post("/source-link-traces", summary="Record a sampled source-link trace event")
 async def record_source_link_trace_event(
     request: Request,
     attempt_id: str = Form(...),

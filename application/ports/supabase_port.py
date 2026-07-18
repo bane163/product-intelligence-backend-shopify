@@ -68,7 +68,7 @@ class SupabasePort(Protocol):
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool: ...
 
-    def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]: ...
+    def get_run_history(self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True) -> dict[str, Any]: ...
 
     def enqueue_offload_job(
         self,
@@ -254,7 +254,20 @@ class SupabasePort(Protocol):
         shop_domain: str | None = None,
     ) -> dict[str, Any] | None: ...
 
+    def supersede_pending_product_intelligence_suggestions(
+        self, *, product_ids: list[str], superseded_by_audit_id: str,
+        shop_domain: str | None = None,
+    ) -> int: ...
+
     def mark_product_intelligence_suggestion_pending(
+        self, *, suggestion_id: str, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
+
+    def mark_product_intelligence_suggestion_reverted(
+        self, *, suggestion_id: str, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
+
+    def mark_product_intelligence_suggestion_superseded(
         self, *, suggestion_id: str, shop_domain: str | None = None
     ) -> dict[str, Any] | None: ...
 
@@ -405,7 +418,7 @@ class SupabaseRunsNamespacePort(Protocol):
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool: ...
 
-    def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]: ...
+    def get_run_history(self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True) -> dict[str, Any]: ...
 
     def enqueue_offload_job(
         self,
@@ -597,7 +610,20 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         shop_domain: str | None = None,
     ) -> dict[str, Any] | None: ...
 
+    def supersede_pending_product_intelligence_suggestions(
+        self, *, product_ids: list[str], superseded_by_audit_id: str,
+        shop_domain: str | None = None,
+    ) -> int: ...
+
     def mark_product_intelligence_suggestion_pending(
+        self, *, suggestion_id: str, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
+
+    def mark_product_intelligence_suggestion_reverted(
+        self, *, suggestion_id: str, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
+
+    def mark_product_intelligence_suggestion_superseded(
         self, *, suggestion_id: str, shop_domain: str | None = None
     ) -> dict[str, Any] | None: ...
 

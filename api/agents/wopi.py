@@ -26,7 +26,7 @@ async def wopi_check_file_info(
     token = validate_wopi_token(request, file_id)
     request.state.wopi_permission = token["permission"]
     from application.use_cases.files.get_file import execute as get_file_execute
-    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
+    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id, shop_domain=token["shop"])
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -66,7 +66,7 @@ async def wopi_get_file(file_id: str, request: Request, ctx: AppContext = Depend
     """
     token = validate_wopi_token(request, file_id)
     from application.use_cases.files.get_file import execute as get_file_execute
-    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
+    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id, shop_domain=token["shop"])
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
 
@@ -95,7 +95,7 @@ async def wopi_put_file(file_id: str, request: Request, ctx: AppContext = Depend
     from application.use_cases.files.get_file import execute as get_file_execute
     token = validate_wopi_token(request, file_id)
     request.state.wopi_permission = token["permission"]
-    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id)
+    file_data = get_file_execute(supabase=ctx.supabase, file_id=file_id, shop_domain=token["shop"])
     if not file_data:
         raise HTTPException(status_code=404, detail="File not found")
     if not _can_write(request):

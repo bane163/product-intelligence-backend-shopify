@@ -6,6 +6,7 @@ from typing import Any
 from application.domain.product import extract_first_sku
 from application.ports.shopify_port import ShopifyPort
 from application.ports.supabase_port import SupabaseNamespacedPort
+from application.domain.variant_matrix import validate_variant_matrix
 
 REVERT_MODES_KEY = "__revert_modes"
 REVERT_REVERSIBLE_KEY = "__is_reversible"
@@ -105,6 +106,9 @@ def _normalize_shopify_product(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(node, dict):
         return {}
     seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
+    variants_connection = node.get("variants") if isinstance(node.get("variants"), dict) else {}
+    variants = variants_connection.get("nodes") if isinstance(variants_connection.get("nodes"), list) else []
+    options = node.get("options") if isinstance(node.get("options"), list) else []
     return {
         "id": node.get("id"),
         "title": node.get("title"),
@@ -116,6 +120,8 @@ def _normalize_shopify_product(payload: dict[str, Any]) -> dict[str, Any]:
         "tags": node.get("tags"),
         "seo_title": seo.get("title"),
         "seo_description": seo.get("description"),
+        "variants": variants,
+        "options": options,
     }
 
 def _normalize_metafields_payload(raw: Any) -> list[dict[str, Any]]:
@@ -211,37 +217,28 @@ async def _apply_variant_operations(
     product_id: str,
     variant_operations: dict[str, Any],
 ) -> dict[str, Any]:
-    normalized = _normalize_variant_operations(variant_operations)
-    created_option_names: list[str] = []
-    created_variant_ids: list[str] = []
+    normalized, validation_errors = validate_variant_matrix(variant_operations)
+    if validation_errors: raise ValueError("Invalid variant matrix: " + "; ".join(validation_errors))
+    response = await shopify.set_product_variant_matrix(product_id, normalized["create_options"], normalized["create_variants"])
+    errors = _extract_user_errors(response, ["data", "productSet", "userErrors"])
+    if errors: raise ValueError(f"Failed setting product variant matrix: {', '.join(errors)}")
+    product = response.get("data", {}).get("productSet", {}).get("product", {}) if isinstance(response, dict) else {}
+    returned = _matrix_from_live_product(product)
+    if not _matrices_match(normalized, returned): raise ValueError("Shopify returned a variant matrix that does not match the reviewed matrix")
+    nodes = product.get("variants", {}).get("nodes", []) if isinstance(product, dict) else []
+    return {"created_option_names": [x["name"] for x in normalized["create_options"]], "created_variant_ids": [x.get("id") for x in nodes if isinstance(x, dict) and x.get("id")], "not_automatically_reversible": True}
 
-    create_options = normalized.get("create_options") if isinstance(normalized.get("create_options"), list) else []
-    if create_options:
-        options_resp = await shopify.create_product_options(product_id, create_options)
-        errors = _extract_user_errors(options_resp, ["data", "productOptionsCreate", "userErrors"])
-        if errors:
-            raise ValueError(f"Failed creating product options: {', '.join(errors)}")
-        created_option_names = [str(item.get("name") or "").strip() for item in create_options if isinstance(item, dict) and str(item.get("name") or "").strip()]
 
-    create_variants = normalized.get("create_variants") if isinstance(normalized.get("create_variants"), list) else []
-    if create_variants:
-        variants_resp = await shopify.bulk_create_product_variants(product_id, create_variants)
-        errors = _extract_user_errors(variants_resp, ["data", "productVariantsBulkCreate", "userErrors"])
-        if errors:
-            raise ValueError(f"Failed creating product variants: {', '.join(errors)}")
-        created_variants = variants_resp.get("data", {}).get("productVariantsBulkCreate", {}).get("productVariants", []) if isinstance(variants_resp, dict) else []
-        if isinstance(created_variants, list):
-            for item in created_variants:
-                if not isinstance(item, dict):
-                    continue
-                variant_id = str(item.get("id") or "").strip()
-                if variant_id:
-                    created_variant_ids.append(variant_id)
+def _matrix_from_live_product(product: dict[str, Any]) -> dict[str, Any]:
+    options = [{"name": str(x.get("name") or ""), "values": [str(v.get("name") or "") for v in x.get("optionValues", []) if isinstance(v, dict)]} for x in product.get("options", []) if isinstance(x, dict)]
+    nodes = product.get("variants", {}).get("nodes", []) if isinstance(product.get("variants"), dict) else product.get("variants", [])
+    variants = [{"option_values": [{"option_name": str(v.get("name") or ""), "name": str(v.get("value") or "")} for v in x.get("selectedOptions", []) if isinstance(v, dict)], "sku": str(x.get("sku") or ""), "price": str(x.get("price") or "")} for x in nodes if isinstance(x, dict)]
+    return {"create_options": options, "create_variants": variants}
 
-    return {
-        "created_option_names": created_option_names,
-        "created_variant_ids": created_variant_ids,
-    }
+
+def _matrices_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    a, ae = validate_variant_matrix(left); b, be = validate_variant_matrix(right)
+    return not ae and not be and a["create_options"] == b["create_options"] and sorted(a["create_variants"], key=lambda x: x["sku"]) == sorted(b["create_variants"], key=lambda x: x["sku"])
 
 
 def _build_previous_payload(
@@ -259,7 +256,8 @@ def _build_previous_payload(
     for key in patch_payload.keys():
         if key == "variant_operations":
             previous_payload[key] = {}
-            revert_modes[key] = REVERT_MODE_RESTORE
+            revert_modes[key] = REVERT_MODE_UNSUPPORTED_CLEAR
+            unsupported_fields.append(key)
             continue
         if key == "metafields":
             previous_metafields: list[dict[str, Any]] = []
@@ -352,9 +350,14 @@ def _build_pending_suggestion_from_partial_apply(
         "finding_id": source_suggestion.get("finding_id"),
         "product_index": source_suggestion.get("product_index"),
         "product_title": source_suggestion.get("product_title"),
+        "product_id": source_suggestion.get("product_id"),
         "category": source_suggestion.get("category"),
         "severity": source_suggestion.get("severity"),
         "message": source_suggestion.get("message"),
+        "details": source_suggestion.get("details") or {},
+        "parent_suggestion_id": source_suggestion.get("suggestion_id"),
+        "root_suggestion_id": source_suggestion.get("root_suggestion_id")
+        or source_suggestion.get("suggestion_id"),
         "patch_payload": remaining_patch_payload,
         "status": "pending",
         "applied_at": None,
@@ -376,8 +379,11 @@ async def execute(
     if not suggestion:
         raise LookupError("Suggestion not found")
 
-    if str(suggestion.get("status") or "") == "applied":
-        return {"status": "applied", "suggestion": suggestion, "shopify_updated": False}
+    status = str(suggestion.get("status") or "pending")
+    if status != "pending":
+        raise ValueError(
+            f"Suggestion is {status} and is no longer actionable. Run a new audit to get current fixes."
+        )
 
     saved_patch_payload = suggestion.get("patch_payload")
     if not isinstance(saved_patch_payload, dict) or not saved_patch_payload:
@@ -392,7 +398,8 @@ async def execute(
         saved_patch_payload=saved_patch_payload,
         applied_patch_payload=effective_patch_payload,
     )
-    variant_operations = _normalize_variant_operations(effective_patch_payload.get("variant_operations"))
+    raw_variant_operations = effective_patch_payload.get("variant_operations")
+    variant_operations = raw_variant_operations if isinstance(raw_variant_operations, dict) else {}
 
     audit_id = suggestion.get("audit_id")
     if not isinstance(audit_id, str) or not audit_id:
@@ -407,6 +414,17 @@ async def execute(
     if not gid:
         raise ValueError("Unable to resolve Shopify product ID for suggestion target")
     live_product = _normalize_shopify_product(await shopify.get_product(gid))
+    already_matches_variant_matrix = False
+    if variant_operations.get("create_options") or variant_operations.get("create_variants"):
+        desired_matrix, matrix_errors = validate_variant_matrix(variant_operations)
+        if matrix_errors:
+            raise ValueError("Invalid variant matrix: " + "; ".join(matrix_errors))
+        live_matrix = _matrix_from_live_product(live_product)
+        already_matches_variant_matrix = _matrices_match(desired_matrix, live_matrix)
+        live_variants = live_product.get("variants") if isinstance(live_product.get("variants"), list) else []
+        default_only = len(live_variants) == 1 and str(live_variants[0].get("title") or "").strip().casefold() == "default title"
+        if not already_matches_variant_matrix and not default_only:
+            raise RuntimeError("Conflict: Shopify product no longer has exactly one Default Title variant")
     requested_metafields = _normalize_metafields_payload(
         effective_patch_payload.get("metafields")
     )
@@ -434,7 +452,7 @@ async def execute(
         existing_metafields=existing_metafield_map,
     )
     variant_operation_result = {}
-    if variant_operations.get("create_options") or variant_operations.get("create_variants"):
+    if (variant_operations.get("create_options") or variant_operations.get("create_variants")) and not already_matches_variant_matrix:
         variant_operation_result = await _apply_variant_operations(
             shopify=shopify,
             product_id=gid,

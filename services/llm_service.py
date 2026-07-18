@@ -87,6 +87,7 @@ class LLMService(LLMServiceInterface):
         output_path: Optional[str] = None,
         writer_agent_prompt: Optional[str] = None,
         trace_event=None,
+        extracted_text_override: str | None = None,
     ) -> Workflow:
         effective_input_name = input_name
         if not effective_input_name and isinstance(excel_input, str):
@@ -169,7 +170,9 @@ class LLMService(LLMServiceInterface):
             data: bytes, ctx: WorkflowContext[dict[str, Any]]
         ) -> None:
             _trace("extract_start", "Starting document extraction")
-            if document_format.kind == "csv":
+            if extracted_text_override is not None:
+                text = extracted_text_override
+            elif document_format.kind == "csv":
                 text = extract_csv_contents(data)
             elif document_format.kind == "spreadsheet":
                 text = extract_excel_contents(
@@ -213,15 +216,26 @@ class LLMService(LLMServiceInterface):
         async def document_to_png_executor(
             data: bytes, ctx: WorkflowContext[dict[str, Any]]
         ) -> None:
-            collabora = collabora_base_url or os.getenv(
-                "COLLABORA_URL", "http://localhost:8080"
-            )
-            pngs = await self.collabora.convert_document_to_png_collabora(
-                data,
-                filename=effective_input_name or "document.bin",
-                content_type=input_content_type or "application/octet-stream",
-                collabora_base_url=collabora,
-            )
+            if document_format.kind == "pdf":
+                try:
+                    import fitz
+                except ImportError as exc:
+                    raise RuntimeError("PyMuPDF is required to render PDF pages") from exc
+                document = fitz.open(stream=data, filetype="pdf")
+                try:
+                    pngs = [page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False).tobytes("png") for page in list(document)[:20]]
+                finally:
+                    document.close()
+            else:
+                collabora = collabora_base_url or os.getenv(
+                    "COLLABORA_URL", "http://localhost:8080"
+                )
+                pngs = await self.collabora.convert_document_to_png_collabora(
+                    data,
+                    filename=effective_input_name or "document.bin",
+                    content_type=input_content_type or "application/octet-stream",
+                    collabora_base_url=collabora,
+                )
             _trace(
                 "collabora_png_done",
                 "Converted document to PNG pages",
@@ -354,6 +368,7 @@ class LLMService(LLMServiceInterface):
         output_path: Optional[str] = None,
         writer_agent_prompt: Optional[str] = None,
         trace_event=None,
+        extracted_text_override: str | None = None,
     ) -> ProductsList | dict | str | None:
         workflow = self.get_agent_workflow(
             excel_input,
@@ -369,6 +384,7 @@ class LLMService(LLMServiceInterface):
             output_path=output_path,
             writer_agent_prompt=writer_agent_prompt,
             trace_event=trace_event,
+            extracted_text_override=extracted_text_override,
         )
         started_at = perf_counter()
         model_id = (

@@ -29,7 +29,14 @@ def execute(
     message_limit: int = 200,
     offload_limit: int = 20,
 ) -> dict[str, Any]:
-    history = supabase.runs.get_run_history(run_id, shop_domain=shop_domain)
+    try:
+        history = supabase.runs.get_run_history(
+            run_id, shop_domain=shop_domain, include_messages=message_limit != 0
+        )
+    except TypeError as exc:
+        if "include_messages" not in str(exc):
+            raise
+        history = supabase.runs.get_run_history(run_id, shop_domain=shop_domain)
     run = history.get("run") if isinstance(history, dict) else None
     if not isinstance(run, dict):
         return {
@@ -44,7 +51,7 @@ def execute(
     events = [event for event in raw_events if isinstance(event, dict)]
     messages = [message for message in raw_messages if isinstance(message, dict)]
     limited_events = events[: _safe_limit(event_limit, default=200, minimum=1, maximum=1000)]
-    limited_messages = messages[
+    limited_messages = [] if message_limit == 0 else messages[
         : _safe_limit(message_limit, default=200, minimum=1, maximum=1000)
     ]
 

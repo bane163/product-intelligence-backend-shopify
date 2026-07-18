@@ -1,6 +1,7 @@
 """Billing and subscription routes."""
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,12 +21,18 @@ LOG = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _empty_usage_payload() -> dict[str, int]:
+def _empty_usage_payload() -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
     return {
+        "billing_cycle_start": now.isoformat(),
+        "billing_cycle_end": (now + timedelta(days=30)).isoformat(),
         "files_processed": 0,
         "files_included": 0,
         "overage_files": 0,
         "tokens_used": 0,
+        "remaining_files": 0,
+        "chargeable_overage_amount": 0,
+        "overage_charges_recorded": 0,
     }
 
 
@@ -75,13 +82,12 @@ async def get_usage(
     if not usage:
         return {
             "usage": {
-                "files_processed": 0,
-                "files_included": 0,
-                "overage_files": 0,
-                "tokens_used": 0,
+                **_empty_usage_payload(),
             }
         }
-    return {"usage": usage}
+    processed = int(usage.get("files_processed") or 0)
+    included = int(usage.get("files_included") or 0)
+    return {"usage": {**_empty_usage_payload(), **usage, "remaining_files": max(0, included - processed)}}
 
 
 @router.post("/billing/usage/increment", summary="Increment file usage count")

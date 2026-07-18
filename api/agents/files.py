@@ -30,12 +30,37 @@ from .schemas import (
     BulkUploadItem,
     BulkUploadResult,
 )
-from .utils import require_shop_domain, resolve_dev_billing_simulator_plan
+from .utils import require_internal_service_key, require_shop_domain, resolve_dev_billing_simulator_plan
 from api.agents.billing import _get_billing_svc
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
 MERCHANT_UPLOAD_FILE_ORIGIN = "merchant_upload"
+
+
+@router.get("/files/{file_id:path}/content", summary="Get tenant-owned original file content")
+async def get_original_file_content(
+    file_id: str, request: Request, ctx: AppContext = Depends(get_ctx)
+) -> Response:
+    require_internal_service_key(request)
+    tenant = require_shop_domain(request)
+    from application.use_cases.files.get_file import execute as get_file_execute
+
+    file_data = get_file_execute(
+        supabase=ctx.supabase, file_id=file_id, shop_domain=tenant
+    )
+    if not file_data:
+        raise HTTPException(status_code=404, detail="File not found")
+    filename = str(file_data.get("name") or "document.pdf").replace('"', "")
+    return Response(
+        content=file_data["content"],
+        media_type=str(file_data.get("content_type") or "application/pdf"),
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/source-link-traces", summary="Record a sampled source-link trace event")
@@ -314,6 +339,7 @@ async def _run_import_in_background(
             write_to_file=write_to_file,
             output_path=output_path,
             shop_domain=shop_domain,
+            source_file_id=file_id,
         )
         payload = result.get("result") if isinstance(result, dict) else None
         output_file_id = None
@@ -777,12 +803,6 @@ async def upload_file(
         )
         raise
 
-    if simulator_plan is None:
-        try:
-            billing_svc.increment_usage(shop_domain, files=1, tokens=0)
-        except Exception as usage_err:
-            LOG.warning("Failed to increment usage for %s: %s", shop_domain, usage_err)
-
     return {
         "file_id": prepared["file_id"],
         "filename": prepared["name"],
@@ -883,13 +903,6 @@ async def upload_files_bulk(
         )
         for item in prepared_items
     ]
-    successful_count = len(uploaded)
-    if successful_count > 0 and simulator_plan is None:
-        try:
-            billing_svc.increment_usage(shop_domain, files=successful_count, tokens=0)
-        except Exception as usage_err:
-            LOG.warning("Failed to increment usage for %s: %s", shop_domain, usage_err)
-
     return BulkUploadResult(
         total=len(files),
         succeeded=len(uploaded),
@@ -1025,7 +1038,7 @@ async def process_excel(
     if file_id:
         from application.use_cases.files.get_file import execute as get_file_execute
 
-        file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id)
+        file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id, shop_domain=tenant)
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
         file_content = file_entry.get("content")
@@ -1196,12 +1209,8 @@ async def process_excel(
         write_to_file=write_to_file,
         output_path=output_path,
         shop_domain=tenant,
+        source_file_id=file_id,
     )
-
-    try:
-        billing_svc.increment_usage(tenant, files=1, tokens=0)
-    except Exception as usage_err:
-        LOG.warning("Failed to increment usage for %s: %s", tenant, usage_err)
 
     return result
 
@@ -1487,11 +1496,6 @@ async def get_file_preview(
         return Response(content=thumbnail_bytes, media_type="image/png")
 
     try:
-        from services.collabora_service import CollaboraUnavailable
-        try:
-            ctx.services.collabora.readiness()
-        except CollaboraUnavailable as exc:
-            return JSONResponse(status_code=503, content={"code": exc.code, "detail": str(exc)}, headers={"Cache-Control": "no-store"})
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
         preview_png = await generate_thumbnail_bytes(
             file_bytes=bytes(file_content),

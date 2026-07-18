@@ -140,8 +140,8 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool:
         return self._service.delete_run(run_id, shop_domain=shop_domain)
 
-    def get_run_history(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any]:
-        return self._service.get_run_history(run_id, shop_domain=shop_domain)
+    def get_run_history(self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True) -> dict[str, Any]:
+        return self._service.get_run_history(run_id, shop_domain=shop_domain, include_messages=include_messages)
 
     def enqueue_offload_job(
         self,
@@ -471,6 +471,30 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     ) -> dict[str, Any] | None:
         return self._service.mark_product_intelligence_suggestion_pending(
             suggestion_id=suggestion_id,
+            shop_domain=shop_domain,
+        )
+
+    def mark_product_intelligence_suggestion_reverted(
+        self, *, suggestion_id: str, shop_domain: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self._service.mark_product_intelligence_suggestion_reverted(
+            suggestion_id=suggestion_id, shop_domain=shop_domain,
+        )
+
+    def mark_product_intelligence_suggestion_superseded(
+        self, *, suggestion_id: str, shop_domain: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self._service.mark_product_intelligence_suggestion_superseded(
+            suggestion_id=suggestion_id, shop_domain=shop_domain,
+        )
+
+    def supersede_pending_product_intelligence_suggestions(
+        self, *, product_ids: list[str], superseded_by_audit_id: str,
+        shop_domain: str | None = None,
+    ) -> int:
+        return self._service.supersede_pending_product_intelligence_suggestions(
+            product_ids=product_ids,
+            superseded_by_audit_id=superseded_by_audit_id,
             shop_domain=shop_domain,
         )
 

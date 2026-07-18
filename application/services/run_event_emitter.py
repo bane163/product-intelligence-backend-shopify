@@ -3,6 +3,7 @@ from typing import Optional
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
 from shared.observability import current_observability_fields
+from shared.token_usage import normalize_token_usage
 
 
 class RunEventEmitter:
@@ -21,11 +22,9 @@ class RunEventEmitter:
         latest_seq = getattr(supabase.runs, "get_latest_run_event_seq", lambda _run_id: 0)
         self.event_seq = initial_seq or latest_seq(run_id)
         self.message_seq = 0
-        self.usage_totals = {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        }
+        get_run = getattr(supabase.runs, "get_run", lambda _run_id: None)
+        existing = get_run(run_id) or {}
+        self.usage_totals = normalize_token_usage(existing)
 
     def emit_and_persist(
         self,
@@ -90,11 +89,9 @@ class RunEventEmitter:
         metadata = kwargs.get("metadata") or {}
         usage = metadata.get("usage") if isinstance(metadata, dict) else None
         if isinstance(usage, dict):
-            self.usage_totals["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-            self.usage_totals["completion_tokens"] += int(
-                usage.get("completion_tokens") or 0
-            )
-            self.usage_totals["total_tokens"] += int(usage.get("total_tokens") or 0)
+            normalized_usage = normalize_token_usage(usage)
+            for key, value in normalized_usage.items():
+                self.usage_totals[key] += value
             self.supabase.runs.create_or_update_run(
                 self.run_id,
                 {

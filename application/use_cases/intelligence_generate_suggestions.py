@@ -4,6 +4,7 @@ import json
 import re
 import uuid
 from typing import Any
+from application.domain.variant_matrix import build_variant_matrix
 
 from pydantic import ValidationError
 
@@ -286,46 +287,9 @@ def _build_variant_operations(
     title: str,
     dimensions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    create_options = [
-        {
-            "name": item["dimension"],
-            "values": item["canonical_values"],
-        }
-        for item in dimensions
-        if item.get("canonical_values")
-    ]
-
     variants = product.get("variants") if isinstance(product.get("variants"), list) else []
     baseline = variants[0] if variants and isinstance(variants[0], dict) else {}
-    primary = dimensions[0] if dimensions else {"dimension": "Size", "canonical_values": []}
-    option_name = str(primary.get("dimension") or "Size")
-    sku_prefix = _derive_sku_prefix(product, title)
-
-    create_variants: list[dict[str, Any]] = []
-    for raw_value in primary.get("canonical_values") or []:
-        value = str(raw_value).strip()
-        if not value:
-            continue
-        variant_payload: dict[str, Any] = {
-            "option_values": [{"option_name": option_name, "name": value}],
-            "sku": f"{sku_prefix}-{_sanitize_sku_token(value)}",
-        }
-        price = baseline.get("price") if isinstance(baseline, dict) else None
-        if price not in (None, ""):
-            variant_payload["price"] = str(price)
-        inventory_quantity = baseline.get("inventory_quantity") if isinstance(baseline, dict) else None
-        if isinstance(inventory_quantity, int):
-            variant_payload["inventory_quantity"] = inventory_quantity
-        create_variants.append(variant_payload)
-
-    return {
-        "create_options": create_options,
-        "create_variants": create_variants,
-        "defaults": {
-            "copy_from_first_variant": True,
-            "requires_review": True,
-        },
-    }
+    return build_variant_matrix(dimensions=dimensions[:3], sku_prefix=_derive_sku_prefix(product, title), price=baseline.get("price", "0.00"))
 
 
 def _metafield(namespace: str, key: str, value: Any, mf_type: str = "single_line_text_field") -> dict[str, str]:
@@ -637,7 +601,9 @@ def _build_normalization_suggestions(
             body=body,
             existing_option_names=existing_option_names,
         )
-        if inferred_dimensions and allowed("missing_options", 0.86):
+        live_variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+        default_only = len(live_variants) == 1 and _to_text(live_variants[0].get("title")).casefold() == "default title"
+        if inferred_dimensions and default_only and allowed("missing_options", 0.86):
             evidence_sources = sorted(
                 {
                     source
@@ -786,6 +752,46 @@ async def execute(
     )
 
     combined = [*llm_suggestions, *deterministic_suggestions]
+    # Model-authored variant payloads are evidence only. Rebuild executable matrices
+    # from inferred dimensions, and retain one deterministic best candidate/product.
+    variant_candidates: dict[int, list[tuple[tuple[float, int, int], dict[str, Any]]]] = {}
+    retained: list[dict[str, Any]] = []
+    for suggestion in combined:
+        patch = suggestion.get("patch_payload") if isinstance(suggestion.get("patch_payload"), dict) else {}
+        if "variant_operations" not in patch:
+            retained.append(suggestion)
+            continue
+        try: index = int(suggestion.get("product_index", -1))
+        except (TypeError, ValueError): index = -1
+        details = suggestion.get("details") if isinstance(suggestion.get("details"), dict) else {}
+        dimensions = details.get("inferred_dimensions") if isinstance(details.get("inferred_dimensions"), list) else []
+        live_variants = products[index].get("variants") if 0 <= index < len(products) and isinstance(products[index].get("variants"), list) else []
+        default_only = len(live_variants) == 1 and _to_text(live_variants[0].get("title")).casefold() == "default title"
+        try:
+            if not dimensions or not default_only: raise ValueError("not actionable")
+            rebuilt = _build_variant_operations(product=products[index], title=_to_text(products[index].get("title")), dimensions=dimensions)
+        except (ValueError, IndexError):
+            patch.pop("variant_operations", None)
+            if patch: retained.append(suggestion)
+            continue
+        suggestion["patch_payload"] = {**patch, "variant_operations": rebuilt}
+        confidence = float(details.get("confidence") or 0)
+        coverage = sum(len(x.get("canonical_values", [])) for x in dimensions if isinstance(x, dict))
+        deterministic = int(str(suggestion.get("category") or "").startswith("normalization_"))
+        variant_candidates.setdefault(index, []).append(((confidence, coverage, deterministic), suggestion))
+    for candidates in variant_candidates.values():
+        retained.append(max(candidates, key=lambda item: item[0])[1])
+    combined = retained
+    for suggestion in combined:
+        try:
+            product_index = int(suggestion.get("product_index", 0))
+        except (TypeError, ValueError):
+            product_index = -1
+        if 0 <= product_index < len(products):
+            product_id = str(products[product_index].get("id") or "").strip()
+            if product_id:
+                suggestion["product_id"] = product_id
+        suggestion["root_suggestion_id"] = suggestion.get("suggestion_id")
     if callable(trace_event):
         trace_event(
             phase="suggestions_normalized",

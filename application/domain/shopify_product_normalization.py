@@ -156,7 +156,9 @@ def normalize_product_options(options: Any) -> List[Dict[str, Any]]:
     return normalized_options
 
 
-def normalize_variant_inputs(variants: Any) -> List[Dict[str, Any]]:
+def normalize_variant_inputs(
+    variants: Any, strip_sku: bool = False
+) -> List[Dict[str, Any]]:
     if not isinstance(variants, list):
         return []
     normalized_variants: List[Dict[str, Any]] = []
@@ -182,7 +184,7 @@ def normalize_variant_inputs(variants: Any) -> List[Dict[str, Any]]:
             continue
         payload: Dict[str, Any] = {"optionValues": normalized_option_values}
         sku = str(item.get("sku") or "").strip()
-        if sku:
+        if sku and not strip_sku:
             payload["sku"] = sku
         price = item.get("price")
         if price not in (None, ""):

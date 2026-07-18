@@ -40,6 +40,7 @@ async def execute(
     output_path: str | None = None,
     shop_domain: str | None = None,
     manage_lifecycle: bool = True,
+    source_file_id: str | None = None,
 ):
     """Extracted application use-case for processing an uploaded document.
 
@@ -184,6 +185,21 @@ async def execute(
             except Exception:
                 final_output_path = output_path
 
+        pdf_layout = None
+        extracted_text_override = None
+        if document_format.kind == "pdf":
+            layout_service = ctx.services.document_layout
+            if layout_service is None:
+                raise RuntimeError("PDF_LAYOUT_UNAVAILABLE: document layout service is not registered")
+            canonical_file_id = source_file_id or input_name or "uploaded.pdf"
+            pdf_layout = await layout_service.analyze_pdf(file_bytes, canonical_file_id)
+            extracted_text_override = pdf_layout.to_prompt_text()
+            emit_and_persist(
+                phase="pdf_page_coverage",
+                message="Resolved PDF layout coverage",
+                payload_preview={"provider": pdf_layout.provider, "expected": list(pdf_layout.expected_pages), "covered": list(pdf_layout.covered_pages), "anchors": len(pdf_layout.anchors)},
+            )
+
         result = await llm.run_excel_agent_workflow(
             file_bytes,
             collabora_base_url=collabora_url,
@@ -198,6 +214,7 @@ async def execute(
             output_path=final_output_path,
             writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,
             trace_event=trace_event,
+            extracted_text_override=extracted_text_override,
         )
         if isinstance(result, ProductsList):
             result = {
@@ -224,6 +241,17 @@ async def execute(
                 result["products"] = products
             if products and document_format.is_spreadsheet:
                 enrich_spreadsheet_source_refs(products, file_bytes, input_name)
+            if products and pdf_layout is not None:
+                from application.services.pdf_source_refs import verify_pdf_source_refs
+                resolved, dropped = verify_pdf_source_refs(
+                    products, pdf_layout, source_file_id or input_name or "uploaded.pdf"
+                )
+                emit_and_persist(
+                    phase="pdf_anchor_resolution",
+                    message="Verified PDF source anchors",
+                    level="warning" if dropped else "info",
+                    payload_preview={"resolved": resolved, "dropped_ambiguous": dropped, "provider": pdf_layout.provider},
+                )
             if products:
                 if not shop_domain:
                     enrichment_warning = "Import enrichment skipped: missing shop_domain"

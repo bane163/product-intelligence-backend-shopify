@@ -314,6 +314,7 @@ class OffloadWorker:
             output_path=output_path,
             shop_domain=shop_domain,
             manage_lifecycle=False,
+            source_file_id=file_id,
         )
         result_payload = result.get("result") if isinstance(result, dict) else None
 

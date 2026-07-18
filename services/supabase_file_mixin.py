@@ -367,6 +367,7 @@ class SupabaseFileMixin:
         content_type = "application/octet-stream"
         file_origin = FILE_ORIGIN_MERCHANT_UPLOAD
         thumbnail_storage_path = None
+        shop_domain = None
         try:
             client = self._get_supabase_client()
             if client:
@@ -393,6 +394,7 @@ class SupabaseFileMixin:
                     content_type = meta_dict.get("content_type", content_type)
                     file_origin = self._normalize_file_row_origin(meta_dict)
                     thumbnail_storage_path = meta_dict.get("thumbnail_storage_path")
+                    shop_domain = meta_dict.get("shop_domain")
         except Exception:
             LOG.debug("DB metadata fetch failed for %s", file_id, exc_info=True)
 
@@ -403,6 +405,7 @@ class SupabaseFileMixin:
             "file_origin": file_origin,
             "storage_path": file_id,
             "thumbnail_storage_path": thumbnail_storage_path,
+            "shop_domain": shop_domain,
         }
 
     def set_file_shop_domain(self, file_id: str, shop_domain: str) -> None:

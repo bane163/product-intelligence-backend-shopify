@@ -22,6 +22,7 @@ class LLMPort(Protocol):
         output_path: str | None = None,
         writer_agent_prompt: str | None = None,
         trace_event=None,
+        extracted_text_override: str | None = None,
     ) -> Workflow: ...
 
     async def run_excel_agent_workflow(
@@ -40,4 +41,5 @@ class LLMPort(Protocol):
         output_path: str | None = None,
         writer_agent_prompt: str | None = None,
         trace_event=None,
+        extracted_text_override: str | None = None,
     ) -> ProductsList | dict[str, Any] | str | None: ...

@@ -165,6 +165,11 @@ async def readiness_check():
         "status": "ready",
         "services": ["supabase", "llm", "collabora", "tracing", "shopify"],
         "collabora": {key: value for key, value in collabora.items() if key != "discovery"},
+        "document_layout": {
+            "provider": "azure" if os.getenv("DOCUMENTINTELLIGENCE_ENDPOINT", "").strip() else "pymupdf",
+            "fallback_available": True,
+            "probe": "configured" if os.getenv("DOCUMENTINTELLIGENCE_ENDPOINT", "").strip() else "not_configured",
+        },
     }
 
 

@@ -28,6 +28,9 @@ class ShopifyAdapter:
     async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
         return await self._client.update_product_from_input(product)
 
+    async def set_product_variant_matrix(self, gid: str, options: list[Dict[str, Any]], variants: list[Dict[str, Any]]) -> Dict[str, Any]:
+        return await self._client.set_product_variant_matrix(gid, options, variants)
+
     async def create_product_options(
         self, product_id: str, options: list[Dict[str, Any]]
     ) -> Dict[str, Any]:

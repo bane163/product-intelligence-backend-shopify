@@ -88,3 +88,42 @@ def test_option_and_variant_normalizers_filter_invalid_entries() -> None:
             "inventoryQuantities": [{"availableQuantity": 3}],
         }
     ]
+
+
+def test_normalize_variant_inputs_strips_sku_when_strip_sku_true() -> None:
+    variants = normalize_variant_inputs(
+        [
+            {
+                "option_values": [{"option_name": "Size", "name": "S"}],
+                "sku": "SKU-S",
+                "price": "9.99",
+            }
+        ],
+        strip_sku=True,
+    )
+    assert variants == [
+        {
+            "optionValues": [{"optionName": "Size", "name": "S"}],
+            "price": "9.99",
+        }
+    ]
+
+
+def test_normalize_variant_inputs_retains_sku_when_strip_sku_false() -> None:
+    variants = normalize_variant_inputs(
+        [
+            {
+                "option_values": [{"option_name": "Size", "name": "S"}],
+                "sku": "SKU-S",
+                "price": "9.99",
+            }
+        ],
+        strip_sku=False,
+    )
+    assert variants == [
+        {
+            "optionValues": [{"optionName": "Size", "name": "S"}],
+            "sku": "SKU-S",
+            "price": "9.99",
+        }
+    ]

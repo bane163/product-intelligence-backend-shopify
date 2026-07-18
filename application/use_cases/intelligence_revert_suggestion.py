@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Any
 
 from application.ports.shopify_port import ShopifyPort
@@ -156,7 +157,7 @@ async def execute(
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            reverted = supabase.intelligence.mark_product_intelligence_suggestion_pending(
+            reverted = supabase.intelligence.mark_product_intelligence_suggestion_reverted(
                 suggestion_id=suggestion_id,
                 shop_domain=shop_domain,
             )
@@ -169,12 +170,39 @@ async def execute(
 
     if not reverted:
         if last_error is not None:
-            raise RuntimeError("Failed to mark suggestion as pending after retries") from last_error
-        raise RuntimeError("Failed to mark suggestion as pending after retries")
+            raise RuntimeError("Failed to record reverted suggestion after retries") from last_error
+        raise RuntimeError("Failed to record reverted suggestion after retries")
+
+    # A revert is historical, not destructive: retain the reverted application and
+    # reopen the exact applied patch as one stable child.  The UUID makes retries
+    # idempotent even if a response is lost after persistence.
+    pending_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"catalog-revert:{suggestion_id}"))
+    pending = supabase.intelligence.get_product_intelligence_suggestion(
+        pending_id, shop_domain=shop_domain
+    )
+    if not pending:
+        root_id = str(suggestion.get("root_suggestion_id") or suggestion_id)
+        pending = supabase.intelligence.create_product_intelligence_suggestion(
+            suggestion={
+                **{key: suggestion.get(key) for key in (
+                    "audit_id", "finding_id", "product_index", "product_title",
+                    "product_id", "category", "severity", "message", "details",
+                )},
+                "suggestion_id": pending_id,
+                "patch_payload": patch_payload,
+                "status": "pending",
+                "parent_suggestion_id": suggestion_id,
+                "root_suggestion_id": root_id,
+            },
+            shop_domain=shop_domain,
+        )
+    if not pending:
+        raise RuntimeError("Revert succeeded but the pending replacement could not be recorded")
 
     return {
-        "status": "pending",
+        "status": "reverted",
         "suggestion": reverted,
         "shopify_updated": True,
         "target_product_id": gid,
+        "pending_suggestion": pending,
     }

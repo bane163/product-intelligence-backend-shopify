@@ -40,6 +40,8 @@ def validate_wopi_token(request: Request, file_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="WOPI token expired")
     if payload.get("permission") not in {"view", "edit"}:
         raise HTTPException(status_code=403, detail="Invalid WOPI permission")
+    if not isinstance(payload.get("shop"), str) or not payload["shop"].strip():
+        raise HTTPException(status_code=403, detail="WOPI token is missing tenant ownership")
     post_message_origin = payload.get("post_message_origin")
     if post_message_origin:
         parsed_origin = urlparse(str(post_message_origin))

@@ -82,6 +82,7 @@ class ProductSourceRef(BaseModel):
     page: Optional[int] = None
     bbox: Optional[List[float]] = None
     value: Optional[str] = None
+    source_provider: Optional[str] = None
 
 
 class ProductInput(BaseModel):

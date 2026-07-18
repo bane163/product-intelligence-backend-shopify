@@ -323,6 +323,12 @@ async def execute(
                 "id": _to_text(product.get("id")),
                 "title": _to_text(product.get("title")),
                 "handle": _to_text(product.get("handle")),
+                "body_html": product.get("body_html"),
+                "vendor": product.get("vendor"),
+                "product_type": product.get("product_type"),
+                "tags": product.get("tags"),
+                "seo_title": product.get("seo_title"),
+                "seo_description": product.get("seo_description"),
             }
             for product in products
             if _to_text(product.get("title"))
@@ -365,6 +371,17 @@ async def execute(
         normalization_settings=normalization_settings,
         trace_event=trace_event if callable(trace_event) else None,
     )
+    supersede_pending = getattr(
+        supabase.intelligence,
+        "supersede_pending_product_intelligence_suggestions",
+        None,
+    )
+    if callable(supersede_pending):
+        supersede_pending(
+            product_ids=[str(product.get("id") or "") for product in products],
+            superseded_by_audit_id=audit_id,
+            shop_domain=tenant,
+        )
     supabase.intelligence.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions, shop_domain=tenant)
     if callable(trace_event):
         trace_event(

@@ -3406,7 +3406,7 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
             f"/agents/intelligence/suggestions/{suggestion_id}/revert"
         )
         assert revert_single.status_code == 200
-        assert revert_single.json()["status"] == "pending"
+        assert revert_single.json()["status"] == "reverted"
         assert revert_single.json()["shopify_updated"] is True
         assert revert_single.json()["target_product_id"] == "gid://shopify/Product/9"
 
@@ -3523,6 +3523,117 @@ async def test_catalog_health_search_returns_recoverable_error_without_shop_sess
 
     assert response.status_code == 503
     assert "Reopen Stockpile from Shopify Admin" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_health_search_does_not_create_regeneration_activity(monkeypatch):
+    import infrastructure.adapters.shopify_adapter as shopify_adapter
+    import shopify_session_store
+
+    async def fake_list_products_for_audit(self, query=None, limit=25):
+        _ = (self, query, limit)
+        return []
+
+    monkeypatch.setattr(
+        shopify_session_store,
+        "get_offline_access_token",
+        lambda _shop: "test-shop-token",
+    )
+    monkeypatch.setattr(
+        shopify_adapter.ShopifyAdapter,
+        "list_products_for_audit",
+        fake_list_products_for_audit,
+    )
+    ctx = get_app_context()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
+        response = await ac.post(
+            "/agents/intelligence/shopify-products/search",
+            data={"query": "catalog", "limit": "25", "run_id": "search-run"},
+        )
+
+    assert response.status_code == 200
+    assert ctx.supabase.runs.get_run("search-run") is None
+
+
+@pytest.mark.asyncio
+async def test_regeneration_validation_failure_finalizes_client_run():
+    ctx = get_app_context()
+    run_id = "regeneration-validation-run"
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
+        response = await ac.post(
+            "/agents/intelligence/suggestions/missing/regenerate",
+            data={"run_id": run_id},
+        )
+
+    assert response.status_code == 400
+    run = ctx.supabase.runs.get_run(run_id)
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["error"] == "field is required"
+    history = ctx.supabase.runs.get_run_history(run_id)
+    assert [event["phase"] for event in history["events"]] == [
+        "regeneration_queued",
+        "regeneration_failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_regeneration_succeeds_with_client_run_id(monkeypatch):
+    import application.use_cases.intelligence_regenerate_suggestion as regeneration_uc
+
+    ctx = get_app_context()
+    run_id = "regeneration-success-run"
+    suggestion_id = "regeneration-source"
+    product_id = "gid://shopify/Product/42"
+
+    monkeypatch.setattr(
+        ctx.supabase.intelligence,
+        "get_product_intelligence_suggestion",
+        lambda value, shop_domain=None: {
+            "suggestion_id": value,
+            "product_id": product_id,
+            "status": "pending",
+        },
+    )
+
+    async def fake_get_product(gid):
+        return {"id": gid, "title": "Catalog Product"}
+
+    async def fake_execute(**kwargs):
+        assert kwargs["suggestion_id"] == suggestion_id
+        assert kwargs["field"] == "title"
+        return {"suggestion": {"patch_payload": {"title": "Improved title"}}}
+
+    monkeypatch.setattr(ctx.services.shopify, "get_product", fake_get_product)
+    monkeypatch.setattr(regeneration_uc, "execute", fake_execute)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
+        response = await ac.post(
+            f"/agents/intelligence/suggestions/{suggestion_id}/regenerate",
+            data={"run_id": run_id, "field": "title"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["run_id"] == run_id
+    assert response.json()["suggestion"]["patch_payload"] == {
+        "title": "Improved title"
+    }
+    run = ctx.supabase.runs.get_run(run_id)
+    assert run is not None
+    assert run["status"] == "succeeded"
+    history = ctx.supabase.runs.get_run_history(run_id)
+    assert history["events"][-1]["phase"] == "regeneration_completed"
 
 
 @pytest.mark.asyncio
@@ -3740,7 +3851,7 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
             f"/agents/intelligence/suggestions/{suggestion['suggestion_id']}/revert"
         )
         assert revert_single.status_code == 200
-        assert revert_single.json()["status"] == "pending"
+        assert revert_single.json()["status"] == "reverted"
         assert len(updates) == 2
         assert updates[1]["vendor"] == ""
 

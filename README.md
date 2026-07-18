@@ -9,6 +9,16 @@ This project consists of a **Shopify App Frontend** (React/Remix/Vite) and a
   running in Docker.
 - `extractor-v3/`: The Shopify App frontend and extensions.
 
+### PDF layout extraction
+
+PDF imports use Azure Document Intelligence `prebuilt-layout` first when both
+`DOCUMENTINTELLIGENCE_ENDPOINT` and `DOCUMENTINTELLIGENCE_API_KEY` are set.
+Digital PDFs safely fall back to PyMuPDF; a scanned or partly image-only PDF is
+rejected with `PDF_LAYOUT_UNAVAILABLE` when Azure is unavailable. Use the F0
+tier for local trials (noting its multipage limits) and S0 in production for
+complete multipage/OCR coverage. Verify access without printing secrets with
+`uv run python scripts/check-document-layout.py path/to/file.pdf`.
+
 ---
 
 ## 🧩 Run the Full Stack Locally (Backend + Supabase + Frontend)

@@ -783,6 +783,9 @@ class SupabaseRunsMixin:
                 summary = {
                     "status": self._normalize_run_status(run.get("status")),
                     "error": sanitize_text(run.get("error")),
+                    "prompt_tokens": run.get("prompt_tokens"),
+                    "completion_tokens": run.get("completion_tokens"),
+                    "total_tokens": run.get("total_tokens"),
                 }
                 events = memory_events.get(run_id, []) if isinstance(memory_events, dict) else []
                 for event in reversed(events):
@@ -808,7 +811,9 @@ class SupabaseRunsMixin:
         normalized_shop_domain = self._normalize_shop_domain(shop_domain)
         summaries: dict[str, dict[str, Any]] = {}
         try:
-            query = client.table("llm_runs").select("run_id,status,error")
+            query = client.table("llm_runs").select(
+                "run_id,status,error,prompt_tokens,completion_tokens,total_tokens"
+            )
             query = query.in_("run_id", normalized_run_ids)
             if normalized_shop_domain:
                 query = query.eq("shop_domain", normalized_shop_domain)
@@ -820,6 +825,9 @@ class SupabaseRunsMixin:
                 summaries[run_id] = {
                     "status": self._normalize_run_status(row.get("status")),
                     "error": sanitize_text(row.get("error")),
+                    "prompt_tokens": row.get("prompt_tokens"),
+                    "completion_tokens": row.get("completion_tokens"),
+                    "total_tokens": row.get("total_tokens"),
                 }
         except Exception:
             LOG.exception(
@@ -889,7 +897,7 @@ class SupabaseRunsMixin:
         return True
 
     def get_run_history(
-        self, run_id: str, *, shop_domain: str | None = None
+        self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True
     ) -> dict[str, Any]:
         client = self._get_supabase_client()
         if not client:
@@ -914,17 +922,18 @@ class SupabaseRunsMixin:
         except Exception:
             LOG.exception("Failed fetching llm_run_events for run_id=%s", run_id)
 
-        try:
-            res_messages = (
-                client.table("llm_run_messages")
-                .select("*")
-                .eq("run_id", run_id)
-                .order("seq")
-                .limit(1000)
-                .execute()
-            )
-            messages = res_messages.data or []
-        except Exception:
-            LOG.exception("Failed fetching llm_run_messages for run_id=%s", run_id)
+        if include_messages:
+            try:
+                res_messages = (
+                    client.table("llm_run_messages")
+                    .select("*")
+                    .eq("run_id", run_id)
+                    .order("seq")
+                    .limit(1000)
+                    .execute()
+                )
+                messages = res_messages.data or []
+            except Exception:
+                LOG.exception("Failed fetching llm_run_messages for run_id=%s", run_id)
 
         return {"run": run, "events": events, "messages": messages}

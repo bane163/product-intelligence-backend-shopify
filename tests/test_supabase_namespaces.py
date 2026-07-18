@@ -1,5 +1,6 @@
 import pytest
 
+from infrastructure.adapters.supabase_adapter import SupabaseAdapter
 from infrastructure.adapters.supabase_namespaces import SupabaseDomainAccessors
 
 
@@ -61,3 +62,15 @@ def test_namespace_rejects_unsupported_method_name():
 
     with pytest.raises(AttributeError):
         _ = domains.file.nonexistent_method
+
+
+def test_every_intelligence_namespace_method_is_implemented_by_adapter():
+    domains = SupabaseDomainAccessors(object())
+
+    missing = sorted(
+        method
+        for method in domains.intelligence._methods
+        if not callable(getattr(SupabaseAdapter, method, None))
+    )
+
+    assert missing == []

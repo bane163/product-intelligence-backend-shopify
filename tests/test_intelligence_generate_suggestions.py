@@ -134,8 +134,8 @@ async def test_generate_suggestions_persists_nested_payload_and_details(monkeypa
                             "inferred_dimensions": [
                                 {
                                     "dimension": "Size",
-                                    "detected_value": "Small",
-                                    "canonical_value": "S",
+                                        "detected_values": ["Small", "Medium"],
+                                        "canonical_values": ["S", "M"],
                                     "confidence": 0.92,
                                     "source": "title",
                                 }
@@ -160,13 +160,14 @@ async def test_generate_suggestions_persists_nested_payload_and_details(monkeypa
     )
     suggestions = await execute(
         supabase=supabase,
-        products=[{"id": "gid://shopify/Product/1", "title": "Catalog Product"}],
+        products=[{"id": "gid://shopify/Product/1", "title": "Catalog Product", "variants": [{"title": "Default Title", "sku": "SKU", "price": "10.00"}]}],
         shop_domain="store.myshopify.com",
     )
 
     assert suggestions[0]["patch_payload"]["variant_operations"]["create_options"][0]["name"] == "Size"
     assert suggestions[0]["details"]["evidence_sources"] == ["title", "image"]
-    assert suggestions[0]["details"]["inferred_dimensions"][0]["canonical_value"] == "S"
+    assert suggestions[0]["details"]["inferred_dimensions"][0]["canonical_values"] == ["S", "M"]
+    assert len(suggestions[0]["patch_payload"]["variant_operations"]["create_variants"]) == 2
 
 
 @pytest.mark.asyncio

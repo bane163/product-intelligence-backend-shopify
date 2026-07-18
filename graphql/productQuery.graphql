@@ -13,6 +13,8 @@ query product($id: ID!) {
         title
         description
       }
+      options { name position optionValues { name } }
+      variants(first: 250) { nodes { id title sku price selectedOptions { name value } } }
     }
   }
 }

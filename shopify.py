@@ -397,6 +397,14 @@ class ShopifyClient:
         query = _load_graphql("productQuery.graphql")
         return await self.graphql(query, {"id": gid})
 
+    async def set_product_variant_matrix(self, gid: str, options: List[Dict[str, Any]], variants: List[Dict[str, Any]]) -> Dict[str, Any]:
+        mutation = _load_graphql("productSet.graphql")
+        input_payload = {
+            "productOptions": normalize_product_options(options),
+            "variants": normalize_variant_inputs(variants),
+        }
+        return await self.graphql(mutation, {"identifier": {"id": gid}, "input": input_payload})
+
     async def get_product_metafields(
         self, gid: str, identifiers: List[Dict[str, str]]
     ) -> List[Dict[str, Any]]:
@@ -463,7 +471,7 @@ class ShopifyClient:
     async def bulk_create_product_variants(
         self, product_id: str, variants: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        normalized_variants = normalize_variant_inputs(variants)
+        normalized_variants = normalize_variant_inputs(variants, strip_sku=True)
         if not normalized_variants:
             return {
                 "data": {

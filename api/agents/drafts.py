@@ -12,6 +12,28 @@ from .utils import parse_products_json, require_shop_domain, resolve_shop_domain
 router = APIRouter()
 
 
+def _enrich_token_usage(drafts: list[dict[str, Any]], ctx: AppContext, tenant: str) -> None:
+    related_by_draft: list[list[str]] = []
+    all_ids: list[str] = []
+    for draft in drafts:
+        ids = list(dict.fromkeys(str(draft.get(key) or "").strip() for key in
+                                 ("run_id", "extraction_run_id", "submit_run_id")))
+        ids = [run_id for run_id in ids if run_id]
+        related_by_draft.append(ids)
+        all_ids.extend(ids)
+    summaries = ctx.supabase.runs.get_run_summaries(list(dict.fromkeys(all_ids)), shop_domain=tenant)
+    for draft, ids in zip(drafts, related_by_draft):
+        recorded = [summaries[run_id] for run_id in ids if run_id in summaries and
+                    summaries[run_id].get("total_tokens") is not None]
+        draft["token_usage"] = None if not recorded else {
+            "prompt_tokens": sum(int(run.get("prompt_tokens") or 0) for run in recorded),
+            "completion_tokens": sum(int(run.get("completion_tokens") or 0) for run in recorded),
+            "total_tokens": sum(int(run.get("total_tokens") or 0) for run in recorded),
+            "recorded_run_count": len(recorded),
+            "related_run_count": len(ids),
+        }
+
+
 @router.post("/product-drafts", summary="Save extracted products as draft")
 async def save_product_draft(
     request: Request,
@@ -63,6 +85,7 @@ async def list_product_drafts(
     from application.use_cases.drafts.list_product_drafts import execute as list_drafts_execute
     tenant = require_shop_domain(request, shop_domain)
     drafts = list_drafts_execute(supabase=ctx.supabase, limit=limit, offset=offset, search=search, sort_by=sort_by, sort_dir=sort_dir, shop_domain=tenant)
+    _enrich_token_usage(drafts, ctx, tenant)
     return {"drafts": drafts}
 
 

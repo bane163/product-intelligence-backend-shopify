@@ -141,7 +141,7 @@ async def test_release_gate_intelligence_path_audit_apply_revert_is_tenant_scope
             headers=tenant_header,
         )
         assert revert_single.status_code == 200
-        assert revert_single.json()["status"] == "pending"
+        assert revert_single.json()["status"] == "reverted"
         assert revert_single.json()["shopify_updated"] is True
         assert revert_single.json()["target_product_id"] == "gid://shopify/Product/9001"
         reverted_suggestions = await ac.get(
@@ -153,7 +153,7 @@ async def test_release_gate_intelligence_path_audit_apply_revert_is_tenant_scope
             row["suggestion_id"]: row.get("status")
             for row in reverted_suggestions.json()["suggestions"]
         }
-        assert reverted_statuses.get(suggestion_id) == "pending"
+        assert reverted_statuses.get(suggestion_id) == "reverted"
 
         cross_tenant = await ac.get(
             f"/agents/intelligence/audits/{audit_id}",

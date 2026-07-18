@@ -90,6 +90,36 @@ class SupabaseDraftsMixin:
         """Stub for typing — actual implementation provided by `SupabaseRunsMixin`."""
         raise NotImplementedError("_utc_now must be provided by the host class")
 
+    def _sync_source_references(self, *, products: list[dict[str, Any]], shop_domain: str | None,
+                                draft_id: str | None = None, submitted_id: str | None = None) -> None:
+        client = self._get_supabase_client()
+        if not client or not shop_domain:
+            return
+        owner_column, owner_value = ("draft_id", draft_id) if draft_id else ("submitted_id", submitted_id)
+        if not owner_value:
+            return
+        rows: list[dict[str, Any]] = []
+        for product_index, product in enumerate(products):
+            refs = product.get("source_refs") if isinstance(product, dict) else None
+            for ref in refs if isinstance(refs, list) else []:
+                if not isinstance(ref, dict) or not ref.get("source_file_id"):
+                    continue
+                rows.append({
+                    "shop_domain": shop_domain, owner_column: owner_value,
+                    "product_index": product_index, "field_name": ref.get("field"),
+                    "source_file_id": ref["source_file_id"], "sheet_name": ref.get("sheet"),
+                    "cell_range": ref.get("cell_range") or ref.get("cell"),
+                    "page_number": ref.get("page"), "bounding_box": ref.get("bbox"),
+                    "anchor_id": ref.get("anchor_id"), "document_kind": ref.get("document_kind"),
+                    "source_value": ref.get("value"), "source_provider": ref.get("source_provider"),
+                })
+        try:
+            client.table("product_source_references").delete().eq(owner_column, owner_value).eq("shop_domain", shop_domain).execute()
+            if rows:
+                client.table("product_source_references").insert(rows).execute()
+        except Exception:
+            LOG.exception("Failed synchronizing source references for %s", owner_value)
+
     def save_product_draft(
         self,
         *,
@@ -144,6 +174,7 @@ class SupabaseDraftsMixin:
                 client.table("product_drafts").upsert(
                     payload, on_conflict="draft_id"
                 ).execute()
+                self._sync_source_references(products=products, shop_domain=normalized_shop_domain, draft_id=draft_id)
                 return payload
             except Exception as exc:
                 if _is_missing_column_error(
@@ -475,6 +506,7 @@ class SupabaseDraftsMixin:
                 client.table("submitted_documents").upsert(
                     payload, on_conflict="submitted_id"
                 ).execute()
+                self._sync_source_references(products=products, shop_domain=normalized_shop_domain, submitted_id=submitted_id)
                 return payload
             except Exception:
                 LOG.exception("Failed saving submitted document %s", submitted_id)

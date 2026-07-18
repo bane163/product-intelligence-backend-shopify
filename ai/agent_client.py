@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import uuid
@@ -47,15 +46,15 @@ def _trace(
 
 
 def _extract_usage(response: AgentRunResponse) -> dict[str, Any] | None:
-    usage = getattr(response, "usage", None)
+    usage = getattr(response, "usage_details", None)
     if usage is None:
         return None
     if isinstance(usage, dict):
         return usage
     return {
-        "prompt_tokens": getattr(usage, "prompt_tokens", None),
-        "completion_tokens": getattr(usage, "completion_tokens", None),
-        "total_tokens": getattr(usage, "total_tokens", None),
+        "input_token_count": getattr(usage, "input_token_count", None),
+        "output_token_count": getattr(usage, "output_token_count", None),
+        "total_token_count": getattr(usage, "total_token_count", None),
     }
 
 
@@ -360,7 +359,7 @@ async def run_agent_on_inputs(
     model_env: Dict[str, str] | None = None,
     trace_event: TraceFn = None,
 ) -> AgentRunResponse:
-    """Create an agent and run it on the provided extracted text and png (base64).
+    """Create an agent and run it on extracted text and binary PNG inputs.
 
     This encapsulates creating the OpenAI/Ollama client and running the agent so
     caller code stays small and focused.
@@ -385,7 +384,7 @@ async def run_agent_on_inputs(
     instructions = (
         "You will be given two inputs:\n"
         "1) A textual extraction of the document (e.g., spreadsheet or other supported document).\n"
-        "2) A PNG image rendering of the document (base64).\n\n"
+        "2) PNG image renderings of up to 20 document pages.\n\n"
         "Use both sources to identify one or more products suitable for Shopify import. "
         "Return a JSON object that matches the ProductsList schema: an object with a 'products' field, "
         "which is an array of product objects. Each product should follow the ProductInput shape: "
@@ -394,6 +393,8 @@ async def run_agent_on_inputs(
         "optional source_refs (list of {field, document_kind, source_file_id, anchor_id, sheet, cell, cell_range, page, bbox, value}), "
         "and optional images (list of {src, alt}).\n"
         "When spreadsheet text includes [CELL_REFS] tokens, map product evidence to sheet/cell entries. "
+        "When PDF text includes [ANCHOR:id] tokens, every PDF source reference must return that exact anchor_id; "
+        "do not return a model-generated page or bounding box because the server resolves those fields. "
         "Explicitly include separate, exact source_refs with canonical field names title, vendor, sku, "
         "and price (sku and price refer to the first displayed variant) for every extracted displayed value. "
         "Copy exact CELL_REFS coordinates; never guess a cell, page, anchor ID, or bounding box.\n\n"
@@ -418,40 +419,15 @@ async def run_agent_on_inputs(
 
     data_content_list: list[DataContent] = []
 
-    png_b64s: list[TextContent] = (
-        [
-            TextContent(
-                text=f"---EXTRACTED_PNG_BASE64---\n{base64.b64encode(png).decode('ascii')}\n---END---\n"
-            )
-            for png in png_bytes
-        ]
-        if png_bytes
-        else []
+    data_content_list = (
+        [DataContent(media_type="image/png", data=png) for png in png_bytes[:20]]
+        if png_bytes else []
     )
-
-    # data_content_list: list[DataContent] = (
-    #     [DataContent(media_type="image/png", data=png) for png in png_bytes]
-    #     if png_bytes
-    #     else []
-    # )
-
-    # data_content_list: list[DataContent] = (
-    #     [
-    #         DataContent(
-    #             uri=f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
-    #         )
-    #         for png in png_bytes
-    #     ]
-    #     if png_bytes
-    #     else []
-    # )
 
     contents: list[DataContent | TextContent] = [TextContent(text=full_prompt)]
 
     if data_content_list:
         contents.extend(data_content_list)
-    if png_b64s:
-        contents.extend(png_b64s)
 
     user_message = ChatMessage(
         role="user",
@@ -462,7 +438,7 @@ async def run_agent_on_inputs(
         trace_event,
         phase="llm_request",
         message="Calling LLM for product extraction",
-        payload_preview={"prompt_preview": full_prompt[:700], "image_uris_count": len(data_content_list) + len(png_b64s)},
+        payload_preview={"prompt_preview": full_prompt[:700], "image_uris_count": len(data_content_list)},
         transcript_role="user",
         transcript_text=full_prompt,
         transcript_meta={"call": "extractor"},

@@ -335,6 +335,39 @@ class SupabaseIntelligenceMixin:
             }
         return len(suggestions)
 
+    def supersede_pending_product_intelligence_suggestions(
+        self, *, product_ids: list[str], superseded_by_audit_id: str,
+        shop_domain: str | None = None,
+    ) -> int:
+        tenant = str(shop_domain or "").strip().lower()
+        ids = [str(value).strip() for value in product_ids if str(value).strip()]
+        if not tenant or not ids:
+            return 0
+        now = self._utc_now()
+        update = {
+            "status": "superseded", "superseded_at": now,
+            "superseded_by_audit_id": superseded_by_audit_id, "updated_at": now,
+        }
+        client = self._get_supabase_client()
+        if client:
+            try:
+                rows = (client.table("product_intelligence_suggestions").update(update)
+                        .eq("shop_domain", tenant).eq("status", "pending")
+                        .in_("product_id", ids).neq("audit_id", superseded_by_audit_id)
+                        .execute().data or [])
+                return len(rows)
+            except Exception:
+                LOG.exception("Failed superseding pending intelligence suggestions")
+        count = 0
+        for item in self.product_intelligence_suggestions.values():
+            if (str(item.get("shop_domain") or "").strip().lower() == tenant
+                    and item.get("status") == "pending"
+                    and str(item.get("product_id") or "") in ids
+                    and item.get("audit_id") != superseded_by_audit_id):
+                item.update(update)
+                count += 1
+        return count
+
     def list_product_intelligence_suggestions(
         self,
         *,
@@ -575,6 +608,71 @@ class SupabaseIntelligenceMixin:
         cached = dict(item)
         self.product_intelligence_suggestions[suggestion_id] = cached
         return cached
+
+    def mark_product_intelligence_suggestion_reverted(
+        self,
+        *,
+        suggestion_id: str,
+        shop_domain: str | None = None,
+    ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return None
+        now = self._utc_now()
+        update_payload = {"status": "reverted", "reverted_at": now, "updated_at": now}
+        client = self._get_supabase_client()
+        if client:
+            try:
+                rows = (
+                    client.table("product_intelligence_suggestions")
+                    .update(update_payload)
+                    .eq("suggestion_id", suggestion_id)
+                    .eq("shop_domain", tenant)
+                    .eq("status", "applied")
+                    .execute().data or []
+                )
+                if rows:
+                    cached = dict(rows[0])
+                    self.product_intelligence_suggestions[suggestion_id] = cached
+                    return cached
+                return None
+            except Exception:
+                LOG.exception("Failed marking intelligence suggestion reverted %s", suggestion_id)
+        item = self.product_intelligence_suggestions.get(suggestion_id)
+        if not item or str(item.get("shop_domain") or "").strip().lower() != tenant:
+            return None
+        if str(item.get("status") or "") != "applied":
+            return None
+        item.update(update_payload)
+        return dict(item)
+
+    def mark_product_intelligence_suggestion_superseded(
+        self, *, suggestion_id: str, shop_domain: str | None = None
+    ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return None
+        now = self._utc_now()
+        update = {"status": "superseded", "superseded_at": now, "updated_at": now}
+        client = self._get_supabase_client()
+        if client:
+            try:
+                rows = (client.table("product_intelligence_suggestions").update(update)
+                        .eq("suggestion_id", suggestion_id).eq("shop_domain", tenant)
+                        .eq("status", "pending").execute().data or [])
+                if rows:
+                    self.product_intelligence_suggestions[suggestion_id] = dict(rows[0])
+                    return dict(rows[0])
+                return None
+            except Exception:
+                LOG.exception("Failed superseding intelligence suggestion %s", suggestion_id)
+        item = self.product_intelligence_suggestions.get(suggestion_id)
+        if not item or str(item.get("shop_domain") or "").strip().lower() != tenant:
+            return None
+        if item.get("status") != "pending":
+            return None
+        item.update(update)
+        return dict(item)
 
     def get_product_intelligence_bulk_operation(
         self,

@@ -24,10 +24,12 @@ class _FakeSupabaseApply:
                         {
                             "option_values": [{"option_name": "Size", "name": "S"}],
                             "sku": "SKU-S",
+                            "price": "10.00",
                         },
                         {
                             "option_values": [{"option_name": "Size", "name": "M"}],
                             "sku": "SKU-M",
+                            "price": "10.00",
                         },
                     ],
                 }
@@ -78,6 +80,8 @@ class _FakeShopifyApply:
                     "status": "ACTIVE",
                     "tags": [],
                     "seo": {"title": None, "description": None},
+                    "options": [{"name": "Title", "position": 1, "optionValues": [{"name": "Default Title"}]}],
+                    "variants": {"nodes": [{"id": "gid://shopify/ProductVariant/1", "title": "Default Title", "sku": "BASE", "price": "10.00", "selectedOptions": [{"name": "Title", "value": "Default Title"}]}]},
                 }
             }
         }
@@ -103,6 +107,18 @@ class _FakeShopifyApply:
                 }
             }
         }
+
+    async def set_product_variant_matrix(self, product_id: str, options, variants):
+        self.created_options.append((product_id, options))
+        self.created_variants.append((product_id, variants))
+        return {"data": {"productSet": {"userErrors": [], "product": {
+            "id": product_id,
+            "options": [{"name": "Size", "position": 1, "optionValues": [{"name": "S"}, {"name": "M"}]}],
+            "variants": {"nodes": [
+                {"id": "gid://shopify/ProductVariant/11", "title": "S", "sku": "SKU-S", "price": "10.00", "selectedOptions": [{"name": "Size", "value": "S"}]},
+                {"id": "gid://shopify/ProductVariant/12", "title": "M", "sku": "SKU-M", "price": "10.00", "selectedOptions": [{"name": "Size", "value": "M"}]},
+            ]},
+        }}}}
 
     async def update_product_from_input(self, product):
         self.updated_payload = product
@@ -156,12 +172,12 @@ class _FakeSupabaseRevert:
             }
         }
 
-    def mark_product_intelligence_suggestion_pending(self, suggestion_id: str, shop_domain=None):
+    def mark_product_intelligence_suggestion_reverted(self, suggestion_id: str, shop_domain=None):
         _ = suggestion_id, shop_domain
         self.pending_calls += 1
         if self.pending_calls == 1:
             raise RuntimeError("temporary write failure")
-        return {"suggestion_id": "sug-1", "status": "pending"}
+        return {"suggestion_id": "sug-1", "status": "reverted"}
 
 
 class _FakeShopifyRevert:
@@ -207,6 +223,11 @@ async def test_apply_tracks_created_variant_ids_for_revert():
         "gid://shopify/ProductVariant/12",
     ]
 
+    _, matrix_variants = shopify.created_variants[0]
+    assert all("sku" in variant for variant in matrix_variants), (
+        "set_product_variant_matrix path (productSet) must retain sku"
+    )
+
 
 @pytest.mark.asyncio
 async def test_revert_deletes_created_variants_and_retries_pending_write(monkeypatch):
@@ -227,7 +248,7 @@ async def test_revert_deletes_created_variants_and_retries_pending_write(monkeyp
         shop_domain="store.myshopify.com",
     )
 
-    assert result["status"] == "pending"
+    assert result["status"] == "reverted"
     assert shopify.updated_payload is None
     assert shopify.deleted_variants == [
         (

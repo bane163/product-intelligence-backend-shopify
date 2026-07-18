@@ -15,6 +15,31 @@ from .utils import require_shop_domain, resolve_shop_access_token
 router = APIRouter()
 
 
+async def _review_request_payload(request: Request) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        raw = await request.json()
+        if isinstance(raw, dict):
+            payload.update(raw)
+    else:
+        form = await request.form()
+        payload.update(dict(form.items()))
+    raw_reviews = payload.get("reviews_json")
+    if isinstance(raw_reviews, str):
+        try:
+            payload["reviews"] = json.loads(raw_reviews)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid reviews_json: {exc}")
+    if not isinstance(payload.get("reviews"), list):
+        raw_ids = payload.get("suggestion_ids")
+        if isinstance(raw_ids, list):
+            payload["reviews"] = [{"suggestion_id": value} for value in raw_ids]
+    if not isinstance(payload.get("reviews"), list) or not payload["reviews"]:
+        raise HTTPException(status_code=400, detail="reviews must be a non-empty list")
+    return payload
+
+
 def _to_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -184,6 +209,23 @@ async def run_product_intelligence_audit(
     all_products = _to_bool(payload.get("all_products"))
     query = payload.get("query")
     shop_domain = require_shop_domain(request, payload.get("shop_domain"))
+    run_id_value = (
+        str(run_id).strip()
+        if isinstance(run_id, str) and run_id.strip()
+        else str(uuid.uuid4())
+    )
+    observability_fields = current_observability_fields()
+    started_at = datetime.now(timezone.utc)
+    ctx.supabase.runs.create_or_update_run(run_id_value, {
+        "status": "queued", "source": "product_intelligence_audit",
+        "started_at": started_at.isoformat(), "attempt": 1,
+        "shop_domain": shop_domain, **observability_fields,
+    })
+    from application.services.run_event_emitter import RunEventEmitter
+    emitter = RunEventEmitter(tracing=ctx.services.tracing, supabase=ctx.supabase,
+                              run_id=run_id_value)
+    emitter.emit_and_persist(phase="audit_queued", message="Catalog audit queued")
+    ctx.supabase.runs.create_or_update_run(run_id_value, {"status": "running"})
     shop_access_token = resolve_shop_access_token(
         request,
         payload.get("shop_access_token"),
@@ -204,54 +246,31 @@ async def run_product_intelligence_audit(
     if isinstance(raw_products, list):
         products = [item for item in raw_products if isinstance(item, dict)]
 
-    if submitted_id:
-        document = ctx.supabase.submitted.get_submitted_document(str(submitted_id))
-        if not document:
-            raise HTTPException(status_code=404, detail="Submitted document not found")
-        doc_products = document.get("products")
-        if isinstance(doc_products, list):
-            products = [item for item in doc_products if isinstance(item, dict)]
+    try:
+        if submitted_id:
+            document = ctx.supabase.submitted.get_submitted_document(str(submitted_id))
+            if not document:
+                raise HTTPException(status_code=404, detail="Submitted document not found")
+            doc_products = document.get("products")
+            if isinstance(doc_products, list):
+                products = [item for item in doc_products if isinstance(item, dict)]
+        if all_products:
+            shopify_client = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain,
+                                                     shop_access_token=shop_access_token)
+            products = await shopify_client.list_products_for_audit(
+                query=query_text, limit=requested_limit)
+        if not products:
+            raise HTTPException(status_code=400, detail="No products found for audit")
+    except Exception as exc:
+        reason = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        emitter.emit_and_persist(phase="audit_failed", message="Catalog audit failed",
+                                 level="error", error=reason)
+        ctx.supabase.runs.finalize_run(run_id_value, status="error",
+            duration_ms=int((datetime.now(timezone.utc)-started_at).total_seconds()*1000),
+            error=reason)
+        ctx.services.tracing.complete_run(run_id_value)
+        raise
 
-    if all_products:
-        shopify_client = _resolve_shopify_client(
-            ctx=ctx,
-            shop_domain=str(shop_domain) if isinstance(shop_domain, str) else None,
-            shop_access_token=(
-                str(shop_access_token) if isinstance(shop_access_token, str) else None
-            ),
-        )
-        products = await shopify_client.list_products_for_audit(
-            query=query_text, limit=requested_limit
-        )
-
-    if not products:
-        raise HTTPException(status_code=400, detail="No products found for audit")
-
-    run_id_value = (
-        str(run_id).strip()
-        if isinstance(run_id, str) and run_id.strip()
-        else str(uuid.uuid4())
-    )
-    observability_fields = current_observability_fields()
-    started_at = datetime.now(timezone.utc)
-    ctx.supabase.runs.create_or_update_run(
-        run_id_value,
-        {
-            "status": "queued",
-            "source": "product_intelligence_audit",
-            "started_at": started_at.isoformat(),
-            "attempt": 1,
-            "shop_domain": shop_domain,
-            **observability_fields,
-        },
-    )
-    from application.services.run_event_emitter import RunEventEmitter
-
-    emitter = RunEventEmitter(
-        tracing=ctx.services.tracing,
-        supabase=ctx.supabase,
-        run_id=run_id_value,
-    )
     emitter.emit_and_persist(
         phase="audit_request_received",
         message="Received product intelligence audit request",
@@ -714,7 +733,151 @@ async def apply_product_intelligence_suggestion(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        status_code = 409 if "no longer actionable" in str(exc) else 400
+        raise HTTPException(status_code=status_code, detail=str(exc))
+
+
+@router.post("/intelligence/suggestions/review-preview", summary="Preview reviewed intelligence suggestions")
+async def preview_reviewed_suggestions(
+    request: Request, ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.intelligence_review_suggestions import preview
+
+    payload = await _review_request_payload(request)
+    shop_domain = require_shop_domain(request, payload.get("shop_domain"))
+    token = resolve_shop_access_token(request, payload.get("shop_access_token"), shop_domain=shop_domain)
+    shopify = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain, shop_access_token=token)
+    return await preview(
+        supabase=ctx.supabase, shopify=shopify,
+        reviews=[x for x in payload["reviews"] if isinstance(x, dict)],
+        shop_domain=shop_domain,
+    )
+
+
+@router.post("/intelligence/suggestions/apply-reviewed", summary="Apply reviewed intelligence suggestions")
+async def apply_reviewed_suggestions(
+    request: Request, ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.intelligence_review_suggestions import apply_reviewed
+
+    payload = await _review_request_payload(request)
+    shop_domain = require_shop_domain(request, payload.get("shop_domain"))
+    token = resolve_shop_access_token(request, payload.get("shop_access_token"), shop_domain=shop_domain)
+    shopify = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain, shop_access_token=token)
+    return await apply_reviewed(
+        supabase=ctx.supabase, shopify=shopify,
+        reviews=[x for x in payload["reviews"] if isinstance(x, dict)],
+        shop_domain=shop_domain, safe_only=_to_bool(payload.get("safe_only")),
+    )
+
+
+@router.post(
+    "/intelligence/suggestions/{suggestion_id}/regenerate",
+    summary="Regenerate one field of an intelligence suggestion",
+)
+async def regenerate_product_intelligence_suggestion(
+    suggestion_id: str, request: Request, ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.intelligence_apply_suggestion import _resolve_product_gid
+    from application.use_cases.intelligence_regenerate_suggestion import execute
+
+    data: dict[str, Any] = {}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        raw = await request.json()
+        if isinstance(raw, dict):
+            data.update(raw)
+    else:
+        form = await request.form()
+        data.update(dict(form.items()))
+    shop_domain = require_shop_domain(request, data.get("shop_domain"))
+    requested_run_id = data.get("run_id")
+    run_id = (
+        str(requested_run_id).strip()
+        if requested_run_id is not None and str(requested_run_id).strip()
+        else str(uuid.uuid4())
+    )
+    started_at = datetime.now(timezone.utc)
+    ctx.supabase.runs.create_or_update_run(run_id, {
+        "status": "queued", "source": "product_intelligence_regeneration",
+        "started_at": started_at.isoformat(), "attempt": 1,
+        "shop_domain": shop_domain, **current_observability_fields(),
+    })
+    from application.services.run_event_emitter import RunEventEmitter
+    emitter = RunEventEmitter(
+        tracing=ctx.services.tracing, supabase=ctx.supabase, run_id=run_id
+    )
+    emitter.emit_and_persist(
+        phase="regeneration_queued", message="Fix regeneration queued"
+    )
+    ctx.supabase.runs.create_or_update_run(run_id, {"status": "running"})
+
+    def finish(status: str, error: str | None = None) -> None:
+        try:
+            ctx.supabase.runs.finalize_run(
+                run_id,
+                status=status,
+                duration_ms=int(
+                    (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+                ),
+                error=error,
+            )
+        finally:
+            ctx.services.tracing.complete_run(run_id)
+
+    def record_failure(reason: str) -> None:
+        # Lifecycle telemetry must never replace the actionable request error.
+        try:
+            emitter.emit_and_persist(
+                phase="regeneration_failed",
+                message="Fix regeneration failed",
+                level="error",
+                error=reason,
+            )
+        except Exception:
+            pass
+        try:
+            finish("failed", reason)
+        except Exception:
+            pass
+
+    try:
+        field = str(data.get("field") or "").strip()
+        if not field:
+            raise HTTPException(status_code=400, detail="field is required")
+        token = resolve_shop_access_token(request, data.get("shop_access_token"), shop_domain=shop_domain)
+        shopify = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain, shop_access_token=token)
+        source = ctx.supabase.intelligence.get_product_intelligence_suggestion(
+            suggestion_id, shop_domain=shop_domain)
+        if not source:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+        gid = await _resolve_product_gid(shopify, {"id": source.get("product_id")})
+        if not gid:
+            raise HTTPException(status_code=400, detail="Unable to resolve suggestion product")
+        product = await shopify.get_product(gid)
+        if not isinstance(product, dict):
+            raise HTTPException(status_code=502, detail="Unable to load current Shopify product")
+        product.setdefault("id", gid)
+        result = await execute(supabase=ctx.supabase, suggestion_id=suggestion_id,
+                               field=field, product=product, shop_domain=shop_domain,
+                               trace_event=emitter.trace_event)
+        emitter.emit_and_persist(phase="regeneration_completed", message="Fix regeneration completed")
+        finish("succeeded")
+        result["run_id"] = run_id
+        return result
+    except HTTPException as exc:
+        reason = str(exc.detail)
+        record_failure(reason)
+        raise
+    except LookupError as exc:
+        record_failure(str(exc))
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        record_failure(str(exc))
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        record_failure(str(exc))
+        raise
 
 
 @router.post(

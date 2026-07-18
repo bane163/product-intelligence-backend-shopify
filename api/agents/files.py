@@ -1049,6 +1049,17 @@ async def process_excel(
         file_bytes_data = bytes(file_content)
     elif file:
         file_bytes_data = await file.read()
+        file_id = str(uuid.uuid4())
+        from application.use_cases.files.save_file import execute as save_file_execute
+        save_file_execute(
+            supabase=ctx.supabase,
+            file_id=file_id,
+            name=file.filename or "document",
+            content=file_bytes_data,
+            content_type=file.content_type or "application/octet-stream",
+            file_origin=MERCHANT_UPLOAD_FILE_ORIGIN,
+            shop_domain=tenant,
+        )
     else:
         raise HTTPException(
             status_code=400,
@@ -1282,6 +1293,20 @@ async def create_source_highlight(
         parsed_source_refs = decoded_source_refs
 
     tenant = require_shop_domain(request)
+    from application.use_cases.files.get_file import execute as get_file_execute
+    source_file = get_file_execute(supabase=ctx.supabase, file_id=file_id, shop_domain=tenant)
+    if not source_file:
+        raise HTTPException(status_code=404, detail="File not found")
+    source_format = classify_document(
+        filename=_optional_str(source_file, "name"),
+        content_type=_optional_str(source_file, "content_type"),
+        file_bytes=bytes(source_file.get("content") or b""),
+    )
+    if not source_format.is_spreadsheet:
+        raise HTTPException(
+            status_code=422,
+            detail="Source highlighting is available only for spreadsheet cell or range references",
+        )
     from services.source_link_trace import record as record_source_link_trace
     trace_fields = current_observability_fields()
     record_source_link_trace(
@@ -1347,47 +1372,6 @@ async def create_source_highlight(
         record_highlight_failure(exc)
         raise HTTPException(
             status_code=500, detail=f"Source highlight generation failed: {exc}"
-        )
-
-
-@router.get(
-    "/files/{file_id}/source-target",
-    summary="Resolve non-spreadsheet Collabora source target",
-)
-async def resolve_source_target(
-    file_id: str,
-    request: Request,
-    value: str | None = None,
-    document_kind: str | None = None,
-    page: int | None = None,
-    ctx: AppContext = Depends(get_ctx),
-) -> dict[str, Any]:
-    from application.use_cases.files.resolve_collabora_source_target import (
-        execute as resolve_source_target_execute,
-    )
-
-    if page is not None and page < 1:
-        raise HTTPException(status_code=422, detail="page must be greater than 0")
-
-    require_shop_domain(request)
-    try:
-        collabora_url = os.getenv("COLLABORA_URL", "http://localhost:8080")
-        return await resolve_source_target_execute(
-            supabase=ctx.supabase,
-            collabora=ctx.services.collabora,
-            source_file_id=file_id,
-            source_value=value,
-            source_document_kind=document_kind,
-            source_page=page,
-            collabora_base_url=collabora_url,
-        )
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Source target resolution failed: {exc}"
         )
 
 

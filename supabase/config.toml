@@ -123,6 +123,7 @@ allowed_mime_types = [
 	"application/pdf",
 	"image/png",
 	"image/jpeg",
+	"image/webp",
 	"application/octet-stream",
 ]
 objects_path = "./documents"

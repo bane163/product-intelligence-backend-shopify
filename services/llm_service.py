@@ -106,6 +106,8 @@ class LLMService(LLMServiceInterface):
             raise ValueError(
                 "Unsupported document type for extraction workflow; provide a supported file format."
             )
+        if document_format.kind in {"docx", "pptx", "image"}:
+            raise ValueError("Raw Office and image inputs must be canonicalized to PDF before the LLM workflow")
 
         is_csv = document_format.kind == "csv"
         is_spreadsheet_kind = document_format.kind in {

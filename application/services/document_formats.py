@@ -13,6 +13,7 @@ DocumentKind = Literal[
     "pdf",
     "docx",
     "pptx",
+    "image",
     "unsupported",
 ]
 
@@ -25,6 +26,10 @@ EXTENSION_TO_KIND: dict[str, DocumentKind] = {
     ".pdf": "pdf",
     ".docx": "docx",
     ".pptx": "pptx",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
 }
 
 CONTENT_TYPE_TO_KIND: dict[str, DocumentKind] = {
@@ -37,6 +42,9 @@ CONTENT_TYPE_TO_KIND: dict[str, DocumentKind] = {
     "application/pdf": "pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "image/png": "image",
+    "image/jpeg": "image",
+    "image/webp": "image",
 }
 
 SUPPORTED_EXTENSIONS = tuple(sorted(EXTENSION_TO_KIND.keys()))
@@ -94,6 +102,10 @@ def classify_document(
         elif file_bytes.startswith(b"PK\x03\x04"):
             # ZIP container (xlsx/xlsm/docx/pptx); extension/MIME are preferred.
             kind = "spreadsheet"
+        elif file_bytes.startswith(b"\x89PNG\r\n\x1a\n") or file_bytes.startswith(b"\xff\xd8\xff"):
+            kind = "image"
+        elif len(file_bytes) >= 12 and file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":
+            kind = "image"
 
     return DocumentFormat(
         kind=kind,
@@ -112,6 +124,22 @@ def validate_document_content(
     file_bytes: bytes,
 ) -> None:
     """Reject mislabeled or corrupt OOXML documents before persistence/queueing."""
+    if document_format.kind == "image":
+        try:
+            from PIL import Image
+            with Image.open(BytesIO(file_bytes)) as image:
+                image.verify()
+                actual = str(image.format or "").upper()
+        except Exception as exc:
+            raise ValueError("File content is invalid or corrupt") from exc
+        expected_by_extension = {
+            ".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"
+        }
+        expected_by_mime = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}
+        expected = expected_by_extension.get(document_format.extension) or expected_by_mime.get(document_format.content_type)
+        if expected and actual != expected:
+            raise ValueError("File content does not match its declared document type")
+        return
     if document_format.kind not in {"spreadsheet", "docx", "pptx"}:
         return
 

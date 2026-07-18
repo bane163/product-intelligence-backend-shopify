@@ -15,6 +15,10 @@ from application.ports.llm_port import LLMPort
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
 from application.services.document_formats import classify_document, validate_document_content
+from application.services.canonical_pdf import (
+    DocumentTextEvidenceUnavailable,
+    ensure_canonical_pdf,
+)
 from application.services.spreadsheet_source_refs import enrich_spreadsheet_source_refs
 from application.use_cases.intelligence_generate_suggestions import (
     execute as generate_suggestions_execute,
@@ -94,7 +98,7 @@ async def execute(
             supabase.runs.create_or_update_run(
             run_id,
             {
-                "input_file_id": None,
+                "input_file_id": source_file_id,
                 "input_filename": input_name,
                 "input_content_type": input_content_type,
                 "input_size_bytes": len(file_bytes),
@@ -187,12 +191,57 @@ async def execute(
 
         pdf_layout = None
         extracted_text_override = None
-        if document_format.kind == "pdf":
+        canonical_source_file_id = source_file_id
+        if document_format.kind in {"pdf", "docx", "pptx", "image"}:
+            if not source_file_id or not shop_domain:
+                raise RuntimeError("Canonical sources require a persisted tenant-owned input file")
+            emit_and_persist(
+                phase="canonicalization_start",
+                message="Resolving canonical PDF source",
+                payload_preview={"source_kind": document_format.kind},
+            )
+            try:
+                canonical = await ensure_canonical_pdf(
+                    supabase=supabase,
+                    collabora=ctx.services.collabora,
+                    source_file_id=source_file_id,
+                    source_content=file_bytes,
+                    source_name=input_name or source_file_id,
+                    source_content_type=input_content_type or "application/octet-stream",
+                    document_format=document_format,
+                    shop_domain=shop_domain,
+                    collabora_base_url=collabora_url,
+                )
+            except Exception as exc:
+                emit_and_persist(
+                    phase="canonicalization_failure",
+                    message="Canonical PDF creation failed",
+                    level="error",
+                    error=str(exc),
+                )
+                raise
+            canonical_source_file_id = canonical.file_id
+            file_bytes = canonical.content
+            input_name = canonical.filename
+            input_content_type = canonical.content_type
+            emit_and_persist(
+                phase="canonicalization_cache_hit" if canonical.cache_hit else "canonicalization_success",
+                message="Reused canonical PDF" if canonical.cache_hit else "Created canonical PDF",
+                payload_preview={"canonical_file_id": canonical.file_id},
+            )
             layout_service = ctx.services.document_layout
             if layout_service is None:
                 raise RuntimeError("PDF_LAYOUT_UNAVAILABLE: document layout service is not registered")
-            canonical_file_id = source_file_id or input_name or "uploaded.pdf"
-            pdf_layout = await layout_service.analyze_pdf(file_bytes, canonical_file_id)
+            pdf_layout = await layout_service.analyze_pdf(file_bytes, canonical_source_file_id)
+            if document_format.kind == "image" and not pdf_layout.anchors:
+                emit_and_persist(
+                    phase="canonicalization_no_text",
+                    message="Standalone image contains no textual evidence",
+                    level="error",
+                )
+                raise DocumentTextEvidenceUnavailable(
+                    "Azure processed the image but returned no usable textual anchors"
+                )
             extracted_text_override = pdf_layout.to_prompt_text()
             emit_and_persist(
                 phase="pdf_page_coverage",
@@ -244,7 +293,7 @@ async def execute(
             if products and pdf_layout is not None:
                 from application.services.pdf_source_refs import verify_pdf_source_refs
                 resolved, dropped = verify_pdf_source_refs(
-                    products, pdf_layout, source_file_id or input_name or "uploaded.pdf"
+                    products, pdf_layout, canonical_source_file_id or input_name or "uploaded.pdf"
                 )
                 emit_and_persist(
                     phase="pdf_anchor_resolution",

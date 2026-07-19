@@ -10,6 +10,7 @@ FROM cloudflare/cloudflared:2026.6.0 AS cloudflared
 
 FROM python:3.13-slim AS runtime
 ENV PYTHONUNBUFFERED=1 PATH="/app/.venv/bin:$PATH" PYTHONPATH=/app
+RUN pip install --no-cache-dir debugpy==1.8.17
 RUN groupadd --system stockpile && useradd --system --gid stockpile --home /app stockpile
 WORKDIR /app
 COPY --from=build /app/.venv ./.venv

@@ -152,9 +152,11 @@ def _collect_variant_operations_by_index(
         candidate_operations = (
             [raw_operations]
             if isinstance(raw_operations, dict)
-            else [item for item in raw_operations if isinstance(item, dict)]
-            if isinstance(raw_operations, list)
-            else []
+            else (
+                [item for item in raw_operations if isinstance(item, dict)]
+                if isinstance(raw_operations, list)
+                else []
+            )
         )
         normalized_operations: list[dict[str, Any]] = []
         for raw_operation in candidate_operations:
@@ -252,13 +254,57 @@ def _build_failed_result_row(
         "index": index,
         "title": title,
         "status": "failed",
-        "errors": errors
-        if isinstance(errors, list) and errors
-        else [{"field": None, "message": message or "Unknown submit error"}],
+        "errors": (
+            errors
+            if isinstance(errors, list) and errors
+            else [{"field": None, "message": message or "Unknown submit error"}]
+        ),
     }
     if shopify_product_id is not None:
         row["shopify_product_id"] = shopify_product_id
     return row
+
+
+def _build_partially_applied_result_row(
+    *, index: int, title: str, shopify_product_id: str, errors: list[Any]
+) -> dict[str, Any]:
+    return {
+        "index": index,
+        "title": title,
+        "status": "partially_applied",
+        "mode": "productSet",
+        "shopify_product_id": shopify_product_id,
+        "errors": errors,
+        "applied": ["product"],
+        "failed": ["metafields"],
+    }
+
+
+def _metafield_inputs(product: dict[str, Any], owner_id: str) -> list[dict[str, str]]:
+    raw = product.get("metafields")
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        namespace = _normalize_optional_string(item.get("namespace"))
+        key = _normalize_optional_string(item.get("key"))
+        value = item.get("value")
+        mf_type = (
+            _normalize_optional_string(item.get("type")) or "single_line_text_field"
+        )
+        if namespace and key and isinstance(value, str):
+            result.append(
+                {
+                    "ownerId": owner_id,
+                    "namespace": namespace,
+                    "key": key,
+                    "value": value,
+                    "type": mf_type,
+                }
+            )
+    return result
 
 
 async def execute(
@@ -309,6 +355,7 @@ async def execute(
             "shop_domain": shop_domain,
         },
     )
+
     def fail_submit(message: str) -> None:
         emit_and_persist(
             phase="workflow_error",
@@ -348,7 +395,11 @@ async def execute(
     if tenant or (isinstance(shop_access_token, str) and shop_access_token.strip()):
         submit_client = ShopifyClient(
             shop=tenant,
-            token=shop_access_token.strip() if isinstance(shop_access_token, str) else None,
+            token=(
+                shop_access_token.strip()
+                if isinstance(shop_access_token, str)
+                else None
+            ),
         )
 
     variant_operations_by_index = _collect_variant_operations_by_index(products)
@@ -458,7 +509,7 @@ async def execute(
         )
 
         bulk_status = final_status.get("status", "UNKNOWN")
-        result_url = final_status.get("url")
+        result_url = final_status.get("url") or final_status.get("partialDataUrl")
         root_count = final_status.get("rootObjectCount", 0)
 
         emit_and_persist(
@@ -483,10 +534,18 @@ async def execute(
         if bulk_status == "COMPLETED" and result_url:
             # Download and parse result JSONL
             bulk_results = await _download_bulk_results(submit_client, result_url)
+            results_by_line = {
+                int(row["__lineNumber"]): row
+                for row in bulk_results
+                if isinstance(row.get("__lineNumber"), (int, str))
+                and str(row.get("__lineNumber")).isdigit()
+            }
             for index, product in enumerate(submit_products):
                 title = product.get("title", f"Product {index}")
-                if index < len(bulk_results):
-                    result_data = bulk_results[index]
+                result_data = results_by_line.get(index) or results_by_line.get(
+                    index + 1
+                )
+                if result_data is not None:
                     product_set = result_data.get("data", {}).get("productSet", {})
                     user_errors = product_set.get("userErrors", [])
                     product_data = product_set.get("product", {})
@@ -517,6 +576,60 @@ async def execute(
                                     level="warning",
                                     error=str(var_exc),
                                 )
+                                results.append(
+                                    _build_failed_result_row(
+                                        index=index,
+                                        title=title,
+                                        message=f"Product partially applied; variant step failed: {var_exc}",
+                                        shopify_product_id=created_id,
+                                    )
+                                )
+                                continue
+                        metafields = (
+                            _metafield_inputs(product, created_id) if created_id else []
+                        )
+                        if metafields:
+                            try:
+                                metafields_response = (
+                                    await submit_client.set_product_metafields(
+                                        created_id, metafields
+                                    )
+                                )
+                                metafield_errors = _extract_user_errors(
+                                    metafields_response,
+                                    ["data", "metafieldsSet", "userErrors"],
+                                )
+                                if metafield_errors:
+                                    results.append(
+                                        _build_partially_applied_result_row(
+                                            index=index,
+                                            title=product_data.get("title", title),
+                                            shopify_product_id=created_id,
+                                            errors=[
+                                                {
+                                                    "field": ["metafields"],
+                                                    "message": message,
+                                                }
+                                                for message in metafield_errors
+                                            ],
+                                        )
+                                    )
+                                    continue
+                            except Exception as metafield_exc:
+                                results.append(
+                                    _build_partially_applied_result_row(
+                                        index=index,
+                                        title=product_data.get("title", title),
+                                        shopify_product_id=created_id,
+                                        errors=[
+                                            {
+                                                "field": ["metafields"],
+                                                "message": str(metafield_exc),
+                                            }
+                                        ],
+                                    )
+                                )
+                                continue
                         results.append(
                             _build_success_result_row(
                                 index=index,
@@ -533,12 +646,13 @@ async def execute(
                         )
                     )
         elif bulk_status == "COMPLETED":
-            # Completed but no result URL — assume all succeeded
+            # Shopify completion without output is not evidence of item success.
             for index, product in enumerate(submit_products):
                 results.append(
-                    _build_success_result_row(
+                    _build_failed_result_row(
                         index=index,
                         title=product.get("title", f"Product {index}"),
+                        message="Bulk operation completed without a result URL",
                     )
                 )
         else:
@@ -576,7 +690,7 @@ async def execute(
     successful_indexes: list[int] = []
     seen_indexes: set[int] = set()
     for row in results:
-        if row.get("status") != "success":
+        if row.get("status") not in {"success", "partially_applied"}:
             continue
         idx = row.get("index")
         if (
@@ -588,6 +702,9 @@ async def execute(
             successful_indexes.append(idx)
     success_count = len(successful_indexes)
     failed_count = max(0, len(submit_products) - success_count)
+    partial_count = sum(
+        1 for row in results if row.get("status") == "partially_applied"
+    )
     status = "success" if success_count > 0 else "error"
     submitted_id: str | None = None
     warnings: list[str] = []
@@ -665,6 +782,7 @@ async def execute(
     return {
         "success_count": success_count,
         "failed_count": failed_count,
+        "partial_count": partial_count,
         "results": results,
         "submitted_id": submitted_id,
         "duration_ms": submit_duration_ms,

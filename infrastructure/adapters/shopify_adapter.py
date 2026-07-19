@@ -22,14 +22,25 @@ class ShopifyAdapter:
     async def find_product_id_by_sku(self, sku: str) -> Optional[str]:
         return await self._client.find_product_id_by_sku(sku)
 
-    async def create_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
+    async def create_product_from_input(
+        self, product: Dict[str, Any]
+    ) -> Dict[str, Any]:
         return await self._client.create_product_from_input(product)
 
-    async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
+    async def update_product_from_input(
+        self, product: Dict[str, Any]
+    ) -> Dict[str, Any]:
         return await self._client.update_product_from_input(product)
 
-    async def set_product_variant_matrix(self, gid: str, options: list[Dict[str, Any]], variants: list[Dict[str, Any]]) -> Dict[str, Any]:
+    async def set_product_variant_matrix(
+        self, gid: str, options: list[Dict[str, Any]], variants: list[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         return await self._client.set_product_variant_matrix(gid, options, variants)
+
+    async def set_product_metafields(
+        self, owner_id: str, metafields: list[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        return await self._client.set_product_metafields(owner_id, metafields)
 
     async def create_product_options(
         self, product_id: str, options: list[Dict[str, Any]]

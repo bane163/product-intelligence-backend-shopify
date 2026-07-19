@@ -22,6 +22,7 @@ def execute(
     submit_run_id: str | None = None,
     submit_error: str | None = None,
     require_lifecycle_columns: bool = False,
+    revision: int | None = None,
     products: List[Dict[str, object]] | None = None,
 ) -> Dict[str, object]:
     return supabase.drafts.save_product_draft(
@@ -41,5 +42,6 @@ def execute(
         submit_run_id=submit_run_id,
         submit_error=submit_error,
         require_lifecycle_columns=require_lifecycle_columns,
+        revision=revision,
         products=products or [],
     )

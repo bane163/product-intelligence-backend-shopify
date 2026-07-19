@@ -12,7 +12,6 @@ from shared.observability import (
 )
 
 # Import routers from the api package
-from api.shopify_products import router as shopify_router
 from api.agents import router as agents_router
 
 # Configure logging
@@ -129,7 +128,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(shopify_router)
 app.include_router(agents_router)
 
 

@@ -1,5 +1,6 @@
 """Shopify submission routes."""
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -100,6 +101,8 @@ async def submit_products_to_shopify(
     document_name: str | None = Form(None),
     shop_domain: str | None = Form(None),
     offload: bool = Form(False),
+    plan_id: str | None = Form(None),
+    revision: int | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.processing.submit_products import (
@@ -114,11 +117,31 @@ async def submit_products_to_shopify(
 
     require_internal_service_key(request)
     resolved_shop_domain = resolve_shop_domain(request, shop_domain)
-    resolved_shop_access_token = resolve_shop_access_token(
-        request,
-        shop_domain=resolved_shop_domain,
-    )
-    resolved_draft_id = draft_id
+    if not resolved_shop_domain:
+        raise HTTPException(status_code=400, detail="Missing shop_domain")
+    review_detail = {"code": "REVIEW_REQUIRED", "message": "An approved, current mutation plan is required"}
+    if products_json or submitted_id or draft_id or not plan_id or revision is None:
+        raise HTTPException(status_code=409, detail=review_detail)
+    plan_store = getattr(ctx.supabase, "_service", ctx.supabase)
+    plan = plan_store.get_mutation_plan(plan_id, shop_domain=resolved_shop_domain)
+    if not isinstance(plan, dict) or plan.get("status") != "approved":
+        raise HTTPException(status_code=409, detail=review_detail)
+    if int(plan.get("draft_revision") or 0) != int(revision):
+        raise HTTPException(status_code=409, detail={**review_detail, "message": "Mutation plan revision is stale"})
+    resolved_draft_id = str(plan.get("draft_id") or "")
+    current_draft = ctx.supabase.drafts.get_product_draft(resolved_draft_id, shop_domain=resolved_shop_domain)
+    if not current_draft or int(current_draft.get("revision") or 1) != int(revision):
+        raise HTTPException(status_code=409, detail={**review_detail, "message": "Draft changed after approval"})
+    selected_items = [x for x in plan.get("items", []) if isinstance(x, dict) and x.get("selected")]
+    if not selected_items or any(x.get("blockers") for x in selected_items):
+        raise HTTPException(status_code=409, detail=review_detail)
+    products_json = json.dumps([x.get("proposed") for x in selected_items])
+    try:
+        resolved_shop_access_token = __import__("shopify_session_store").get_offline_access_token(resolved_shop_domain)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail={"code": SHOPIFY_REAUTH_REQUIRED, "action": "/auth/login"}) from exc
+    if not resolved_shop_access_token:
+        raise HTTPException(status_code=401, detail={"code": SHOPIFY_REAUTH_REQUIRED, "action": "/auth/login"})
     if offload:
         try:
             offline_token = __import__("shopify_session_store").get_offline_access_token(
@@ -134,44 +157,7 @@ async def submit_products_to_shopify(
             )
             raise HTTPException(status_code=401, detail=SHOPIFY_REAUTH_REQUIRED)
         observability_fields = current_observability_fields()
-        effective_run_id = run_id or str(uuid.uuid4())
-        if not resolved_draft_id and submitted_id:
-            submitted_document = get_submitted_execute(
-                supabase=ctx.supabase,
-                submitted_id=submitted_id,
-                shop_domain=resolved_shop_domain,
-            )
-            if isinstance(submitted_document, dict):
-                inferred_draft_id = submitted_document.get("draft_id")
-                if isinstance(inferred_draft_id, str) and inferred_draft_id.strip():
-                    resolved_draft_id = inferred_draft_id.strip()
-
-        if not resolved_draft_id and products_json:
-            products = parse_products_json(products_json)
-            if products:
-                resolved_draft_id = str(uuid.uuid4())
-                save_draft_execute(
-                    supabase=ctx.supabase,
-                    draft_id=resolved_draft_id,
-                    run_id=effective_run_id,
-                    import_mode=import_mode,
-                    draft_name=document_name,
-                    shop_domain=resolved_shop_domain,
-                    products=products,
-                    extraction_status="succeeded",
-                    extraction_run_id=None,
-                    extraction_error=None,
-                    submit_status="queued",
-                    submit_run_id=effective_run_id,
-                    submit_error=None,
-                )
-
-        if not resolved_draft_id:
-            raise HTTPException(
-                status_code=400,
-                detail="Offloaded submit requires draft_id or products_json",
-            )
-
+        effective_run_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"shopify-mutation-plan:{plan_id}"))
         try:
             _save_submit_draft_state(
                 ctx=ctx,
@@ -195,7 +181,7 @@ async def submit_products_to_shopify(
                 },
             )
             ctx.supabase.runs.enqueue_offload_job(
-                str(uuid.uuid4()),
+                str(uuid.uuid5(uuid.NAMESPACE_URL, f"shopify-mutation-job:{plan_id}")),
                 {
                     "queue_name": "offload",
                     "job_type": "shopify_submit",
@@ -208,8 +194,8 @@ async def submit_products_to_shopify(
                     "payload": {
                         "import_mode": import_mode,
                         "document_name": document_name,
-                        "products_json": products_json,
-                        "has_shop_access_token": bool(resolved_shop_access_token),
+                        "plan_id": plan_id,
+                        "revision": revision,
                     },
                 },
                 require_persistent_queue=True,

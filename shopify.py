@@ -27,6 +27,7 @@ load_dotenv()
 ROOT = pathlib.Path(__file__).parent
 LOG = logging.getLogger(__name__)
 SHOPIFY_REAUTH_REQUIRED = "SHOPIFY_REAUTH_REQUIRED"
+SHOPIFY_API_VERSION = "2026-07"
 
 
 def _load_graphql(name: str) -> str:
@@ -127,7 +128,7 @@ class ShopifyClient:
         self._client: Optional[httpx.AsyncClient] = None
         # Build URL lazily when shop known; store template now if shop present
         self.url = (
-            f"https://{self.shop}/admin/api/2026-07/graphql.json"
+            f"https://{self.shop}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
             if self.shop
             else None
         )
@@ -257,7 +258,7 @@ class ShopifyClient:
             self.shop = _normalize_shop(self.shop)
             if self.shop:
                 self.url = (
-                    f"https://{self.shop}/admin/api/2026-07/graphql.json"
+                    f"https://{self.shop}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
                 )
 
         if not self.shop:
@@ -287,6 +288,13 @@ class ShopifyClient:
             timeout=30.0,
             transport=httpx.AsyncHTTPTransport(retries=3),
         )
+
+    async def close(self) -> None:
+        """Close and clear the lazily-created HTTP client, if present."""
+        client = self._client
+        self._client = None
+        if client is not None:
+            await client.aclose()
 
     def set_token(self, token: str, persist: bool = False) -> None:
         """Attach a token to the client at runtime.
@@ -716,18 +724,8 @@ class ShopifyClient:
     async def get_bulk_operation(self, operation_id: str) -> Dict[str, Any]:
         """Query the status of a bulk operation by ID."""
         query = _load_graphql("bulkOperationQuery.graphql")
-        resp = await self.graphql(query)
-        bulk_op = resp.get("data", {}).get("currentBulkOperation", {})
-        if (
-            isinstance(bulk_op, dict)
-            and bulk_op.get("id")
-            and operation_id
-            and bulk_op.get("id") != operation_id
-        ):
-            raise RuntimeError(
-                "Current bulk mutation operation does not match requested operation: "
-                f"expected={operation_id} actual={bulk_op.get('id')}"
-            )
+        resp = await self.graphql(query, {"id": operation_id})
+        bulk_op = resp.get("data", {}).get("bulkOperation", {})
         return bulk_op
 
     async def wait_for_bulk_operation(

@@ -14,6 +14,60 @@ _PRODUCT_FIELD_MAPPING = {
 _PRODUCT_MUTATION_FIELD_MAPPING = {"id": "id", **_PRODUCT_FIELD_MAPPING}
 _CLEARABLE_STRING_FIELDS = {"vendor", "body_html", "product_type"}
 
+_CORE_PRODUCT_ALIASES = {
+    "title": ("title",),
+    "handle": ("handle",),
+    "descriptionHtml": ("descriptionHtml", "body_html", "bodyHtml", "description"),
+    "vendor": ("vendor",),
+    "productType": ("productType", "product_type", "product_category"),
+    "status": ("status",),
+    "tags": ("tags",),
+}
+
+
+def normalize_core_product(product: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize extracted and Shopify product aliases to ProductSetInput keys."""
+    result: Dict[str, Any] = {}
+    for target, aliases in _CORE_PRODUCT_ALIASES.items():
+        source = next((key for key in aliases if key in product), None)
+        if source is None:
+            continue
+        value = product.get(source)
+        if target == "tags":
+            value = normalize_tags(value, allow_empty=True)
+        elif isinstance(value, str):
+            value = value.strip()
+            if target == "status":
+                value = value.upper()
+        if value not in (None, "", [], {}):
+            result[target] = value
+
+    raw_seo = product.get("seo") if isinstance(product.get("seo"), dict) else {}
+    seo_title = next(
+        (
+            product.get(key)
+            for key in ("seo_title", "seoTitle", "meta_title")
+            if key in product
+        ),
+        raw_seo.get("title"),
+    )
+    seo_description = next(
+        (
+            product.get(key)
+            for key in ("seo_description", "seoDescription", "meta_description")
+            if key in product
+        ),
+        raw_seo.get("description"),
+    )
+    seo = {
+        key: value.strip() if isinstance(value, str) else value
+        for key, value in {"title": seo_title, "description": seo_description}.items()
+        if value not in (None, "")
+    }
+    if seo:
+        result["seo"] = seo
+    return result
+
 
 def normalize_tags(tags: Any, *, allow_empty: bool = False) -> list[str] | None:
     if tags is None:
@@ -104,16 +158,13 @@ def build_product_payload(
 
 
 def build_product_set_input(product: Dict[str, Any]) -> Dict[str, Any]:
-    payload = _apply_field_mapping(product, _PRODUCT_FIELD_MAPPING)
-    tags = normalize_tags(
-        product.get("tags"),
-        allow_empty="tags" in product,
-    )
-    if tags is not None:
-        payload["tags"] = tags
-    seo_payload = _build_seo_payload(product, include_empty_when_explicit=False)
-    if seo_payload is not None:
-        payload["seo"] = seo_payload
+    payload = normalize_core_product(product)
+    raw_options = product.get("productOptions") or product.get("options")
+    raw_variants = product.get("variants")
+    if isinstance(raw_options, list):
+        payload["productOptions"] = normalize_product_options(raw_options)
+    if isinstance(raw_variants, list):
+        payload["variants"] = normalize_variant_inputs(raw_variants)
     return payload
 
 
@@ -121,9 +172,8 @@ def build_product_set_identifier(product: Dict[str, Any]) -> Dict[str, str] | No
     gid = product.get("id") or product.get("shopify_gid")
     if isinstance(gid, str) and gid.strip():
         return {"id": gid.strip()}
-    handle = product.get("handle")
-    if isinstance(handle, str) and handle.strip():
-        return {"handle": handle.strip()}
+    # Handles are discovery keys, never mutation authority. Only a Shopify GID
+    # resolved by the server may identify an existing product.
     return None
 
 
@@ -147,16 +197,26 @@ def normalize_product_options(options: Any) -> List[Dict[str, Any]]:
             continue
         name = str(option.get("name") or "").strip()
         raw_values = option.get("values")
-        values = (
-            [str(item).strip() for item in raw_values if str(item).strip()]
-            if isinstance(raw_values, list)
-            else []
-        )
+        if not isinstance(raw_values, list):
+            raw_values = option.get("optionValues")
+        values = []
+        if isinstance(raw_values, list):
+            for item in raw_values:
+                value = item.get("name") if isinstance(item, dict) else item
+                value = str(value or "").strip()
+                if value:
+                    values.append(value)
         if not name or not values:
             continue
-        normalized_options.append(
-            {"name": name, "values": [{"name": value} for value in values]}
-        )
+        payload: Dict[str, Any] = {
+            "name": name,
+            "values": [{"name": value} for value in values],
+        }
+        if isinstance(option.get("id"), str) and option["id"].strip():
+            payload["id"] = option["id"].strip()
+        if isinstance(option.get("position"), int):
+            payload["position"] = option["position"]
+        normalized_options.append(payload)
     return normalized_options
 
 
@@ -171,15 +231,22 @@ def normalize_variant_inputs(
             continue
         option_values = item.get("option_values")
         if not isinstance(option_values, list):
+            option_values = item.get("optionValues")
+        if not isinstance(option_values, list):
+            option_values = item.get("selectedOptions")
+        if not isinstance(option_values, list):
             option_values = []
         normalized_option_values: List[Dict[str, str]] = []
         for option in option_values:
             if not isinstance(option, dict):
                 continue
             option_name = str(
-                option.get("option_name") or option.get("optionName") or ""
+                option.get("option_name")
+                or option.get("optionName")
+                or option.get("name")
+                or ""
             ).strip()
-            name = str(option.get("name") or option.get("value") or "").strip()
+            name = str(option.get("value") or option.get("name") or "").strip()
             if option_name and name:
                 normalized_option_values.append(
                     {"optionName": option_name, "name": name}
@@ -187,17 +254,37 @@ def normalize_variant_inputs(
         if not normalized_option_values:
             continue
         payload: Dict[str, Any] = {"optionValues": normalized_option_values}
-        sku = str(item.get("sku") or "").strip()
-        if sku and not strip_sku:
-            payload["sku"] = sku
-        price = item.get("price")
-        if price not in (None, ""):
-            payload["price"] = str(price)
-        inventory_quantity = item.get("inventory_quantity")
-        if isinstance(inventory_quantity, int):
-            payload["inventoryQuantities"] = [
-                {"availableQuantity": inventory_quantity}
-            ]
+        if isinstance(item.get("id"), str) and item["id"].strip():
+            payload["id"] = item["id"].strip()
+        for field in (
+            "sku",
+            "price",
+            "compareAtPrice",
+            "barcode",
+            "taxable",
+            "taxCode",
+            "inventoryPolicy",
+        ):
+            if (
+                field not in item
+                or item[field] is None
+                or (field == "sku" and strip_sku)
+            ):
+                continue
+            value = item[field]
+            if field in {"price", "compareAtPrice"} and value != "":
+                value = str(value)
+            payload[field] = value
+        inventory_item = item.get("inventoryItem")
+        if isinstance(inventory_item, dict) and inventory_item:
+            allowed_inventory = {
+                key: value
+                for key, value in inventory_item.items()
+                if key in {"sku", "cost", "tracked", "requiresShipping", "measurement"}
+                and value is not None
+            }
+            if allowed_inventory:
+                payload["inventoryItem"] = allowed_inventory
         normalized_variants.append(payload)
     return normalized_variants
 

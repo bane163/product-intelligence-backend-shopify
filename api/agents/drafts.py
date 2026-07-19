@@ -68,6 +68,7 @@ async def save_product_draft(
         "product_count": saved["product_count"],
         "first_product_title": saved.get("first_product_title"),
         "created_at": saved.get("created_at"),
+        "revision": saved.get("revision", 1),
     }
 
 

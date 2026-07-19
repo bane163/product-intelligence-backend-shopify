@@ -1282,6 +1282,61 @@ async def test_submit_products_partial_success_creates_submitted_document(monkey
 
 
 @pytest.mark.asyncio
+async def test_submit_products_reports_metafield_failure_as_partially_applied(monkeypatch):
+    import shopify as shopify_module
+    import shopify_session_store
+
+    _force_in_memory_storage(monkeypatch)
+    monkeypatch.setattr(shopify_session_store, "get_offline_access_token", lambda shop: "token")
+    ctx = get_app_context()
+    service = ctx.services.supabase._service
+    draft_id = "metafield-partial-draft"
+    plan_id = "metafield-partial-plan"
+    proposed = {
+        "title": "Trail Tee",
+        "metafields": [{"namespace": "custom", "key": "fit", "value": "regular", "type": "single_line_text_field"}],
+    }
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id, "shop_domain": TEST_SHOP_DOMAIN, "revision": 1,
+        "products": [proposed],
+    }
+    service.mutation_plans[plan_id] = {
+        "plan_id": plan_id, "draft_id": draft_id, "shop_domain": TEST_SHOP_DOMAIN,
+        "draft_revision": 1, "status": "approved",
+        "items": [{"item_id": "item-1", "selected": True, "blockers": [], "proposed": proposed}],
+    }
+
+    _patch_bulk_submit(monkeypatch, [{
+        "__lineNumber": 0,
+        "data": {"productSet": {
+            "product": {"id": "gid://shopify/Product/301", "title": "Trail Tee"},
+            "userErrors": [],
+        }}
+    }])
+
+    async def fake_set_product_metafields(self, owner_id, metafields):
+        assert owner_id == "gid://shopify/Product/301"
+        assert metafields[0]["ownerId"] == owner_id
+        return {"data": {"metafieldsSet": {"metafields": [], "userErrors": [
+            {"field": ["metafields", "0", "value"], "message": "Invalid metafield value"}
+        ]}}}
+
+    monkeypatch.setattr(shopify_module.ShopifyClient, "set_product_metafields", fake_set_product_metafields)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
+        response = await ac.post("/agents/submit-products", data={
+            "import_mode": "auto",
+            "plan_id": plan_id,
+            "revision": "1",
+        })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success_count"] == 1, body
+    assert body["partial_count"] == 1
+    assert body["results"][0]["status"] == "partially_applied"
+    assert body["results"][0]["failed"] == ["metafields"]
+
+
+@pytest.mark.asyncio
 async def test_submit_products_uses_request_scoped_shop_context(monkeypatch):
     from infrastructure.adapters.shopify_adapter import ShopifyAdapter
     import shopify as shopify_module

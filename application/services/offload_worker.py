@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import socket
@@ -8,14 +9,19 @@ from typing import Any
 
 from app_context import AppContext, get_app_context
 from application.use_cases.drafts.get_product_draft import execute as get_draft_execute
-from application.use_cases.drafts.save_product_draft import execute as save_draft_execute
+from application.use_cases.drafts.save_product_draft import (
+    execute as save_draft_execute,
+)
 from application.use_cases.files.get_file import execute as get_file_execute
 from application.use_cases.processing.process_document import (
     execute as process_document_execute,
 )
 from application.use_cases.processing.submit_products import execute as submit_execute
 from shared.metrics_signals import signal_offload_queue, signal_worker_job_failure
-from shared.observability import bind_observability_context, current_observability_fields
+from shared.observability import (
+    bind_observability_context,
+    current_observability_fields,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -140,7 +146,9 @@ def _estimate_queue_backlog(ctx: AppContext, queue_name: str) -> int | None:
     for value in memory_jobs.values():
         if not isinstance(value, dict):
             continue
-        if (_optional_str(value.get("queue_name")) or "default").lower() != normalized_queue:
+        if (
+            _optional_str(value.get("queue_name")) or "default"
+        ).lower() != normalized_queue:
             continue
         status = (_optional_str(value.get("status")) or "").lower()
         if status in {"queued", "retryable"}:
@@ -180,36 +188,54 @@ def _save_draft_state(
         supabase=ctx.supabase,
         draft_id=draft_id,
         run_id=_optional_str_field(existing, "run_id") or fallback_run_id,
-        import_mode=_optional_str_field(existing, "import_mode") or fallback_import_mode,
+        import_mode=_optional_str_field(existing, "import_mode")
+        or fallback_import_mode,
         draft_name=_optional_str_field(existing, "draft_name") or fallback_name,
         shop_domain=_optional_str_field(existing, "shop_domain") or shop_domain,
-        input_file_id=_optional_str_field(existing, "input_file_id") or fallback_input_file_id,
+        input_file_id=_optional_str_field(existing, "input_file_id")
+        or fallback_input_file_id,
         input_filename=_optional_str_field(existing, "input_filename")
         or fallback_input_filename,
-        output_file_id=output_file_id
-        if output_file_id is not None
-        else _optional_str_field(existing, "output_file_id"),
-        output_filename=output_filename
-        if output_filename is not None
-        else _optional_str_field(existing, "output_filename"),
-        extraction_status=extraction_status
-        if extraction_status is not None
-        else _optional_str_field(existing, "extraction_status"),
-        extraction_run_id=extraction_run_id
-        if extraction_run_id is not None
-        else _optional_str_field(existing, "extraction_run_id"),
-        extraction_error=extraction_error
-        if extraction_error is not None
-        else _optional_str_field(existing, "extraction_error"),
-        submit_status=submit_status
-        if submit_status is not None
-        else _optional_str_field(existing, "submit_status"),
-        submit_run_id=submit_run_id
-        if submit_run_id is not None
-        else _optional_str_field(existing, "submit_run_id"),
-        submit_error=submit_error
-        if submit_error is not None
-        else _optional_str_field(existing, "submit_error"),
+        output_file_id=(
+            output_file_id
+            if output_file_id is not None
+            else _optional_str_field(existing, "output_file_id")
+        ),
+        output_filename=(
+            output_filename
+            if output_filename is not None
+            else _optional_str_field(existing, "output_filename")
+        ),
+        extraction_status=(
+            extraction_status
+            if extraction_status is not None
+            else _optional_str_field(existing, "extraction_status")
+        ),
+        extraction_run_id=(
+            extraction_run_id
+            if extraction_run_id is not None
+            else _optional_str_field(existing, "extraction_run_id")
+        ),
+        extraction_error=(
+            extraction_error
+            if extraction_error is not None
+            else _optional_str_field(existing, "extraction_error")
+        ),
+        submit_status=(
+            submit_status
+            if submit_status is not None
+            else _optional_str_field(existing, "submit_status")
+        ),
+        submit_run_id=(
+            submit_run_id
+            if submit_run_id is not None
+            else _optional_str_field(existing, "submit_run_id")
+        ),
+        submit_error=(
+            submit_error
+            if submit_error is not None
+            else _optional_str_field(existing, "submit_error")
+        ),
         require_lifecycle_columns=True,
         products=products if products is not None else _draft_products(existing),
     )
@@ -237,9 +263,7 @@ class OffloadWorker:
             ctx=ctx,
             queue_name=os.getenv("OFFLOAD_QUEUE_NAME", "offload"),
             worker_id=os.getenv("OFFLOAD_WORKER_ID"),
-            lease_seconds=_safe_int(
-                os.getenv("OFFLOAD_LEASE_SECONDS"), 300, minimum=1
-            ),
+            lease_seconds=_safe_int(os.getenv("OFFLOAD_LEASE_SECONDS"), 300, minimum=1),
             poll_seconds=_safe_float(
                 os.getenv("OFFLOAD_POLL_SECONDS"), 2.0, minimum=0.1
             ),
@@ -450,7 +474,44 @@ class OffloadWorker:
         import_mode = _optional_str(payload.get("import_mode")) or "auto"
         document_name = _optional_str(payload.get("document_name"))
         products_json = _optional_str(payload.get("products_json"))
-        shop_access_token = _optional_str(payload.get("shop_access_token"))
+        plan_id = _optional_str(payload.get("plan_id"))
+        revision = payload.get("revision")
+        if not plan_id or revision is None or not shop_domain:
+            raise RuntimeError("REVIEW_REQUIRED: approved mutation plan missing")
+        plan_store = getattr(self.ctx.supabase, "_service", self.ctx.supabase)
+        plan = plan_store.get_mutation_plan(plan_id, shop_domain=shop_domain)
+        if (
+            not isinstance(plan, dict)
+            or plan.get("status") not in {"approved", "executing"}
+            or int(plan.get("draft_revision") or 0) != int(revision)
+        ):
+            raise RuntimeError("REVIEW_REQUIRED: mutation plan is stale or unapproved")
+        current_draft = self.ctx.supabase.drafts.get_product_draft(
+            str(plan.get("draft_id") or ""), shop_domain=shop_domain
+        )
+        if not current_draft or int(current_draft.get("revision") or 1) != int(
+            revision
+        ):
+            raise RuntimeError("REVIEW_REQUIRED: draft changed after approval")
+        selected = [
+            item.get("proposed")
+            for item in plan.get("items", [])
+            if isinstance(item, dict)
+            and item.get("selected")
+            and not item.get("blockers")
+        ]
+        if not selected:
+            raise RuntimeError("REVIEW_REQUIRED: plan has no selected valid changes")
+        plan_store.save_mutation_plan({**plan, "status": "executing"})
+        products_json = json.dumps(selected)
+        try:
+            shop_access_token = __import__(
+                "shopify_session_store"
+            ).get_offline_access_token(shop_domain)
+        except Exception as exc:
+            raise RuntimeError("SHOPIFY_REAUTH_REQUIRED") from exc
+        if not shop_access_token:
+            raise RuntimeError("SHOPIFY_REAUTH_REQUIRED")
         LOG.info(
             "offload_submit_start run_id=%s draft_id=%s submitted_id=%s shop_domain=%s "
             "import_mode=%s has_products_json=%s has_shop_access_token=%s",
@@ -496,6 +557,38 @@ class OffloadWorker:
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
         )
+        result_rows = result.get("results", []) if isinstance(result, dict) else []
+        selected_index = 0
+        updated_items = []
+        for item in plan.get("items", []):
+            item = dict(item)
+            if item.get("selected"):
+                item["execution"] = (
+                    result_rows[selected_index]
+                    if selected_index < len(result_rows)
+                    else None
+                )
+                selected_index += 1
+            updated_items.append(item)
+        failed_count = (
+            int(result.get("failed_count") or 0)
+            if isinstance(result, dict)
+            else len(selected)
+        )
+        success_count = (
+            int(result.get("success_count") or 0) if isinstance(result, dict) else 0
+        )
+        partial_count = (
+            int(result.get("partial_count") or 0) if isinstance(result, dict) else 0
+        )
+        lifecycle = (
+            "partially_applied"
+            if partial_count or (success_count and failed_count)
+            else "completed" if success_count else "failed"
+        )
+        plan_store.save_mutation_plan(
+            {**plan, "items": updated_items, "status": lifecycle}
+        )
         LOG.info(
             "offload_submit_result run_id=%s draft_id=%s submitted_id=%s success_count=%s failed_count=%s error=%s",
             run_id,
@@ -537,7 +630,11 @@ class OffloadWorker:
                 fallback_name=document_name,
                 submit_status="succeeded" if submit_succeeded else "failed",
                 submit_run_id=run_id,
-                submit_error=None if submit_succeeded else (error_detail or "Submit did not complete"),
+                submit_error=(
+                    None
+                    if submit_succeeded
+                    else (error_detail or "Submit did not complete")
+                ),
             )
         if not submit_succeeded:
             LOG.error(
@@ -560,6 +657,16 @@ class OffloadWorker:
         run_id = _optional_str(job.get("run_id"))
         draft_id = _optional_str(job.get("draft_id"))
         job_type = _optional_str(job.get("job_type")) or "unknown"
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        plan_id = _optional_str(payload.get("plan_id"))
+        shop_domain = _optional_str(job.get("shop_domain"))
+        if job_type == "shopify_submit" and plan_id and shop_domain:
+            plan_store = getattr(self.ctx.supabase, "_service", self.ctx.supabase)
+            plan = plan_store.get_mutation_plan(plan_id, shop_domain=shop_domain)
+            if isinstance(plan, dict):
+                plan_store.save_mutation_plan(
+                    {**plan, "status": "failed", "execution_error": error}
+                )
 
         if run_id:
             self.ctx.supabase.runs.finalize_run(run_id, status="failed", error=error)
@@ -645,22 +752,32 @@ class OffloadWorker:
                 self.queue_name,
             )
 
-            transitioned = self.ctx.supabase.runs.transition_offload_workflow(job_id, "running")
-            if not transitioned or str(transitioned.get("status") or "").lower() == "cancelled":
+            transitioned = self.ctx.supabase.runs.transition_offload_workflow(
+                job_id, "running"
+            )
+            if (
+                not transitioned
+                or str(transitioned.get("status") or "").lower() == "cancelled"
+            ):
                 return True
 
             try:
                 result = await self._process_job(job)
-                self.ctx.supabase.runs.transition_offload_workflow(job_id, "succeeded", result=result)
+                self.ctx.supabase.runs.transition_offload_workflow(
+                    job_id, "succeeded", result=result
+                )
                 LOG.info("Offload job succeeded: job_id=%s type=%s", job_id, job_type)
             except Exception as exc:
                 error_message = _exception_message(exc)
                 LOG.exception("Offload job failed: job_id=%s", job_id)
                 attempt_count = _safe_int(job.get("attempt_count"), 1, minimum=0)
                 max_attempts = _safe_int(job.get("max_attempts"), 5, minimum=1)
-                should_retry = attempt_count < max_attempts and _is_retryable_job_failure(
-                    job_type=job_type,
-                    error_message=error_message,
+                should_retry = (
+                    attempt_count < max_attempts
+                    and _is_retryable_job_failure(
+                        job_type=job_type,
+                        error_message=error_message,
+                    )
                 )
                 signal_worker_job_failure(
                     queue_name=self.queue_name,
@@ -677,14 +794,17 @@ class OffloadWorker:
                         seconds=_compute_retry_delay_seconds(attempt_count)
                     )
                     self.ctx.supabase.runs.transition_offload_workflow(
-                        job_id, "retryable", error=error_message,
-                        available_at=retry_at.isoformat(), result={
-                                "error": error_message,
-                                "dead_letter": False,
-                                "attempt_count": attempt_count,
-                                "max_attempts": max_attempts,
-                                "retry_at": retry_at.isoformat(),
-                            },
+                        job_id,
+                        "retryable",
+                        error=error_message,
+                        available_at=retry_at.isoformat(),
+                        result={
+                            "error": error_message,
+                            "dead_letter": False,
+                            "attempt_count": attempt_count,
+                            "max_attempts": max_attempts,
+                            "retry_at": retry_at.isoformat(),
+                        },
                     )
                     continue_run_id = _optional_str(job.get("run_id"))
                     signal_offload_queue(
@@ -707,13 +827,16 @@ class OffloadWorker:
                             job_id,
                         )
                     self.ctx.supabase.runs.transition_offload_workflow(
-                        job_id, "failed", error=error_message,
-                        failure_code=_failure_code(error_message), result={
-                                "error": error_message,
-                                "dead_letter": True,
-                                "attempt_count": attempt_count,
-                                "max_attempts": max_attempts,
-                            },
+                        job_id,
+                        "failed",
+                        error=error_message,
+                        failure_code=_failure_code(error_message),
+                        result={
+                            "error": error_message,
+                            "dead_letter": True,
+                            "attempt_count": attempt_count,
+                            "max_attempts": max_attempts,
+                        },
                     )
                     signal_offload_queue(
                         queue_name=self.queue_name,

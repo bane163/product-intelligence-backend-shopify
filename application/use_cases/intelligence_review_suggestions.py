@@ -41,7 +41,8 @@ def classify_field(suggestion: dict[str, Any], field: str, *, changed: bool) -> 
         "risk_reasons": reasons,
         "supported": supported,
         "reversible": reversible,
-        "selected_by_default": supported and reversible and not elevated,
+        # Kept in the response for older clients; review always starts opt-in.
+        "selected_by_default": False,
     }
 
 

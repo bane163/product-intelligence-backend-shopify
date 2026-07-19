@@ -7,6 +7,7 @@ from .supabase_drafts_mixin import SupabaseDraftsMixin
 from .supabase_file_mixin import SupabaseFileMixin
 from .supabase_intelligence_mixin import SupabaseIntelligenceMixin
 from .supabase_llm_config_mixin import SupabaseLlmConfigMixin
+from .supabase_mutation_plans_mixin import SupabaseMutationPlansMixin
 from .supabase_runs_mixin import SupabaseRunsMixin
 
 
@@ -17,6 +18,7 @@ class SupabaseService(
     SupabaseIntelligenceMixin,
     SupabaseLlmConfigMixin,
     SupabaseBillingMixin,
+    SupabaseMutationPlansMixin,
     SupabaseServiceInterface,
 ):
     def _utc_now(self) -> str:
@@ -31,6 +33,7 @@ class SupabaseService(
         self.llm_runs: dict[str, dict[str, Any]] = {}
         self.llm_run_events: dict[str, list[dict[str, Any]]] = {}
         self.product_drafts: dict[str, dict[str, Any]] = {}
+        self.mutation_plans: dict[str, dict[str, Any]] = {}
         self.submitted_documents: dict[str, dict[str, Any]] = {}
         self.product_intelligence_audits: dict[str, dict[str, Any]] = {}
         self.product_intelligence_findings: dict[str, list[dict[str, Any]]] = {}

@@ -119,6 +119,7 @@ class SupabasePort(Protocol):
         submit_run_id: str | None = None,
         submit_error: str | None = None,
         require_lifecycle_columns: bool = False,
+        revision: int | None = None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
 

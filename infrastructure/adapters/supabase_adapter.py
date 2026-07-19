@@ -220,6 +220,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         submit_run_id: str | None = None,
         submit_error: str | None = None,
         require_lifecycle_columns: bool = False,
+        revision: int | None = None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self._service.save_product_draft(
@@ -239,6 +240,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             submit_run_id=submit_run_id,
             submit_error=submit_error,
             require_lifecycle_columns=require_lifecycle_columns,
+            revision=revision,
             products=products,
         )
 

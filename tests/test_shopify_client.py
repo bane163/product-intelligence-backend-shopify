@@ -9,6 +9,31 @@ import httpx
 from shopify import ShopifyClient
 
 
+@pytest.mark.asyncio
+async def test_close_is_safe_before_client_initialization():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+
+    await client.close()
+
+    assert client._client is None
+
+
+@pytest.mark.asyncio
+async def test_close_closes_clears_and_can_be_repeated():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    await client._ensure_client()
+    active_client = client._client
+
+    await client.close()
+
+    assert active_client is not None
+    assert active_client.is_closed
+    assert client._client is None
+
+    await client.close()
+    assert client._client is None
+
+
 def test_shipped_graphql_documents_have_balanced_braces():
     graphql_dir = Path(__file__).resolve().parents[1] / "graphql"
 
@@ -398,11 +423,11 @@ async def test_create_staged_upload_surfaces_graphql_error():
 
 
 @pytest.mark.asyncio
-async def test_get_bulk_operation_uses_current_bulk_operation_query():
+async def test_get_bulk_operation_queries_the_requested_operation_id():
     client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
     response = {
         "data": {
-            "currentBulkOperation": {
+            "bulkOperation": {
                 "id": "gid://shopify/BulkOperation/1",
                 "status": "RUNNING",
                 "errorCode": None,
@@ -422,8 +447,9 @@ async def test_get_bulk_operation_uses_current_bulk_operation_query():
         assert result["id"] == "gid://shopify/BulkOperation/1"
         assert route.called
         request_body = json.loads(route.calls.last.request.content.decode())
-        assert "currentBulkOperation" in request_body["query"]
-        assert "bulkOperation(id:" not in request_body["query"]
+        assert "bulkOperation(id:" in request_body["query"]
+        assert "currentBulkOperation" not in request_body["query"]
+        assert request_body["variables"] == {"id": "gid://shopify/BulkOperation/1"}
 
 
 @pytest.mark.asyncio

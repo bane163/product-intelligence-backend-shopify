@@ -139,6 +139,7 @@ class SupabaseDraftsMixin:
         submit_run_id: str | None = None,
         submit_error: str | None = None,
         require_lifecycle_columns: bool = False,
+        revision: int | None = None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
         now = self._utc_now()
@@ -163,6 +164,7 @@ class SupabaseDraftsMixin:
             "submit_run_id": submit_run_id,
             "submit_error": submit_error,
             "products": products,
+            "revision": max(1, int(revision or 1)),
             "product_count": len(products),
             "first_product_title": first_title,
             "created_at": now,

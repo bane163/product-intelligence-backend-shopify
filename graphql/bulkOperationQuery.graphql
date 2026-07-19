@@ -1,5 +1,5 @@
-query bulkOperationQuery {
-  currentBulkOperation(type: MUTATION) {
+query bulkOperationQuery($id: ID!) {
+  bulkOperation(id: $id) {
     id
     status
     errorCode

@@ -35,3 +35,14 @@ def test_decryption_fails_closed_with_wrong_identity(monkeypatch):
         raise AssertionError("expected decryption failure")
     except RuntimeError as exc:
         assert "decrypt" in str(exc).lower()
+
+
+def test_encryption_key_has_no_api_secret_fallback(monkeypatch):
+    monkeypatch.delenv("SHOPIFY_TOKEN_ENCRYPTION_KEY", raising=False)
+    monkeypatch.delenv("SHOPIFY_TOKEN_ENCRYPTION_KEY_PREVIOUS", raising=False)
+    monkeypatch.setenv("SHOPIFY_API_SECRET", "must-not-be-used")
+    try:
+        shopify_session_store._keys()
+        raise AssertionError("expected explicit encryption key requirement")
+    except RuntimeError as exc:
+        assert str(exc) == "SHOPIFY_TOKEN_ENCRYPTION_KEY is required"

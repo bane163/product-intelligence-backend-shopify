@@ -565,6 +565,7 @@ async def run_excel_writer_agent(
     model_env: Dict[str, str] | None = None,
     trace_event: TraceFn = None,
     supabase_service: Any | None = None,
+    shop_domain: str | None = None,
 ) -> AgentRunResponse:
     """Create a tool-enabled agent that writes the ProductsList to a spreadsheet.
 
@@ -575,6 +576,9 @@ async def run_excel_writer_agent(
     returned AgentRunResponse as `generated_file`.
     """
 
+    if not (shop_domain or "").strip():
+        raise ValueError("shop_domain is required for generated workbooks")
+    shop_domain = shop_domain.strip().lower()
     client = _create_chat_client(model_env)
 
     absolute_path = os.path.abspath(output_path)
@@ -611,6 +615,7 @@ async def run_excel_writer_agent(
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             file_origin="workflow_output",
+            shop_domain=shop_domain,
         )
 
         _trace(
@@ -717,6 +722,7 @@ async def run_excel_writer_agent(
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             file_origin="workflow_output",
+            shop_domain=shop_domain,
         )
         generated_file = {
             "file_id": file_id,

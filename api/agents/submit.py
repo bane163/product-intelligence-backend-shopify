@@ -12,6 +12,7 @@ from app_context import AppContext, get_ctx
 from shared.metrics_signals import signal_api_error
 from shared.observability import current_observability_fields
 from shopify import (
+    SHOPIFY_REAUTH_REQUIRED,
     ShopifyClient,
 )  # kept for route-level monkeypatch compatibility in tests
 from .utils import (
@@ -119,6 +120,19 @@ async def submit_products_to_shopify(
     )
     resolved_draft_id = draft_id
     if offload:
+        try:
+            offline_token = __import__("shopify_session_store").get_offline_access_token(
+                resolved_shop_domain
+            )
+            if not offline_token:
+                raise RuntimeError(SHOPIFY_REAUTH_REQUIRED)
+        except Exception as exc:
+            LOG.warning(
+                "Rejecting offloaded submit without decryptable offline session shop=%s error=%s",
+                resolved_shop_domain,
+                exc,
+            )
+            raise HTTPException(status_code=401, detail=SHOPIFY_REAUTH_REQUIRED)
         observability_fields = current_observability_fields()
         effective_run_id = run_id or str(uuid.uuid4())
         if not resolved_draft_id and submitted_id:
@@ -237,6 +251,8 @@ async def submit_products_to_shopify(
         )
         return result
     except RuntimeError as exc:
+        if SHOPIFY_REAUTH_REQUIRED in str(exc):
+            raise HTTPException(status_code=401, detail=SHOPIFY_REAUTH_REQUIRED)
         signal_api_error(
             route="/submit-products",
             method="POST",

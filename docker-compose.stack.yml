@@ -44,6 +44,8 @@ services:
       - DEBUG=true
       - COLLABORA_TUNNEL_REQUIRED=true
       - SUPABASE_URL=http://host.docker.internal:54321
+      - SHOPIFY_STORE=
+      - SHOPIFY_ACCESS_TOKEN=
     volumes:
       - ./:/app
       - /app/.venv
@@ -73,6 +75,8 @@ services:
     environment:
       - SUPABASE_URL=http://host.docker.internal:54321
       - COLLABORA_URL=http://collabora:9980
+      - SHOPIFY_STORE=
+      - SHOPIFY_ACCESS_TOKEN=
       - OFFLOAD_QUEUE_NAME=${OFFLOAD_QUEUE_NAME:-offload}
       - OFFLOAD_WORKER_ID=${OFFLOAD_WORKER_ID:-offload-worker}
       - OFFLOAD_LEASE_SECONDS=${OFFLOAD_LEASE_SECONDS:-300}

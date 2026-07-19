@@ -11,6 +11,8 @@ def execute(
     *,
     shop_domain: str | None = None,
 ) -> dict[str, str]:
+    if not (shop_domain or "").strip():
+        raise ValueError("shop_domain is required for preview artifacts")
     document = supabase.submitted.get_submitted_document(
         submitted_id,
         shop_domain=shop_domain,
@@ -30,5 +32,6 @@ def execute(
         content=output_bytes,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         file_origin="submitted_resume",
+        shop_domain=shop_domain,
     )
     return {"file_id": file_id, "filename": filename}

@@ -172,6 +172,10 @@ class SupabaseFileMixin:
                 item.get("file_origin")
             ) or self._infer_file_origin_from_filename(name)
             normalized_shop = str(item.get("shop_domain") or "").strip().lower() or None
+            if normalized_origin != FILE_ORIGIN_MERCHANT_UPLOAD and not normalized_shop:
+                raise ValueError(
+                    f"shop_domain is required for generated artifact file_id={file_id}"
+                )
 
             if bucket is None:
                 self.file_storage[file_id] = {

@@ -352,6 +352,7 @@ async def execute(
     source_refs: list[dict[str, Any]] | None = None,
     preferred_sheet: str | None = None,
     highlight_file_id: str | None = None,
+    shop_domain: str,
 ) -> dict[str, Any]:
     file_entry = supabase.file.get_file(source_file_id)
     if not file_entry:
@@ -397,6 +398,7 @@ async def execute(
             content=highlighted_pdf_bytes,
             content_type=_PDF_CONTENT_TYPE,
             file_origin="source_highlight",
+            shop_domain=shop_domain,
         )
         if not supabase.file.get_file(output_file_id):
             raise RuntimeError("Highlighted source artifact failed storage verification")
@@ -536,6 +538,7 @@ async def execute(
         content=output.getvalue(),
         content_type=output_content_type,
         file_origin="source_highlight",
+        shop_domain=shop_domain,
     )
     if not supabase.file.get_file(output_file_id):
         raise RuntimeError("Highlighted source artifact failed storage verification")

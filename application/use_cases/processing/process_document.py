@@ -264,6 +264,7 @@ async def execute(
             writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,
             trace_event=trace_event,
             extracted_text_override=extracted_text_override,
+            shop_domain=shop_domain,
         )
         if isinstance(result, ProductsList):
             result = {
@@ -405,6 +406,7 @@ async def execute(
                             content=refreshed_output_bytes,
                             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             file_origin="workflow_output",
+                            shop_domain=shop_domain,
                         )
                         result["file_id"] = refreshed_file_id
                         result["filename"] = refreshed_filename
@@ -465,6 +467,7 @@ async def execute(
                         content=out_bytes,
                         content_type=ct,
                         file_origin="workflow_output",
+                        shop_domain=shop_domain,
                     )
                     try:
                         os.remove(result)

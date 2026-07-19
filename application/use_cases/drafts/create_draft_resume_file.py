@@ -19,6 +19,8 @@ def execute(
     *,
     shop_domain: str | None = None,
 ) -> dict[str, str]:
+    if not (shop_domain or "").strip():
+        raise ValueError("shop_domain is required for preview artifacts")
     draft = supabase.drafts.get_product_draft(draft_id, shop_domain=shop_domain)
     if not draft:
         raise LookupError("Draft not found")
@@ -53,6 +55,7 @@ def execute(
         content=output_bytes,
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         file_origin="draft_resume",
+        shop_domain=shop_domain,
     )
     # update the draft with output file info
     from application.use_cases.drafts.save_product_draft import (

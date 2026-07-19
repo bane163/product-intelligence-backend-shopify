@@ -9,6 +9,34 @@ from shopify import ShopifyClient
 
 
 @pytest.mark.asyncio
+async def test_explicit_shop_ignores_global_token_and_loads_offline_session(monkeypatch):
+    monkeypatch.setenv("SHOPIFY_ACCESS_TOKEN", "wrong-global-token")
+    monkeypatch.setattr(
+        "shopify.shopify_session_store.get_offline_access_token",
+        lambda shop: "correct-offline-token",
+    )
+    client = ShopifyClient(shop="tenant-shop.myshopify.com")
+
+    await client._ensure_client()
+
+    assert client._token == "correct-offline-token"
+    assert client._client is not None
+    assert client._client.headers["X-Shopify-Access-Token"] == "correct-offline-token"
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_shopify_401_is_normalized_to_reauth_marker():
+    client = ShopifyClient(shop="tenant-shop.myshopify.com", token="expired")
+    with respx.mock(base_url="https://tenant-shop.myshopify.com") as mock:
+        mock.post("/admin/api/2026-07/graphql.json").respond(401)
+        with pytest.raises(RuntimeError, match="SHOPIFY_REAUTH_REQUIRED"):
+            await client.graphql("query { shop { id } }")
+    assert client._client is not None
+    await client._client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_shopify_client_crud():
     client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
     url = client.url

@@ -18,19 +18,13 @@ def _decode(value: str) -> bytes:
 
 
 def _keys() -> list[bytes]:
-    development_fallback = (
-        os.getenv("SHOPIFY_API_SECRET", "").strip()
-        if os.getenv("ENVIRONMENT", "").strip().lower() != "production"
-        else ""
-    )
     values = [
         os.getenv("SHOPIFY_TOKEN_ENCRYPTION_KEY", "").strip(),
         os.getenv("SHOPIFY_TOKEN_ENCRYPTION_KEY_PREVIOUS", "").strip(),
-        development_fallback,
     ]
     keys = [hashlib.sha256(value.encode("utf-8")).digest() for value in values if value]
     if not keys:
-        raise RuntimeError("SHOPIFY_TOKEN_ENCRYPTION_KEY is required in production")
+        raise RuntimeError("SHOPIFY_TOKEN_ENCRYPTION_KEY is required")
     return keys
 
 

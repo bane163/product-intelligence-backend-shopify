@@ -26,6 +26,7 @@ load_dotenv()
 # Path to this module; graphql files are stored in the `graphql/` sibling folder
 ROOT = pathlib.Path(__file__).parent
 LOG = logging.getLogger(__name__)
+SHOPIFY_REAUTH_REQUIRED = "SHOPIFY_REAUTH_REQUIRED"
 
 
 def _load_graphql(name: str) -> str:
@@ -116,9 +117,10 @@ class ShopifyClient:
         # Defer resolution/creation of the httpx client until it's needed.
         # This allows constructing a ShopifyClient with only a shop or only
         # client credentials in process, and attaching the token later.
-        self.shop = _normalize_shop(shop or os.getenv("SHOPIFY_STORE"))
+        self._explicit_shop = _normalize_shop(shop)
+        self.shop = self._explicit_shop or _normalize_shop(os.getenv("SHOPIFY_STORE"))
         # token may be provided directly; otherwise resolved lazily
-        self._token = token or os.getenv("SHOPIFY_ACCESS_TOKEN")
+        self._token = token or (None if self._explicit_shop else os.getenv("SHOPIFY_ACCESS_TOKEN"))
 
         # HTTPX async client will be created on first request once token is
         # available. Keep it None for now.
@@ -165,6 +167,8 @@ class ShopifyClient:
                             resp.headers.get("Retry-After")
                         ),
                     )
+                if resp.status_code == 401:
+                    raise RuntimeError(SHOPIFY_REAUTH_REQUIRED)
                 resp.raise_for_status()
                 body = resp.json()
                 top_level_errors = body.get("errors")
@@ -261,17 +265,18 @@ class ShopifyClient:
                 "SHOPIFY_STORE must be set (either pass `shop=` or set SHOPIFY_STORE env)"
             )
 
-        # Resolve token: explicit, env, or canonical app session.
-        if not self._token:
+        # Explicit-shop clients must never borrow a global single-store token.
+        if not self._token and not self._explicit_shop:
             self._token = os.getenv("SHOPIFY_ACCESS_TOKEN")
         if not self._token:
-            self._token = shopify_session_store.get_offline_access_token(self.shop)
+            try:
+                self._token = shopify_session_store.get_offline_access_token(self.shop)
+            except Exception as exc:
+                LOG.warning("Shopify offline session unavailable shop=%s error=%s", self.shop, exc)
+                raise RuntimeError(SHOPIFY_REAUTH_REQUIRED) from exc
 
         if not self._token:
-            raise RuntimeError(
-                "No access token available: set SHOPIFY_ACCESS_TOKEN, pass `token=` to ShopifyClient, "
-                "or complete the OAuth flow which saves a token in the token store."
-            )
+            raise RuntimeError(SHOPIFY_REAUTH_REQUIRED)
 
         headers = {
             "X-Shopify-Access-Token": self._token,

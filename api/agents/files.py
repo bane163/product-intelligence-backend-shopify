@@ -1228,12 +1228,15 @@ async def process_excel(
 
 @router.get("/files/{file_id}", summary="Get file info")
 async def get_file_info(
-    file_id: str, ctx: AppContext = Depends(get_ctx)
+    file_id: str, request: Request, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, Any]:
     """Get information about an uploaded file."""
     from application.use_cases.files.get_file import execute as get_file_execute
 
-    file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id)
+    tenant = require_shop_domain(request)
+    file_entry = get_file_execute(
+        supabase=ctx.supabase, file_id=file_id, shop_domain=tenant
+    )
     if not file_entry:
         raise HTTPException(status_code=404, detail="File not found")
     file_content = file_entry.get("content")
@@ -1343,8 +1346,8 @@ async def create_source_highlight(
             source_refs=parsed_source_refs,
             preferred_sheet=preferred_sheet,
             highlight_file_id=highlight_file_id,
+            shop_domain=tenant,
         )
-        ctx.supabase.file.set_file_shop_domain(str(result["file_id"]), tenant)
         record_source_link_trace(
             component="backend",
             stage="highlight_complete",

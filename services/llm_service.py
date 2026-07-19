@@ -88,6 +88,7 @@ class LLMService(LLMServiceInterface):
         writer_agent_prompt: Optional[str] = None,
         trace_event=None,
         extracted_text_override: str | None = None,
+        shop_domain: str | None = None,
     ) -> Workflow:
         effective_input_name = input_name
         if not effective_input_name and isinstance(excel_input, str):
@@ -305,6 +306,7 @@ class LLMService(LLMServiceInterface):
                     model_env=model_env,
                     trace_event=trace_event,
                     supabase_service=self.supabase,
+                    shop_domain=shop_domain,
                 )
                 generated = getattr(response, "generated_file", None)
                 if generated:
@@ -371,6 +373,7 @@ class LLMService(LLMServiceInterface):
         writer_agent_prompt: Optional[str] = None,
         trace_event=None,
         extracted_text_override: str | None = None,
+        shop_domain: str | None = None,
     ) -> ProductsList | dict | str | None:
         workflow = self.get_agent_workflow(
             excel_input,
@@ -387,6 +390,7 @@ class LLMService(LLMServiceInterface):
             writer_agent_prompt=writer_agent_prompt,
             trace_event=trace_event,
             extracted_text_override=extracted_text_override,
+            shop_domain=shop_domain,
         )
         started_at = perf_counter()
         model_id = (

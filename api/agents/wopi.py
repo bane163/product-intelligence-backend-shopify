@@ -121,6 +121,7 @@ async def wopi_put_file(file_id: str, request: Request, ctx: AppContext = Depend
             if isinstance(file_data.get("file_origin"), str)
             else None
         ),
+        shop_domain=token["shop"],
     )
     return Response(status_code=200)
 

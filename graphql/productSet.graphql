@@ -4,8 +4,25 @@ mutation productSet($input: ProductSetInput!, $identifier: ProductSetIdentifiers
       id
       title
       handle
-      options { name position optionValues { name } }
-      variants(first: 250) { nodes { id title sku price selectedOptions { name value } }
+      options {
+        name
+        position
+        optionValues {
+          name
+        }
+      }
+      variants(first: 250) {
+        nodes {
+          id
+          title
+          sku
+          price
+          selectedOptions {
+            name
+            value
+          }
+        }
+      }
     }
     userErrors {
       field

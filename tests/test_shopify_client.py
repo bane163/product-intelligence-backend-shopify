@@ -1,11 +1,58 @@
 import json
 import logging
+from pathlib import Path
 
 import pytest
 import respx
 import httpx
 
 from shopify import ShopifyClient
+
+
+def test_shipped_graphql_documents_have_balanced_braces():
+    graphql_dir = Path(__file__).resolve().parents[1] / "graphql"
+
+    for document_path in sorted(graphql_dir.glob("*.graphql")):
+        depth = 0
+        for character in document_path.read_text(encoding="utf-8"):
+            if character == "{":
+                depth += 1
+            elif character == "}":
+                depth -= 1
+                assert depth >= 0, f"Unexpected closing brace in {document_path.name}"
+
+        assert depth == 0, f"Unbalanced braces in {document_path.name}"
+
+
+@pytest.mark.asyncio
+async def test_run_bulk_mutation_uses_product_set_variant_matrix_document():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    response = {
+        "data": {
+            "bulkOperationRunMutation": {
+                "bulkOperation": {
+                    "id": "gid://shopify/BulkOperation/1",
+                    "status": "CREATED",
+                },
+                "userErrors": [],
+            }
+        }
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        route = mock.post("/admin/api/2026-07/graphql.json").respond(200, json=response)
+        result = await client.run_bulk_mutation("tmp/bulk_import.jsonl")
+
+    assert result == response["data"]["bulkOperationRunMutation"]["bulkOperation"]
+    request_body = json.loads(route.calls.last.request.content.decode())
+    embedded_mutation = request_body["variables"]["mutation"]
+    assert request_body["variables"]["stagedUploadPath"] == "tmp/bulk_import.jsonl"
+    assert "product {" in embedded_mutation
+    assert "options {" in embedded_mutation
+    assert "optionValues {" in embedded_mutation
+    assert "variants(first: 250) {" in embedded_mutation
+    assert "selectedOptions {" in embedded_mutation
+    assert "userErrors {" in embedded_mutation
 
 
 @pytest.mark.asyncio

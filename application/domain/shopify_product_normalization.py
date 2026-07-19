@@ -68,6 +68,10 @@ def _apply_field_mapping(
         value = product.get(source_key)
         if value is None:
             continue
+        if source_key == "status" and isinstance(value, str):
+            value = value.strip().upper()
+            if not value:
+                continue
         if value == "" and source_key not in allow_empty:
             continue
         payload[target_key] = value

@@ -48,6 +48,19 @@ def test_build_product_set_input_omits_empty_seo_and_normalizes_tags() -> None:
     assert "seo" not in payload
 
 
+def test_product_payloads_normalize_shopify_status_enum_case() -> None:
+    for status in ("active", "Archived", " DRAFT ", "UNLISTED"):
+        expected = status.strip().upper()
+
+        assert build_product_set_input({"title": "Catalog Product", "status": status})[
+            "status"
+        ] == expected
+        assert build_product_payload(
+            {"title": "Catalog Product", "status": status},
+            include_id=False,
+        )["status"] == expected
+
+
 def test_build_product_set_identifier_prefers_id_then_handle() -> None:
     assert build_product_set_identifier({"id": "gid://shopify/Product/9"}) == {
         "id": "gid://shopify/Product/9"

@@ -45,6 +45,36 @@ def _build_ctx() -> AppContext:
     )
 
 
+def _seed_approved_submit_plan(
+    ctx: AppContext, *, draft_id: str, products: list[dict]
+) -> tuple[str, int]:
+    draft = ctx.supabase.drafts.get_product_draft(draft_id)
+    assert isinstance(draft, dict)
+    revision = int(draft.get("revision") or 1)
+    plan_id = f"plan-{draft_id}"
+    ctx.supabase._service.save_mutation_plan(
+        {
+            "plan_id": plan_id,
+            "draft_id": draft_id,
+            "shop_domain": draft.get("shop_domain") or "worker-test.myshopify.com",
+            "draft_revision": revision,
+            "version": 1,
+            "status": "approved",
+            "items": [
+                {
+                    "item_id": f"item-{index}",
+                    "selected": True,
+                    "selectable": True,
+                    "blockers": [],
+                    "proposed": product,
+                }
+                for index, product in enumerate(products)
+            ],
+        }
+    )
+    return plan_id, revision
+
+
 def test_claim_next_offload_job_claims_retryable_job_when_available():
     ctx = _build_ctx()
     job_id = "job-claim-retryable"
@@ -59,7 +89,9 @@ def test_claim_next_offload_job_claims_retryable_job_when_available():
             "file_id": "file-claim-retryable",
             "attempt_count": 1,
             "max_attempts": 3,
-            "available_at": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+            "available_at": (
+                datetime.now(timezone.utc) - timedelta(seconds=1)
+            ).isoformat(),
             "payload": {},
         },
     )
@@ -74,6 +106,41 @@ def test_claim_next_offload_job_claims_retryable_job_when_available():
     assert claimed["job_id"] == job_id
     assert claimed["status"] == "claimed"
     assert int(claimed.get("attempt_count") or 0) == 2
+
+
+def test_create_once_enqueue_does_not_reset_existing_job():
+    ctx = _build_ctx()
+    job_id = "deterministic-submit-job"
+    original = ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "shopify_submit",
+            "status": "queued",
+            "run_id": "run-original",
+            "payload": {"plan_id": "plan-original"},
+        },
+        create_once=True,
+    )
+    assert original is not None
+    ctx.supabase.runs.update_offload_job(job_id, {"status": "running"})
+
+    replay = ctx.supabase.runs.enqueue_offload_job(
+        job_id,
+        {
+            "queue_name": "offload",
+            "job_type": "shopify_submit",
+            "status": "queued",
+            "run_id": "run-replacement",
+            "payload": {"plan_id": "plan-replacement"},
+        },
+        create_once=True,
+    )
+
+    assert replay is not None
+    assert replay["status"] == "running"
+    assert replay["run_id"] == "run-original"
+    assert replay["payload"] == {"plan_id": "plan-original"}
 
 
 @pytest.mark.asyncio
@@ -367,7 +434,9 @@ async def test_run_once_requeues_document_import_job_before_max_attempts(monkeyp
     assert job["status"] == "retryable"
     assert "transient extraction failure" in str(job.get("error", "")).lower()
     assert int(job.get("attempt_count") or 0) == 1
-    available_at = datetime.fromisoformat(str(job.get("available_at")).replace("Z", "+00:00"))
+    available_at = datetime.fromisoformat(
+        str(job.get("available_at")).replace("Z", "+00:00")
+    )
     assert available_at > datetime.now(timezone.utc)
     result_payload = job.get("result")
     assert isinstance(result_payload, dict)
@@ -468,14 +537,15 @@ async def test_run_once_marks_document_import_job_dead_letter_after_max_attempts
     draft = ctx.supabase.drafts.get_product_draft(draft_id)
     assert draft is not None
     assert draft["extraction_status"] == "failed"
-    assert "permanent extraction failure" in str(draft.get("extraction_error", "")).lower()
+    assert (
+        "permanent extraction failure" in str(draft.get("extraction_error", "")).lower()
+    )
 
     run = ctx.supabase.runs.get_run(run_id)
     assert run is None or run["status"] == "failed"
     signal_messages = [record.getMessage() for record in caplog.records]
     assert any(
-        '"event": "offload.worker_job"' in message
-        and '"dead_letter": true' in message
+        '"event": "offload.worker_job"' in message and '"dead_letter": true' in message
         for message in signal_messages
     )
 
@@ -582,6 +652,7 @@ async def test_run_once_document_import_auto_submit_enqueues_shopify_submit_job(
 @pytest.mark.asyncio
 async def test_run_once_processes_shopify_submit_job_success(monkeypatch):
     import application.services.offload_worker as offload_worker
+    import shopify_session_store
 
     ctx = _build_ctx()
     run_id = "run-submit-success"
@@ -601,6 +672,13 @@ async def test_run_once_processes_shopify_submit_job_success(monkeypatch):
         submit_run_id=run_id,
         submit_error=None,
         products=[{"title": "Queued Product"}],
+        shop_domain="worker-test.myshopify.com",
+    )
+    plan_id, revision = _seed_approved_submit_plan(
+        ctx, draft_id=draft_id, products=[{"title": "Queued Product"}]
+    )
+    monkeypatch.setattr(
+        shopify_session_store, "get_offline_access_token", lambda shop: "token"
     )
     ctx.supabase.runs.enqueue_offload_job(
         job_id,
@@ -610,10 +688,13 @@ async def test_run_once_processes_shopify_submit_job_success(monkeypatch):
             "status": "queued",
             "run_id": run_id,
             "draft_id": draft_id,
+            "shop_domain": "worker-test.myshopify.com",
             "payload": {
                 "import_mode": "auto",
                 "document_name": "Queued Submit",
                 "enable_ai_enhancements": False,
+                "plan_id": plan_id,
+                "revision": revision,
             },
         },
     )
@@ -624,6 +705,8 @@ async def test_run_once_processes_shopify_submit_job_success(monkeypatch):
         return {
             "submitted_id": "submitted-123",
             "success_count": 1,
+            "failed_count": 0,
+            "partial_count": 0,
             "results": [{"status": "success"}],
         }
 
@@ -657,6 +740,7 @@ async def test_run_once_processes_shopify_submit_job_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_once_marks_shopify_submit_job_failed(monkeypatch):
     import application.services.offload_worker as offload_worker
+    import shopify_session_store
 
     ctx = _build_ctx()
     run_id = "run-submit-failed"
@@ -683,6 +767,13 @@ async def test_run_once_marks_shopify_submit_job_failed(monkeypatch):
         submit_run_id=run_id,
         submit_error=None,
         products=[{"title": "Queued Product"}],
+        shop_domain="worker-test.myshopify.com",
+    )
+    plan_id, revision = _seed_approved_submit_plan(
+        ctx, draft_id=draft_id, products=[{"title": "Queued Product"}]
+    )
+    monkeypatch.setattr(
+        shopify_session_store, "get_offline_access_token", lambda shop: "token"
     )
     ctx.supabase.runs.enqueue_offload_job(
         job_id,
@@ -692,7 +783,12 @@ async def test_run_once_marks_shopify_submit_job_failed(monkeypatch):
             "status": "queued",
             "run_id": run_id,
             "draft_id": draft_id,
-            "payload": {"import_mode": "auto"},
+            "shop_domain": "worker-test.myshopify.com",
+            "payload": {
+                "import_mode": "auto",
+                "plan_id": plan_id,
+                "revision": revision,
+            },
         },
     )
 
@@ -729,6 +825,7 @@ async def test_run_once_marks_shopify_submit_job_failed(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_once_shopify_submit_failed_uses_count_based_error(monkeypatch):
     import application.services.offload_worker as offload_worker
+    import shopify_session_store
 
     ctx = _build_ctx()
     run_id = "run-submit-count-failed"
@@ -755,6 +852,14 @@ async def test_run_once_shopify_submit_failed_uses_count_based_error(monkeypatch
         submit_run_id=run_id,
         submit_error=None,
         products=[{"title": "Queued Product 1"}, {"title": "Queued Product 2"}],
+        shop_domain="worker-test.myshopify.com",
+    )
+    proposed = [{"title": "Queued Product 1"}, {"title": "Queued Product 2"}]
+    plan_id, revision = _seed_approved_submit_plan(
+        ctx, draft_id=draft_id, products=proposed
+    )
+    monkeypatch.setattr(
+        shopify_session_store, "get_offline_access_token", lambda shop: "token"
     )
     ctx.supabase.runs.enqueue_offload_job(
         job_id,
@@ -764,7 +869,12 @@ async def test_run_once_shopify_submit_failed_uses_count_based_error(monkeypatch
             "status": "queued",
             "run_id": run_id,
             "draft_id": draft_id,
-            "payload": {"import_mode": "auto"},
+            "shop_domain": "worker-test.myshopify.com",
+            "payload": {
+                "import_mode": "auto",
+                "plan_id": plan_id,
+                "revision": revision,
+            },
         },
     )
 
@@ -774,7 +884,11 @@ async def test_run_once_shopify_submit_failed_uses_count_based_error(monkeypatch
             "submitted_id": None,
             "success_count": 0,
             "failed_count": 2,
-            "results": [{"status": "failed", "errors": []}],
+            "partial_count": 0,
+            "results": [
+                {"status": "failed", "errors": []},
+                {"status": "failed", "errors": []},
+            ],
             "error": None,
         }
 

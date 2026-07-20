@@ -1,9 +1,114 @@
+import re
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app_context import get_app_context
 from main import app
 from application.domain.shopify_product_normalization import build_product_set_input
+
+
+def test_mutation_plan_queries_use_inventory_item_unit_cost_output():
+    import api.agents.mutation_plans as mutation_plans_api
+
+    for query in (
+        mutation_plans_api.PRODUCT_BY_HANDLE_QUERY,
+        mutation_plans_api.PRODUCT_VARIANTS_PAGE_QUERY,
+    ):
+        assert "unitCost { amount }" in query
+        assert not re.search(r"\bcost\b", query)
+
+
+@pytest.mark.asyncio
+async def test_preflight_fetches_paginated_variants_with_unit_cost_query(monkeypatch):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "mutation-plan-paginated-variants"
+    shop_domain = "pagination-test.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [{"title": "Paged product", "handle": "paged-product"}],
+    }
+    calls = []
+
+    class FakeShopifyClient:
+        async def graphql(self, query, variables=None):
+            calls.append((query, variables))
+            if query == mutation_plans_api.ACCESS_SCOPES_QUERY:
+                return {
+                    "data": {
+                        "currentAppInstallation": {
+                            "accessScopes": [{"handle": "write_products"}]
+                        }
+                    }
+                }
+            if query == mutation_plans_api.PRODUCT_BY_HANDLE_QUERY:
+                return {
+                    "data": {
+                        "products": {
+                            "nodes": [
+                                {
+                                    "id": "gid://shopify/Product/1",
+                                    "title": "Paged product",
+                                    "handle": "paged-product",
+                                    "options": [],
+                                    "variants": {
+                                        "nodes": [
+                                            {"id": "gid://shopify/ProductVariant/1"}
+                                        ],
+                                        "pageInfo": {
+                                            "hasNextPage": True,
+                                            "endCursor": "page-1",
+                                        },
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            assert query == mutation_plans_api.PRODUCT_VARIANTS_PAGE_QUERY
+            assert variables == {
+                "id": "gid://shopify/Product/1",
+                "after": "page-1",
+            }
+            return {
+                "data": {
+                    "product": {
+                        "variants": {
+                            "nodes": [{"id": "gid://shopify/ProductVariant/2"}],
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        }
+                    }
+                }
+            }
+
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        assert shop == shop_domain
+        return FakeShopifyClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        response = await client.post(f"/agents/product-drafts/{draft_id}/mutation-plan")
+
+    assert response.status_code == 200
+    assert (
+        len(response.json()["plan"]["items"][0]["live_snapshot"]["variants"]["nodes"])
+        == 2
+    )
+    assert [query for query, _ in calls].count(
+        mutation_plans_api.PRODUCT_VARIANTS_PAGE_QUERY
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -32,7 +137,8 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
                 "data": {
                     "currentAppInstallation": {
                         "accessScopes": [{"handle": "write_products"}]
-                    }
+                    },
+                    "shop": {"currencyCode": "CAD"},
                 }
             }
 
@@ -59,6 +165,9 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
     assert response.json()["plan"]["status"] == "review"
     assert response.json()["plan"]["items"][0]["operation"] == "create"
     item = response.json()["plan"]["items"][0]
+    original_proposed = item["proposed"]
+    original_review = item["review_changes"]
+    assert response.json()["plan"]["currency_code"] == "CAD"
     assert item["selected"] is True
     assert item["selectable"] is True
     assert item["applicable_changes"]
@@ -80,8 +189,28 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
         )
     assert deselected.status_code == 200
     assert deselected.json()["plan"]["items"][0]["selected"] is False
+    assert deselected.json()["plan"]["items"][0]["proposed"] == original_proposed
+    assert deselected.json()["plan"]["items"][0]["review_changes"] == original_review
     assert rejected.status_code == 409
     assert rejected.json()["detail"]["code"] == "REVIEW_REQUIRED"
+
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        reselected = await client.patch(
+            f"/agents/product-drafts/{draft_id}/mutation-plan/selection",
+            json={"plan_id": plan_id, "selected_item_ids": [item["item_id"]]},
+        )
+        approved = await client.post(
+            f"/agents/product-drafts/{draft_id}/mutation-plan/approve",
+            json={"plan_id": plan_id, "acknowledge_unapplied": True},
+        )
+    assert reselected.status_code == 200
+    assert approved.status_code == 200
+    assert approved.json()["plan"]["items"][0]["proposed"] == original_proposed
+    assert approved.json()["plan"]["items"][0]["review_changes"] == original_review
 
 
 @pytest.mark.asyncio

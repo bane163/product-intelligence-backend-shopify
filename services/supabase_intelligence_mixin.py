@@ -35,6 +35,7 @@ class SupabaseIntelligenceMixin:
         component_scores: dict[str, int],
         totals: dict[str, Any],
         shop_domain: str | None = None,
+        scoring_version: str = "legacy-catalog-v1",
     ) -> dict[str, Any]:
         tenant = str(shop_domain or "").strip().lower()
         if not tenant:
@@ -51,6 +52,7 @@ class SupabaseIntelligenceMixin:
             "component_scores": component_scores,
             "totals": totals,
             "shop_domain": tenant,
+            "scoring_version": scoring_version,
             "created_at": now,
             "updated_at": now,
         }
@@ -104,6 +106,75 @@ class SupabaseIntelligenceMixin:
         ]
         return len(findings)
 
+    def save_product_intelligence_product_results(
+        self,
+        *,
+        audit_id: str,
+        results: list[dict[str, Any]],
+        shop_domain: str | None = None,
+    ) -> int:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            raise ValueError("Missing shop_domain for product intelligence results")
+        now = self._utc_now()
+        payload = [
+            {**dict(row), "audit_id": audit_id, "shop_domain": tenant,
+             "created_at": row.get("created_at") or now}
+            for row in results
+            if str(row.get("product_id") or "").strip()
+        ]
+        client = self._get_supabase_client()
+        if client:
+            try:
+                if payload:
+                    client.table("product_intelligence_product_results").upsert(
+                        payload, on_conflict="shop_domain,audit_id,product_id"
+                    ).execute()
+                return len(payload)
+            except Exception:
+                LOG.exception("Failed saving product intelligence results for audit=%s", audit_id)
+        store = getattr(self, "product_intelligence_product_results", None)
+        if not isinstance(store, dict):
+            store = {}
+            self.product_intelligence_product_results = store
+        for row in payload:
+            store[(tenant, audit_id, row["product_id"])] = row
+        return len(payload)
+
+    def list_product_intelligence_product_results(
+        self,
+        *,
+        product_ids: list[str],
+        shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        tenant = str(shop_domain or "").strip().lower()
+        ids = list(dict.fromkeys(str(value or "").strip() for value in product_ids if str(value or "").strip()))
+        if not tenant or not ids:
+            return []
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = (
+                    client.table("product_intelligence_product_results")
+                    .select("*").eq("shop_domain", tenant).in_("product_id", ids)
+                    .order("created_at", desc=True).execute()
+                )
+                latest: dict[str, dict[str, Any]] = {}
+                for row in response.data or []:
+                    product_id = str(row.get("product_id") or "")
+                    latest.setdefault(product_id, dict(row))
+                return [latest[product_id] for product_id in ids if product_id in latest]
+            except Exception:
+                LOG.exception("Failed listing product intelligence product results")
+        store = getattr(self, "product_intelligence_product_results", {})
+        rows = [dict(row) for row in store.values()
+                if row.get("shop_domain") == tenant and row.get("product_id") in ids]
+        rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        latest = {}
+        for row in rows:
+            latest.setdefault(str(row.get("product_id")), row)
+        return [latest[product_id] for product_id in ids if product_id in latest]
+
     def list_product_intelligence_audits(
         self,
         *,
@@ -120,7 +191,7 @@ class SupabaseIntelligenceMixin:
                 res = (
                     client.table("product_intelligence_audits")
                     .select(
-                        "audit_id,submitted_id,status,overall_score,findings_count,totals,run_id,created_at"
+                        "audit_id,submitted_id,status,overall_score,findings_count,totals,run_id,created_at,scoring_version"
                     )
                     .eq("shop_domain", tenant)
                     .order("created_at", desc=True)
@@ -165,7 +236,7 @@ class SupabaseIntelligenceMixin:
                 audits_res = (
                     client.table("product_intelligence_audits")
                     .select(
-                        "audit_id,run_id,submitted_id,status,overall_score,findings_count,component_scores,totals,created_at"
+                        "audit_id,run_id,submitted_id,status,overall_score,findings_count,component_scores,totals,created_at,scoring_version"
                     )
                     .eq("shop_domain", tenant)
                     .in_("audit_id", normalized_audit_ids)

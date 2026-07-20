@@ -248,6 +248,11 @@ def _normalized_variant(
             inventory[target] = (
                 str(value) if target == "cost" and value != "" else value
             )
+    if live and "cost" not in inventory:
+        unit_cost = _inventory_item(variant).get("unitCost")
+        amount = unit_cost.get("amount") if isinstance(unit_cost, dict) else None
+        if amount is not None:
+            inventory["cost"] = str(amount) if amount != "" else amount
     measurement = _inventory_item(variant).get("measurement")
     existing_weight = (
         measurement.get("weight") if isinstance(measurement, dict) else None
@@ -420,6 +425,35 @@ def merge_structured_product(
 
         imported_by_combo: dict[tuple[str, ...], dict[str, Any]] = {}
         for index, variant in enumerate(imported_variants):
+            # Deferred source values must survive even when the variant itself
+            # is rejected before normalization.
+            for key in variant:
+                if key not in _VARIANT_SHAPE_KEYS and variant.get(key) not in (
+                    None,
+                    "",
+                    [],
+                    {},
+                ):
+                    unapplied.append(
+                        {
+                            "code": "UNAPPLIED_VARIANT_ATTRIBUTE",
+                            "field": f"variants[{index}].{key}",
+                            "value": variant[key],
+                        }
+                    )
+            for key in (
+                "inventory_quantity",
+                "inventoryQuantity",
+                "inventoryQuantities",
+            ):
+                if key in variant and variant.get(key) not in (None, "", [], {}):
+                    unapplied.append(
+                        {
+                            "code": "TODO_FULFILLMENT_LOCATION",
+                            "field": f"variants[{index}].{key}",
+                            "value": variant[key],
+                        }
+                    )
             if imported_placeholder and not _variant_pairs(variant, imported_names):
                 variant = {
                     **variant,
@@ -482,29 +516,6 @@ def merge_structured_product(
                             "field": f"variants[{index}].weight_unit",
                         }
                     )
-            for key in variant:
-                if key not in _VARIANT_SHAPE_KEYS:
-                    unapplied.append(
-                        {
-                            "code": "UNAPPLIED_VARIANT_ATTRIBUTE",
-                            "field": f"variants[{index}].{key}",
-                            "value": variant[key],
-                        }
-                    )
-            for key in (
-                "inventory_quantity",
-                "inventoryQuantity",
-                "inventoryQuantities",
-            ):
-                if key in variant and variant.get(key) not in (None, "", [], {}):
-                    unapplied.append(
-                        {
-                            "code": "TODO_FULFILLMENT_LOCATION",
-                            "field": f"variants[{index}].{key}",
-                            "value": variant[key],
-                        }
-                    )
-
         live_by_combo: dict[tuple[str, ...], dict[str, Any]] = {}
         if not (live_placeholder and not imported_placeholder):
             for index, variant in enumerate(live_variants):
@@ -725,3 +736,352 @@ def applicable_changes(
                 }
             )
     return changes
+
+
+def _variant_subject(variant: dict[str, Any], option_names: list[str]) -> str:
+    pairs = _variant_pairs(variant, option_names)
+    if pairs:
+        return " / ".join(f"{name}: {value}" for name, value in pairs)
+    return _text(variant.get("title")) or _text(variant.get("id")) or "Variant"
+
+
+def _flatten_variant(variant: dict[str, Any]) -> dict[str, Any]:
+    inventory = (
+        variant.get("inventoryItem")
+        if isinstance(variant.get("inventoryItem"), dict)
+        else {}
+    )
+    measurement = (
+        inventory.get("measurement")
+        if isinstance(inventory.get("measurement"), dict)
+        else {}
+    )
+    weight = (
+        measurement.get("weight") if isinstance(measurement.get("weight"), dict) else {}
+    )
+    values = {
+        field: variant.get(field)
+        for field in (
+            "price",
+            "compareAtPrice",
+            "sku",
+            "barcode",
+            "taxable",
+            "taxCode",
+            "inventoryPolicy",
+        )
+        if field in variant
+    }
+    values.update(
+        {
+            f"inventoryItem.{field}": inventory.get(field)
+            for field in ("cost", "tracked", "requiresShipping")
+            if field in inventory
+        }
+    )
+    if "value" in weight:
+        values["inventoryItem.weight.value"] = weight.get("value")
+    if "unit" in weight:
+        values["inventoryItem.weight.unit"] = weight.get("unit")
+    return values
+
+
+def _review_row(
+    *,
+    scope: str,
+    subject: str,
+    field: str,
+    current: Any,
+    proposed: Any,
+    disposition: str,
+    change_kind: str,
+    value_type: str | None = None,
+    reason_codes: list[str] | None = None,
+) -> dict[str, Any]:
+    row = {
+        "scope": scope,
+        "subject": subject,
+        "field": field,
+        "current": current,
+        "proposed": proposed,
+        "disposition": disposition,
+        "change_kind": change_kind,
+        "value_type": value_type
+        or (
+            "money"
+            if field in {"price", "compareAtPrice", "inventoryItem.cost"}
+            else (
+                "weight"
+                if field.startswith("inventoryItem.weight")
+                else (
+                    "boolean"
+                    if isinstance(current, bool) or isinstance(proposed, bool)
+                    else (
+                        "json"
+                        if isinstance(current, (dict, list))
+                        or isinstance(proposed, (dict, list))
+                        else "text"
+                    )
+                )
+            )
+        ),
+    }
+    if reason_codes:
+        row["reason_codes"] = reason_codes
+    return row
+
+
+def _kind(current: Any, proposed: Any) -> str:
+    if current is None and proposed is not None:
+        return "added"
+    if current is not None and proposed is None:
+        return "removed"
+    return "updated"
+
+
+def review_changes(
+    current: dict[str, Any] | None,
+    imported: dict[str, Any],
+    proposed: dict[str, Any],
+    blockers: list[dict[str, Any]] | None = None,
+    unapplied: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Project the mutation authority into exact, display-only audit rows."""
+    current = current or {}
+    blockers = blockers or []
+    unapplied = unapplied or []
+    reason_codes = list(
+        dict.fromkeys(
+            str(item.get("code"))
+            for item in blockers
+            if isinstance(item, dict) and item.get("code")
+        )
+    )
+    disposition = "blocked" if blockers else "applicable"
+    rows: list[dict[str, Any]] = []
+
+    before = canonical_product(current)
+    after = canonical_product(proposed)
+    for field in sorted(SUPPORTED_PRODUCT_FIELDS):
+        old, new = before.get(field), after.get(field)
+        if old == new:
+            continue
+        if field == "seo" and isinstance(old, dict) and isinstance(new, dict):
+            for seo_field in ("title", "description"):
+                if old.get(seo_field) != new.get(seo_field):
+                    rows.append(
+                        _review_row(
+                            scope="product",
+                            subject=str(
+                                after.get("title") or before.get("title") or "Product"
+                            ),
+                            field=f"seo.{seo_field}",
+                            current=old.get(seo_field),
+                            proposed=new.get(seo_field),
+                            disposition=disposition,
+                            change_kind=_kind(old.get(seo_field), new.get(seo_field)),
+                            reason_codes=reason_codes,
+                        )
+                    )
+            continue
+        rows.append(
+            _review_row(
+                scope="product",
+                subject=str(after.get("title") or before.get("title") or "Product"),
+                field=field,
+                current=old,
+                proposed=new,
+                disposition=disposition,
+                change_kind=_kind(old, new),
+                reason_codes=reason_codes,
+            )
+        )
+
+    if "productOptions" in proposed:
+        old_options = {_fold(x.get("name")): x for x in _raw_options(current)}
+        new_options = {_fold(x.get("name")): x for x in proposed["productOptions"]}
+        for key in dict.fromkeys([*old_options, *new_options]):
+            old_option, new_option = old_options.get(key), new_options.get(key)
+            old_values = _option_values(old_option or {}) if old_option else None
+            new_values = _option_values(new_option or {}) if new_option else None
+            if old_values == new_values:
+                continue
+            name = _text((new_option or old_option or {}).get("name")) or "Option"
+            rows.append(
+                _review_row(
+                    scope="option",
+                    subject=name,
+                    field="values",
+                    current=old_values,
+                    proposed=new_values,
+                    disposition=disposition,
+                    change_kind=_kind(old_option, new_option),
+                    reason_codes=reason_codes,
+                )
+            )
+
+    option_names = _schema_from_product({"options": proposed.get("productOptions", [])})
+    if not option_names:
+        option_names = _schema_from_product(current)
+    if "variants" in proposed:
+        old_variants = [
+            _normalized_variant(item, option_names, live=True)
+            for item in _variants(current)
+        ]
+        new_variants = [item for item in proposed["variants"] if isinstance(item, dict)]
+        unmatched_old = set(range(len(old_variants)))
+        matches: list[tuple[dict[str, Any] | None, dict[str, Any]]] = []
+        for new_variant in new_variants:
+            matched_index = next(
+                (
+                    index
+                    for index in unmatched_old
+                    if new_variant.get("id")
+                    and old_variants[index].get("id") == new_variant.get("id")
+                ),
+                None,
+            )
+            if matched_index is None:
+                new_combo = _canonical_combo(new_variant, option_names)
+                matched_index = next(
+                    (
+                        index
+                        for index in unmatched_old
+                        if new_combo is not None
+                        and _canonical_combo(old_variants[index], option_names)
+                        == new_combo
+                    ),
+                    None,
+                )
+            old_variant = (
+                old_variants[matched_index] if matched_index is not None else None
+            )
+            if matched_index is not None:
+                unmatched_old.remove(matched_index)
+            matches.append((old_variant, new_variant))
+        matches.extend((old_variants[index], {}) for index in sorted(unmatched_old))
+        for old_variant, new_variant in matches:
+            old_values = _flatten_variant(old_variant or {})
+            new_values = _flatten_variant(new_variant)
+            subject = _variant_subject(new_variant or old_variant or {}, option_names)
+            fields = list(dict.fromkeys([*old_values, *new_values]))
+            if not fields and old_variant is None:
+                fields = ["variant"]
+            for field in fields:
+                old, new = old_values.get(field), new_values.get(field)
+                if old == new:
+                    continue
+                rows.append(
+                    _review_row(
+                        scope="variant",
+                        subject=subject,
+                        field=field,
+                        current=old,
+                        proposed=new,
+                        disposition=disposition,
+                        change_kind=_kind(old_variant, new_variant or None),
+                        reason_codes=reason_codes,
+                    )
+                )
+
+    if "metafields" in proposed:
+        old_metafields = {
+            (_fold(x.get("namespace")), _fold(x.get("key"))): x
+            for x in (
+                current.get("metafields", {}).get("nodes", [])
+                if isinstance(current.get("metafields"), dict)
+                else []
+            )
+            if isinstance(x, dict)
+        }
+        for metafield in proposed["metafields"]:
+            key = (_fold(metafield.get("namespace")), _fold(metafield.get("key")))
+            old = old_metafields.get(key, {})
+            subject = f"{metafield['namespace']}.{metafield['key']}"
+            for field in ("value", "type"):
+                if old.get(field) == metafield.get(field):
+                    continue
+                rows.append(
+                    _review_row(
+                        scope="metafield",
+                        subject=subject,
+                        field=field,
+                        current=old.get(field),
+                        proposed=metafield.get(field),
+                        disposition=disposition,
+                        change_kind=_kind(old or None, metafield),
+                        value_type="metafield" if field == "value" else "text",
+                        reason_codes=reason_codes,
+                    )
+                )
+
+    # Invalid or duplicate extracted variants may be absent from `proposed`.
+    # Preserve their rejected values so a blocked plan never hides merchant data.
+    imported_names = _schema_from_product(imported) or option_names
+    proposed_combos = {
+        _canonical_combo(item, option_names)
+        for item in proposed.get("variants", [])
+        if isinstance(item, dict)
+    }
+    proposed_ids = {
+        item.get("id")
+        for item in proposed.get("variants", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    for index, raw_variant in enumerate(_variants(imported)):
+        targeted_codes = [
+            str(item.get("code"))
+            for item in blockers
+            if isinstance(item, dict)
+            and str(item.get("field") or "").startswith(f"variants[{index}]")
+            and item.get("code")
+        ]
+        combo = _canonical_combo(raw_variant, option_names or imported_names)
+        represented = bool(raw_variant.get("id") in proposed_ids) or (
+            combo is not None and combo in proposed_combos
+        )
+        if not targeted_codes and represented:
+            continue
+        normalized = _normalized_variant(raw_variant, imported_names, live=False)
+        for field, value in _flatten_variant(normalized).items():
+            rows.append(
+                _review_row(
+                    scope="variant",
+                    subject=_variant_subject(raw_variant, imported_names),
+                    field=field,
+                    current=None,
+                    proposed=value,
+                    disposition="blocked",
+                    change_kind="rejected",
+                    reason_codes=list(dict.fromkeys(targeted_codes or reason_codes)),
+                )
+            )
+
+    for entry in unapplied:
+        if not isinstance(entry, dict):
+            continue
+        field = str(entry.get("field") or entry.get("code") or "value")
+        variant_match = re.match(r"variants\[(\d+)\]\.(.+)", field)
+        subject = str(after.get("title") or before.get("title") or "Product")
+        scope = "product"
+        canonical_field = field
+        if variant_match:
+            index = int(variant_match.group(1))
+            imported_variants = _variants(imported)
+            variant = imported_variants[index] if index < len(imported_variants) else {}
+            subject = _variant_subject(variant, imported_names)
+            scope = "inventory" if "quantity" in field.casefold() else "variant"
+            canonical_field = variant_match.group(2)
+        rows.append(
+            _review_row(
+                scope=scope,
+                subject=subject,
+                field=canonical_field,
+                current=None,
+                proposed=entry.get("value"),
+                disposition="deferred",
+                change_kind="deferred",
+                reason_codes=[str(entry.get("code"))] if entry.get("code") else None,
+            )
+        )
+    return rows

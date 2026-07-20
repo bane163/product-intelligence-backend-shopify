@@ -62,6 +62,9 @@ class ShopifyAdapter:
     ) -> list[Dict[str, Any]]:
         return await self._client.list_products_for_audit(query=query, limit=limit)
 
+    async def list_products_by_ids(self, product_ids: list[str]) -> list[Dict[str, Any]]:
+        return await self._client.list_products_by_ids(product_ids)
+
     async def create_staged_upload(self) -> Dict[str, Any]:
         return await self._client.create_staged_upload()
 

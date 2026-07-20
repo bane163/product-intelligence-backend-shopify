@@ -16,6 +16,8 @@ from application.use_cases.intelligence_apply_suggestion import (
     _is_unset_value,
     _supports_field_clear,
     _normalize_revert_field,
+    _normalize_shopify_product,
+    _normalize_metafields_payload,
     _resolve_product_gid,
     _resolve_suggestion_product,
 )
@@ -90,6 +92,44 @@ async def execute(
     patch_payload = suggestion.get("patch_payload")
     if not isinstance(patch_payload, dict) or not patch_payload:
         raise ValueError("Suggestion has no patch payload to revert")
+
+    # Revert is conditional: never overwrite edits made after Stockpile applied
+    # the suggestion. Compare Shopify's live value with the exact applied patch.
+    live_product = _normalize_shopify_product(await shopify.get_product(gid))
+    drifted_fields: list[str] = []
+    for field, applied_value in patch_payload.items():
+        if field == "metafields":
+            applied_metafields = _normalize_metafields_payload(applied_value)
+            identifiers = [
+                {"namespace": item["namespace"], "key": item["key"]}
+                for item in applied_metafields
+            ]
+            live_metafields = await shopify.get_product_metafields(gid, identifiers)
+            live_by_key = {
+                (str(item.get("namespace") or ""), str(item.get("key") or "")): str(item.get("value") or "")
+                for item in live_metafields if isinstance(item, dict)
+            }
+            if any(live_by_key.get((item["namespace"], item["key"])) != str(item["value"])
+                   for item in applied_metafields):
+                drifted_fields.append(field)
+            continue
+        if field == "variant_operations":
+            previous_variant = previous_payload.get("variant_operations")
+            created_ids = set(_normalize_created_variant_ids(
+                previous_variant.get("created_variant_ids") if isinstance(previous_variant, dict) else None
+            ))
+            live_ids = {str(item.get("id")) for item in live_product.get("variants", []) if isinstance(item, dict)}
+            if created_ids and not created_ids.issubset(live_ids):
+                drifted_fields.append(field)
+            continue
+        current_value = live_product.get(_normalize_revert_field(field))
+        if current_value != applied_value:
+            drifted_fields.append(field)
+    if drifted_fields:
+        raise ValueError(
+            "Revert conflict: Shopify values changed since Stockpile applied this suggestion: "
+            + ", ".join(sorted(drifted_fields))
+        )
     restore_payload: dict[str, Any] = {}
     variant_reverted = False
     revert_modes = previous_payload.get(REVERT_MODES_KEY)

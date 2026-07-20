@@ -3,6 +3,7 @@
 import hashlib
 import json
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,6 +14,7 @@ from shared.observability import current_observability_fields
 from .utils import require_shop_domain, resolve_shop_access_token
 
 router = APIRouter()
+PRODUCT_GID_RE = re.compile(r"^gid://shopify/Product/[1-9][0-9]*$")
 
 
 async def _review_request_payload(request: Request) -> dict[str, Any]:
@@ -89,6 +91,40 @@ NORMALIZATION_CATEGORY_KEYS = (
     "children_size",
     "missing_options",
 )
+
+
+@router.post("/intelligence/products/overview", summary="Get product-scoped intelligence")
+async def get_product_intelligence_overview(
+    request: Request, ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.intelligence_get_product_overview import execute
+
+    try:
+        payload = await request.json()
+    except Exception:
+        form = await request.form()
+        payload = dict(form.items())
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid request payload")
+    raw_ids = payload.get("product_ids")
+    if not isinstance(raw_ids, list):
+        raw_json = payload.get("product_ids_json")
+        try:
+            raw_ids = json.loads(raw_json) if isinstance(raw_json, str) else None
+        except json.JSONDecodeError:
+            raw_ids = None
+    product_ids = list(dict.fromkeys(str(value or "").strip() for value in (raw_ids or [])))
+    view = str(payload.get("view") or "summary").strip().lower()
+    if not product_ids or len(product_ids) > 100:
+        raise HTTPException(status_code=400, detail="product_ids must contain 1 to 100 items")
+    if any(not PRODUCT_GID_RE.fullmatch(value) for value in product_ids):
+        raise HTTPException(status_code=400, detail="Invalid Shopify Product GID")
+    if view not in {"summary", "review"} or (view == "review" and len(product_ids) != 1):
+        raise HTTPException(status_code=400, detail="review view requires exactly one product")
+    tenant = require_shop_domain(request, payload.get("shop_domain"))
+    return {"products": execute(
+        supabase=ctx.supabase, product_ids=product_ids, shop_domain=tenant, view=view,
+    )}
 
 
 def _default_unit_system_from_request(request: Request) -> str:
@@ -203,6 +239,12 @@ async def run_product_intelligence_audit(
             payload["products"] = json.loads(products_json)
         except json.JSONDecodeError as exc:
             raise HTTPException(status_code=400, detail=f"Invalid products_json: {exc}")
+    product_ids_json = payload.get("product_ids_json")
+    if isinstance(product_ids_json, str) and product_ids_json.strip():
+        try:
+            payload["product_ids"] = json.loads(product_ids_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid product_ids_json: {exc}")
 
     submitted_id = payload.get("submitted_id")
     run_id = payload.get("run_id")
@@ -241,6 +283,13 @@ async def run_product_intelligence_audit(
         requested_limit = 250
     requested_limit = max(1, min(requested_limit, 1000))
     products: list[dict[str, Any]] = []
+    raw_product_ids = payload.get("product_ids")
+    product_ids = (
+        list(dict.fromkeys(str(value or "").strip() for value in raw_product_ids))
+        if isinstance(raw_product_ids, list) else []
+    )
+    if len(product_ids) > 100 or any(not PRODUCT_GID_RE.fullmatch(value) for value in product_ids):
+        raise HTTPException(status_code=400, detail="product_ids must contain at most 100 Shopify Product GIDs")
 
     raw_products = payload.get("products")
     if isinstance(raw_products, list):
@@ -259,6 +308,15 @@ async def run_product_intelligence_audit(
                                                      shop_access_token=shop_access_token)
             products = await shopify_client.list_products_for_audit(
                 query=query_text, limit=requested_limit)
+        if product_ids:
+            shopify_client = _resolve_shopify_client(
+                ctx=ctx, shop_domain=shop_domain, shop_access_token=shop_access_token,
+            )
+            products = await shopify_client.list_products_by_ids(product_ids)
+            returned_ids = {str(product.get("id") or "") for product in products}
+            missing_ids = [product_id for product_id in product_ids if product_id not in returned_ids]
+            if missing_ids:
+                raise HTTPException(status_code=404, detail={"missing_product_ids": missing_ids})
         if not products:
             raise HTTPException(status_code=400, detail="No products found for audit")
     except Exception as exc:
@@ -482,7 +540,10 @@ async def get_product_intelligence_monitoring_summary(
         offset=0,
     )
     current = audits[0] if audits else {}
-    previous = audits[1] if len(audits) > 1 else {}
+    current_version = current.get("scoring_version") if current else None
+    previous = next(
+        (row for row in audits[1:] if row.get("scoring_version") == current_version), {}
+    )
     current_score = current.get("overall_score") if current else None
     previous_score = previous.get("overall_score") if previous else None
     current_findings = current.get("findings_count") if current else None
@@ -937,7 +998,8 @@ async def revert_product_intelligence_suggestion(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        status_code = 409 if str(exc).startswith("Revert conflict:") else 400
+        raise HTTPException(status_code=status_code, detail=str(exc))
 
 
 @router.get(

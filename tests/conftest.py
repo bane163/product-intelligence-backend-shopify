@@ -28,6 +28,7 @@ def isolated_offline_services(monkeypatch):
         "llm_runs",
         "llm_run_events",
         "product_drafts",
+        "mutation_plans",
         "submitted_documents",
         "product_intelligence_audits",
         "product_intelligence_findings",

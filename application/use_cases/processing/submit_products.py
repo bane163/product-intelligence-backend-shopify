@@ -74,6 +74,14 @@ def _resolve_submit_source(
     products: list[dict[str, Any]] = []
     source = "products_json"
 
+    # An approved mutation plan is passed to this use case as products_json while
+    # draft_id remains attached for tenancy, lifecycle, and document metadata.
+    # Parse that authoritative payload before loading either metadata source so a
+    # draft can never silently replace the merchant's selected plan items.
+    has_products_json = isinstance(products_json, str) and bool(products_json.strip())
+    if has_products_json:
+        products = parse_products_json(products_json)
+
     if submitted_source_id:
         source = "submitted_document"
         submitted_document = supabase.submitted.get_submitted_document(
@@ -82,11 +90,14 @@ def _resolve_submit_source(
         )
         if not isinstance(submitted_document, dict):
             fail_submit("Submitted document not found")
-        products = _extract_document_products(
-            submitted_document,
-            invalid_payload_error="Submitted document has invalid products payload",
-            fail_submit=fail_submit,
-        )
+        if not has_products_json:
+            products = _extract_document_products(
+                submitted_document,
+                invalid_payload_error="Submitted document has invalid products payload",
+                fail_submit=fail_submit,
+            )
+        else:
+            source = "products_json_with_submitted_metadata"
         if not resolved_draft_id:
             resolved_draft_id = _normalize_optional_string(
                 submitted_document.get("draft_id")
@@ -105,11 +116,14 @@ def _resolve_submit_source(
         )
         if not isinstance(draft_document, dict):
             fail_submit("Draft not found")
-        products = _extract_document_products(
-            draft_document,
-            invalid_payload_error="Draft has invalid products payload",
-            fail_submit=fail_submit,
-        )
+        if not has_products_json:
+            products = _extract_document_products(
+                draft_document,
+                invalid_payload_error="Draft has invalid products payload",
+                fail_submit=fail_submit,
+            )
+        else:
+            source = "products_json_with_draft_metadata"
         resolved_draft_id = draft_source_id
         if not resolved_document_name:
             resolved_document_name = _normalize_optional_string(
@@ -118,9 +132,6 @@ def _resolve_submit_source(
             )
         if not tenant:
             tenant = normalize_shop_domain(draft_document.get("shop_domain"))
-    elif isinstance(products_json, str) and products_json.strip():
-        products = parse_products_json(products_json)
-
     if not products:
         fail_submit("No products provided")
 
@@ -278,6 +289,82 @@ def _build_partially_applied_result_row(
         "applied": ["product"],
         "failed": ["metafields"],
     }
+
+
+def _malformed_bulk_result_message(detail: str) -> str:
+    return f"Malformed Shopify bulk result: {detail}"
+
+
+def _parse_bulk_product_set_result(
+    *, result_data: Any, index: int, title: str
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Return an item result row and product data when Shopify returned it."""
+    if not isinstance(result_data, dict):
+        return (
+            _build_failed_result_row(
+                index=index,
+                title=title,
+                message=_malformed_bulk_result_message("root row is not an object"),
+            ),
+            None,
+        )
+    data = result_data.get("data")
+    if not isinstance(data, dict):
+        return (
+            _build_failed_result_row(
+                index=index,
+                title=title,
+                message=_malformed_bulk_result_message("missing data object"),
+            ),
+            None,
+        )
+    product_set = data.get("productSet")
+    if not isinstance(product_set, dict):
+        return (
+            _build_failed_result_row(
+                index=index,
+                title=title,
+                message=_malformed_bulk_result_message("missing productSet object"),
+            ),
+            None,
+        )
+    raw_errors = product_set.get("userErrors")
+    user_errors = raw_errors if isinstance(raw_errors, list) else []
+    product_data = product_set.get("product")
+    if user_errors:
+        return (
+            _build_failed_result_row(
+                index=index,
+                title=title,
+                errors=user_errors,
+                shopify_product_id=(
+                    product_data.get("id") if isinstance(product_data, dict) else None
+                ),
+            ),
+            product_data if isinstance(product_data, dict) else None,
+        )
+    if not isinstance(product_data, dict) or not product_data:
+        detail = (
+            "userErrors is not an array"
+            if raw_errors is not None and not isinstance(raw_errors, list)
+            else "neither product data nor user errors were returned"
+        )
+        return (
+            _build_failed_result_row(
+                index=index,
+                title=title,
+                message=_malformed_bulk_result_message(detail),
+            ),
+            None,
+        )
+    return (
+        _build_success_result_row(
+            index=index,
+            title=str(product_data.get("title") or title),
+            shopify_product_id=product_data.get("id"),
+        ),
+        product_data,
+    )
 
 
 def _metafield_inputs(product: dict[str, Any], owner_id: str) -> list[dict[str, str]]:
@@ -534,31 +621,34 @@ async def execute(
         if bulk_status == "COMPLETED" and result_url:
             # Download and parse result JSONL
             bulk_results = await _download_bulk_results(submit_client, result_url)
-            results_by_line = {
-                int(row["__lineNumber"]): row
-                for row in bulk_results
-                if isinstance(row.get("__lineNumber"), (int, str))
-                and str(row.get("__lineNumber")).isdigit()
-            }
+            results_by_line: dict[int, Any] = {}
+            unnumbered_results: list[Any] = []
+            for row in bulk_results:
+                if (
+                    isinstance(row, dict)
+                    and isinstance(row.get("__lineNumber"), (int, str))
+                    and str(row.get("__lineNumber")).isdigit()
+                ):
+                    results_by_line[int(row["__lineNumber"])] = row
+                else:
+                    unnumbered_results.append(row)
+            missing_result = object()
             for index, product in enumerate(submit_products):
                 title = product.get("title", f"Product {index}")
-                result_data = results_by_line.get(index) or results_by_line.get(
-                    index + 1
-                )
-                if result_data is not None:
-                    product_set = result_data.get("data", {}).get("productSet", {})
-                    user_errors = product_set.get("userErrors", [])
-                    product_data = product_set.get("product", {})
-                    if user_errors:
-                        results.append(
-                            _build_failed_result_row(
-                                index=index,
-                                title=title,
-                                errors=user_errors,
-                                shopify_product_id=product_data.get("id"),
-                            )
-                        )
-                    else:
+                result_data = results_by_line.get(index, missing_result)
+                if (
+                    result_data is missing_result
+                    and not results_by_line
+                    and index < len(unnumbered_results)
+                ):
+                    result_data = unnumbered_results[index]
+                if result_data is not missing_result:
+                    parsed_row, product_data = _parse_bulk_product_set_result(
+                        result_data=result_data,
+                        index=index,
+                        title=title,
+                    )
+                    if parsed_row.get("status") == "success" and product_data:
                         created_id = product_data.get("id", "")
                         # Apply variant operations if any
                         variant_ops = variant_operations_by_index.get(index, [])
@@ -637,6 +727,8 @@ async def execute(
                                 shopify_product_id=created_id,
                             )
                         )
+                    else:
+                        results.append(parsed_row)
                 else:
                     results.append(
                         _build_failed_result_row(
@@ -705,14 +797,19 @@ async def execute(
     partial_count = sum(
         1 for row in results if row.get("status") == "partially_applied"
     )
-    status = "success" if success_count > 0 else "error"
+    fully_applied = (
+        success_count == len(submit_products)
+        and failed_count == 0
+        and partial_count == 0
+    )
+    status = "success" if fully_applied else "error"
     submitted_id: str | None = None
     warnings: list[str] = []
     # Collect the first error message for propagation to the caller
     error_message: str | None = None
     if status == "error":
         for r in results:
-            if r.get("status") != "failed":
+            if r.get("status") not in {"failed", "partially_applied"}:
                 continue
             row_errors = r.get("errors")
             if not isinstance(row_errors, list) or not row_errors:

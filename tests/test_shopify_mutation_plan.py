@@ -4,8 +4,26 @@ from application.domain.shopify_mutation_plan import (
     merge_tags,
     merge_structured_product,
     preserve_blank_fields,
+    review_changes,
     validate_product,
 )
+from application.domain.shopify_product_normalization import build_product_set_input
+
+
+def _single_variant_product(cost):
+    inventory_item = {"unitCost": cost} if cost is not ... else {}
+    return {
+        "options": [{"name": "Title", "optionValues": [{"name": "Default Title"}]}],
+        "variants": {
+            "nodes": [
+                {
+                    "id": "gid://shopify/ProductVariant/1",
+                    "selectedOptions": [{"name": "Title", "value": "Default Title"}],
+                    "inventoryItem": inventory_item,
+                }
+            ]
+        },
+    }
 
 
 def test_invalid_status_is_blocked_before_transport():
@@ -300,6 +318,62 @@ def test_genuinely_unchanged_structured_state_has_no_diff():
     assert applicable_changes(live, proposed) == []
 
 
+def test_live_unit_cost_normalizes_to_mutation_input_cost_without_false_diff():
+    live = _single_variant_product({"amount": "8.00"})
+    imported = {
+        "variants": [
+            {
+                "option_values": [{"option_name": "Title", "name": "Default Title"}],
+                "cost": "8.00",
+            }
+        ]
+    }
+
+    proposed, blockers, _ = merge_structured_product(live, imported, {})
+
+    assert blockers == []
+    assert proposed["variants"][0]["inventoryItem"]["cost"] == "8.00"
+    assert applicable_changes(live, proposed) == []
+
+
+def test_changed_imported_cost_uses_inventory_item_cost_mutation_shape():
+    live = _single_variant_product({"amount": "8.00"})
+    imported = {
+        "variants": [
+            {
+                "option_values": [{"option_name": "Title", "name": "Default Title"}],
+                "cost": "9.50",
+            }
+        ]
+    }
+
+    proposed, blockers, _ = merge_structured_product(live, imported, {})
+
+    assert blockers == []
+    assert proposed["variants"][0]["inventoryItem"] == {"cost": "9.50"}
+    payload = build_product_set_input(proposed)
+    assert payload["variants"][0]["inventoryItem"] == {"cost": "9.50"}
+    assert {change["field"] for change in applicable_changes(live, proposed)} == {
+        "variants"
+    }
+
+
+def test_null_or_missing_live_unit_cost_does_not_create_cost_mutation_input():
+    imported = {
+        "variants": [
+            {"option_values": [{"option_name": "Title", "name": "Default Title"}]}
+        ]
+    }
+
+    for unit_cost in (None, ...):
+        live = _single_variant_product(unit_cost)
+        proposed, blockers, _ = merge_structured_product(live, imported, {})
+
+        assert blockers == []
+        assert "inventoryItem" not in proposed["variants"][0]
+        assert applicable_changes(live, proposed) == []
+
+
 def test_safe_core_diff_and_unlisted_status():
     blockers, _ = validate_product(
         {"title": "Hat", "status": "unlisted"}, creating=True
@@ -339,3 +413,165 @@ def test_extracted_and_live_aliases_share_one_core_representation():
         "productType",
         "seo",
     }
+
+
+def test_exact_review_rows_cover_options_variant_fields_cost_and_metafields():
+    live = {
+        "title": "Planter",
+        "options": [{"name": "Size", "optionValues": [{"name": "Small"}]}],
+        "variants": {
+            "nodes": [
+                {
+                    "id": "gid://shopify/ProductVariant/1",
+                    "selectedOptions": [{"name": "Size", "value": "Small"}],
+                    "price": "0.00",
+                    "sku": "OLD-SKU",
+                    "inventoryItem": {"unitCost": {"amount": "8.00"}},
+                }
+            ]
+        },
+        "metafields": {
+            "nodes": [
+                {
+                    "namespace": "custom",
+                    "key": "details",
+                    "value": "old",
+                    "type": "multi_line_text_field",
+                }
+            ]
+        },
+    }
+    imported = {
+        "title": "Planter",
+        "options": [{"name": "Size", "values": ["Small", "Large"]}],
+        "variants": [
+            {
+                "option_values": [{"option_name": "Size", "name": "Small"}],
+                "price": "30.99",
+                "sku": "NEW-SKU",
+                "cost": "9.50",
+            },
+            {
+                "option_values": [{"option_name": "Size", "name": "Large"}],
+                "price": "34.99",
+                "sku": "LARGE",
+            },
+        ],
+        "metafields": [
+            {
+                "namespace": "custom",
+                "key": "details",
+                "value": {"material": "ceramic"},
+                "type": "json",
+            }
+        ],
+    }
+    proposed, blockers, unapplied = merge_structured_product(live, imported, {})
+
+    rows = review_changes(live, imported, proposed, blockers, unapplied)
+
+    assert blockers == []
+    assert any(
+        row["scope"] == "option" and row["proposed"] == ["Small", "Large"]
+        for row in rows
+    )
+    assert any(
+        row["field"] == "price"
+        and row["current"] == "0.00"
+        and row["proposed"] == "30.99"
+        and row["value_type"] == "money"
+        for row in rows
+    )
+    assert any(row["field"] == "sku" and row["proposed"] == "NEW-SKU" for row in rows)
+    assert any(
+        row["field"] == "inventoryItem.cost" and row["proposed"] == "9.50"
+        for row in rows
+    )
+    assert any(
+        row["scope"] == "variant"
+        and row["subject"] == "Size: Large"
+        and row["change_kind"] == "added"
+        for row in rows
+    )
+    assert any(
+        row["scope"] == "metafield"
+        and row["subject"] == "custom.details"
+        and row["field"] == "value"
+        for row in rows
+    )
+
+
+def test_review_exposes_rejected_variant_values_and_deferred_quantities():
+    imported = {
+        "title": "Blocked planter",
+        "options": [{"name": "Size", "values": ["Small"]}],
+        "variants": [{"price": "30.99", "sku": "REJECTED", "inventory_quantity": 7}],
+    }
+    proposed = preserve_blank_fields({}, imported)
+    proposed, blockers, unapplied = merge_structured_product(None, imported, proposed)
+
+    rows = review_changes(None, imported, proposed, blockers, unapplied)
+
+    rejected_price = next(
+        row
+        for row in rows
+        if row["field"] == "price" and row["change_kind"] == "rejected"
+    )
+    assert rejected_price["proposed"] == "30.99"
+    assert rejected_price["disposition"] == "blocked"
+    assert "INCOMPLETE_VARIANT_COMBINATION" in rejected_price["reason_codes"]
+    quantity = next(row for row in rows if row["field"] == "inventory_quantity")
+    assert quantity["proposed"] == 7
+    assert quantity["disposition"] == "deferred"
+    assert quantity["scope"] == "inventory"
+
+
+def test_review_matches_variant_id_before_options_omits_unchanged_and_reports_removal():
+    live = {
+        "options": [
+            {"name": "Size", "optionValues": [{"name": "Small"}, {"name": "Large"}]}
+        ],
+        "variants": {
+            "nodes": [
+                {
+                    "id": "v1",
+                    "selectedOptions": [{"name": "Size", "value": "Small"}],
+                    "sku": "ONE",
+                },
+                {
+                    "id": "v2",
+                    "selectedOptions": [{"name": "Size", "value": "Large"}],
+                    "sku": "TWO",
+                },
+            ]
+        },
+    }
+    proposed = {
+        "productOptions": [
+            {
+                "name": "Size",
+                "position": 1,
+                "values": [{"name": "Small"}, {"name": "Medium"}],
+            }
+        ],
+        "variants": [
+            {
+                "id": "v1",
+                "optionValues": [{"optionName": "Size", "name": "Medium"}],
+                "sku": "ONE",
+            }
+        ],
+    }
+
+    rows = review_changes(live, {}, proposed)
+
+    assert not any(
+        row["field"] == "sku" and row["subject"] == "Size: Medium" for row in rows
+    )
+    assert any(
+        row["field"] == "sku"
+        and row["current"] == "TWO"
+        and row["proposed"] is None
+        and row["change_kind"] == "removed"
+        for row in rows
+    )

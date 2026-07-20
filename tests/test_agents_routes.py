@@ -3460,10 +3460,8 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
         revert_single = await ac.post(
             f"/agents/intelligence/suggestions/{suggestion_id}/revert"
         )
-        assert revert_single.status_code == 200
-        assert revert_single.json()["status"] == "reverted"
-        assert revert_single.json()["shopify_updated"] is True
-        assert revert_single.json()["target_product_id"] == "gid://shopify/Product/9"
+        assert revert_single.status_code == 409
+        assert "Revert conflict" in str(revert_single.json()["detail"])
 
         remaining_ids = [
             row["suggestion_id"]
@@ -3780,6 +3778,8 @@ async def test_intelligence_audit_with_existing_products_mode(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
+    live_vendor = {"value": None}
+
     async def fake_get_product(self, gid):
         return {
             "data": {
@@ -3787,7 +3787,7 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
                     "id": gid,
                     "title": "Catalog Product",
                     "descriptionHtml": "",
-                    "vendor": None,
+                    "vendor": live_vendor["value"],
                     "handle": "catalog-product",
                     "productType": "General",
                     "status": "ACTIVE",
@@ -3804,6 +3804,8 @@ async def test_apply_suggestion_allows_missing_previous_values(monkeypatch):
 
     async def fake_update_product_from_input(self, product):
         updates.append(dict(product))
+        if "vendor" in product:
+            live_vendor["value"] = product["vendor"]
         return {
             "data": {
                 "productUpdate": {

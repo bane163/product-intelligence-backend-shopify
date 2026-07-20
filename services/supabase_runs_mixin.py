@@ -10,6 +10,7 @@ LOG = logging.getLogger(__name__)
 
 class SupabaseRunsMixin:
     TERMINAL_WORKFLOW_STATUSES = {"cancelled", "succeeded", "failed"}
+
     def _get_supabase_client(self) -> Optional[Any]:
         """Stub for typing — actual implementation provided by host class (e.g. SupabaseFileMixin)."""
         raise NotImplementedError(
@@ -85,12 +86,7 @@ class SupabaseRunsMixin:
     @staticmethod
     def _is_missing_column_error(exc: Exception, *, column: str) -> bool:
         normalized = " ".join(
-            str(exc)
-            .lower()
-            .replace('"', "")
-            .replace("'", "")
-            .replace("`", "")
-            .split()
+            str(exc).lower().replace('"', "").replace("'", "").replace("`", "").split()
         )
         if column.lower() not in normalized:
             return False
@@ -158,11 +154,15 @@ class SupabaseRunsMixin:
 
     def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None:
         client = self._get_supabase_client()
-        metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else None
+        metadata = (
+            event.get("metadata") if isinstance(event.get("metadata"), dict) else None
+        )
         request_id = self._normalize_identifier(event.get("request_id"))
         correlation_id = self._normalize_identifier(event.get("correlation_id"))
         if metadata:
-            request_id = request_id or self._normalize_identifier(metadata.get("request_id"))
+            request_id = request_id or self._normalize_identifier(
+                metadata.get("request_id")
+            )
             correlation_id = correlation_id or self._normalize_identifier(
                 metadata.get("correlation_id")
             )
@@ -251,7 +251,9 @@ class SupabaseRunsMixin:
             if rows:
                 latest = max(latest, int(rows[0].get("seq") or 0))
         except Exception:
-            LOG.exception("Failed resolving latest event sequence for run_id=%s", run_id)
+            LOG.exception(
+                "Failed resolving latest event sequence for run_id=%s", run_id
+            )
         return latest
 
     def append_run_message(
@@ -319,7 +321,12 @@ class SupabaseRunsMixin:
         fields: dict[str, Any],
         *,
         require_persistent_queue: bool = False,
+        create_once: bool = False,
     ) -> dict[str, Any] | None:
+        if create_once:
+            existing = self.get_offload_job(job_id)
+            if isinstance(existing, dict):
+                return existing
         payload: dict[str, Any] = {"job_id": job_id, **fields}
         payload["queue_name"] = self._normalize_queue_name(payload.get("queue_name"))
         payload["job_type"] = str(payload.get("job_type") or "unknown").strip().lower()
@@ -341,10 +348,16 @@ class SupabaseRunsMixin:
         client = self._get_supabase_client()
         if client:
             try:
-                client.table("offload_jobs").upsert(
-                    payload, on_conflict="job_id"
-                ).execute()
+                table = client.table("offload_jobs")
+                if create_once:
+                    table.insert(payload).execute()
+                else:
+                    table.upsert(payload, on_conflict="job_id").execute()
             except Exception as exc:
+                if create_once:
+                    existing = self.get_offload_job(job_id)
+                    if isinstance(existing, dict):
+                        return existing
                 compat_payload = self._drop_missing_columns(
                     payload,
                     exc,
@@ -352,11 +365,17 @@ class SupabaseRunsMixin:
                 )
                 if compat_payload is not None:
                     try:
-                        client.table("offload_jobs").upsert(
-                            compat_payload, on_conflict="job_id"
-                        ).execute()
+                        table = client.table("offload_jobs")
+                        if create_once:
+                            table.insert(compat_payload).execute()
+                        else:
+                            table.upsert(compat_payload, on_conflict="job_id").execute()
                         payload = compat_payload
                     except Exception as retry_exc:
+                        if create_once:
+                            existing = self.get_offload_job(job_id)
+                            if isinstance(existing, dict):
+                                return existing
                         LOG.exception(
                             "Retry without observability columns failed for offload_jobs row job_id=%s",
                             job_id,
@@ -366,7 +385,9 @@ class SupabaseRunsMixin:
                                 "Offload queue persistence failed (offload_jobs)"
                             ) from retry_exc
                 else:
-                    LOG.exception("Failed upserting offload_jobs row for job_id=%s", job_id)
+                    LOG.exception(
+                        "Failed upserting offload_jobs row for job_id=%s", job_id
+                    )
                     if require_persistent_queue:
                         raise RuntimeError(
                             "Offload queue persistence failed (offload_jobs)"
@@ -562,7 +583,9 @@ class SupabaseRunsMixin:
         memory_jobs[job_id] = merged
         return merged
 
-    def cancel_run_cascade(self, run_id: str, shop_domain: str | None) -> dict[str, Any] | None:
+    def cancel_run_cascade(
+        self, run_id: str, shop_domain: str | None
+    ) -> dict[str, Any] | None:
         """Atomically cancel a run, its runnable jobs, draft and control event."""
         tenant = self._normalize_shop_domain(shop_domain)
         client = self._get_supabase_client()
@@ -586,21 +609,51 @@ class SupabaseRunsMixin:
         if self._normalize_run_status(run.get("status")) not in {"queued", "running"}:
             return None
         now = self._utc_now()
-        run.update(status="cancelled", ended_at=now, error=None,
-                   failure_code="cancelled_by_operator", failure_message="Run cancelled",
-                   resume_token=None)
+        run.update(
+            status="cancelled",
+            ended_at=now,
+            error=None,
+            failure_code="cancelled_by_operator",
+            failure_message="Run cancelled",
+            resume_token=None,
+        )
         jobs = getattr(self, "offload_jobs", {})
         for job in jobs.values() if isinstance(jobs, dict) else ():
-            if job.get("run_id") == run_id and self._normalize_offload_job_status(job.get("status")) not in self.TERMINAL_WORKFLOW_STATUSES:
-                job.update(status="cancelled", error=None, worker_id=None,
-                           claimed_at=None, claim_expires_at=None, updated_at=now)
+            if (
+                job.get("run_id") == run_id
+                and self._normalize_offload_job_status(job.get("status"))
+                not in self.TERMINAL_WORKFLOW_STATUSES
+            ):
+                job.update(
+                    status="cancelled",
+                    error=None,
+                    worker_id=None,
+                    claimed_at=None,
+                    claim_expires_at=None,
+                    updated_at=now,
+                )
         seq = self.get_latest_run_event_seq(run_id) + 1
-        self.append_run_event(run_id, {"ts": now, "phase": "run_cancelled", "level": "info", "message": "Run cancelled", "metadata": {"operation": "cancel"}}, seq)
+        self.append_run_event(
+            run_id,
+            {
+                "ts": now,
+                "phase": "run_cancelled",
+                "level": "info",
+                "message": "Run cancelled",
+                "metadata": {"operation": "cancel"},
+            },
+            seq,
+        )
         return dict(run)
 
     def transition_offload_workflow(
-        self, job_id: str, target_status: str, *, error: str | None = None,
-        failure_code: str | None = None, result: dict[str, Any] | None = None,
+        self,
+        job_id: str,
+        target_status: str,
+        *,
+        error: str | None = None,
+        failure_code: str | None = None,
+        result: dict[str, Any] | None = None,
         available_at: str | None = None,
     ) -> dict[str, Any] | None:
         """Compare-and-set a job/run/draft workflow transition."""
@@ -608,15 +661,23 @@ class SupabaseRunsMixin:
         client = self._get_supabase_client()
         if client:
             try:
-                response = client.rpc("transition_offload_workflow", {
-                    "p_job_id": job_id, "p_target_status": status,
-                    "p_error": sanitize_text(error), "p_failure_code": failure_code,
-                    "p_result": result, "p_available_at": available_at,
-                }).execute()
+                response = client.rpc(
+                    "transition_offload_workflow",
+                    {
+                        "p_job_id": job_id,
+                        "p_target_status": status,
+                        "p_error": sanitize_text(error),
+                        "p_failure_code": failure_code,
+                        "p_result": result,
+                        "p_available_at": available_at,
+                    },
+                ).execute()
                 rows = response.data or []
                 return rows[0] if isinstance(rows, list) and rows else rows
             except Exception:
-                LOG.exception("Failed workflow transition job_id=%s status=%s", job_id, status)
+                LOG.exception(
+                    "Failed workflow transition job_id=%s status=%s", job_id, status
+                )
                 return None
         jobs = getattr(self, "offload_jobs", {})
         job = jobs.get(job_id) if isinstance(jobs, dict) else None
@@ -633,12 +694,21 @@ class SupabaseRunsMixin:
             job.update(worker_id=None, claimed_at=None, claim_expires_at=None)
         run = getattr(self, "llm_runs", {}).get(job.get("run_id"))
         mapped = "queued" if status == "retryable" else status
-        if isinstance(run, dict) and self._normalize_run_status(run.get("status")) not in self.TERMINAL_WORKFLOW_STATUSES:
+        if (
+            isinstance(run, dict)
+            and self._normalize_run_status(run.get("status"))
+            not in self.TERMINAL_WORKFLOW_STATUSES
+        ):
             run.update(status=mapped, error=error if mapped == "failed" else None)
             if mapped in self.TERMINAL_WORKFLOW_STATUSES:
                 run["ended_at"] = now
             else:
-                run.update(ended_at=None, duration_ms=None, failure_code=None, failure_message=None)
+                run.update(
+                    ended_at=None,
+                    duration_ms=None,
+                    failure_code=None,
+                    failure_message=None,
+                )
         return dict(job)
 
     def get_offload_job(self, job_id: str) -> dict[str, Any] | None:
@@ -705,7 +775,10 @@ class SupabaseRunsMixin:
             if str(item.get("run_id") or "") != run_id:
                 continue
             if normalized_shop_domain:
-                if self._normalize_shop_domain(item.get("shop_domain")) != normalized_shop_domain:
+                if (
+                    self._normalize_shop_domain(item.get("shop_domain"))
+                    != normalized_shop_domain
+                ):
                     continue
             rows.append(item)
         rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
@@ -746,9 +819,12 @@ class SupabaseRunsMixin:
         if not client:
             run = getattr(self, "llm_runs", {}).get(run_id)
             normalized_shop_domain = self._normalize_shop_domain(shop_domain)
-            if run and normalized_shop_domain and self._normalize_shop_domain(
-                run.get("shop_domain")
-            ) != normalized_shop_domain:
+            if (
+                run
+                and normalized_shop_domain
+                and self._normalize_shop_domain(run.get("shop_domain"))
+                != normalized_shop_domain
+            ):
                 return None
             return dict(run) if isinstance(run, dict) else None
         try:
@@ -776,9 +852,11 @@ class SupabaseRunsMixin:
                 run = memory_runs.get(run_id) if isinstance(memory_runs, dict) else None
                 if not isinstance(run, dict):
                     continue
-                if normalized_shop_domain and self._normalize_shop_domain(
-                    run.get("shop_domain")
-                ) != normalized_shop_domain:
+                if (
+                    normalized_shop_domain
+                    and self._normalize_shop_domain(run.get("shop_domain"))
+                    != normalized_shop_domain
+                ):
                     continue
                 summary = {
                     "status": self._normalize_run_status(run.get("status")),
@@ -787,9 +865,17 @@ class SupabaseRunsMixin:
                     "completion_tokens": run.get("completion_tokens"),
                     "total_tokens": run.get("total_tokens"),
                 }
-                events = memory_events.get(run_id, []) if isinstance(memory_events, dict) else []
+                events = (
+                    memory_events.get(run_id, [])
+                    if isinstance(memory_events, dict)
+                    else []
+                )
                 for event in reversed(events):
-                    message = sanitize_text(event.get("message")) if isinstance(event, dict) else None
+                    message = (
+                        sanitize_text(event.get("message"))
+                        if isinstance(event, dict)
+                        else None
+                    )
                     if message:
                         summary["processing_message"] = message
                         break
@@ -897,7 +983,11 @@ class SupabaseRunsMixin:
         return True
 
     def get_run_history(
-        self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        include_messages: bool = True,
     ) -> dict[str, Any]:
         client = self._get_supabase_client()
         if not client:

@@ -76,6 +76,7 @@ class SupabasePort(Protocol):
         fields: dict[str, Any],
         *,
         require_persistent_queue: bool = False,
+        create_once: bool = False,
     ) -> dict[str, Any] | None: ...
 
     def claim_next_offload_job(
@@ -185,6 +186,7 @@ class SupabasePort(Protocol):
         component_scores: dict[str, int],
         totals: dict[str, Any],
         shop_domain: str | None = None,
+        scoring_version: str = "legacy-catalog-v1",
     ) -> dict[str, Any]: ...
 
     def save_product_intelligence_findings(
@@ -194,6 +196,15 @@ class SupabasePort(Protocol):
         findings: list[dict[str, Any]],
         shop_domain: str | None = None,
     ) -> int: ...
+
+    def save_product_intelligence_product_results(
+        self, *, audit_id: str, results: list[dict[str, Any]],
+        shop_domain: str | None = None,
+    ) -> int: ...
+
+    def list_product_intelligence_product_results(
+        self, *, product_ids: list[str], shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]: ...
 
     def list_product_intelligence_audits(
         self,
@@ -427,6 +438,7 @@ class SupabaseRunsNamespacePort(Protocol):
         fields: dict[str, Any],
         *,
         require_persistent_queue: bool = False,
+        create_once: bool = False,
     ) -> dict[str, Any] | None: ...
 
     def claim_next_offload_job(
@@ -541,6 +553,7 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         component_scores: dict[str, int],
         totals: dict[str, Any],
         shop_domain: str | None = None,
+        scoring_version: str = "legacy-catalog-v1",
     ) -> dict[str, Any]: ...
 
     def save_product_intelligence_findings(
@@ -550,6 +563,15 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         findings: list[dict[str, Any]],
         shop_domain: str | None = None,
     ) -> int: ...
+
+    def save_product_intelligence_product_results(
+        self, *, audit_id: str, results: list[dict[str, Any]],
+        shop_domain: str | None = None,
+    ) -> int: ...
+
+    def list_product_intelligence_product_results(
+        self, *, product_ids: list[str], shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]: ...
 
     def list_product_intelligence_audits(
         self,

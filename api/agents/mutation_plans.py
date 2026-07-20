@@ -14,6 +14,7 @@ from application.domain.shopify_mutation_plan import (
     applicable_changes,
     merge_structured_product,
     preserve_blank_fields,
+    review_changes,
     validate_product,
 )
 from shopify import SHOPIFY_REAUTH_REQUIRED, ShopifyClient
@@ -22,7 +23,10 @@ from .utils import require_authenticated_shop_domain
 router = APIRouter()
 REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
-ACCESS_SCOPES_QUERY = """query MutationPlanAccessScopes { currentAppInstallation { accessScopes { handle } } }"""
+ACCESS_SCOPES_QUERY = """query MutationPlanAccessScopes {
+  currentAppInstallation { accessScopes { handle } }
+  shop { currencyCode }
+}"""
 PRODUCT_BY_HANDLE_QUERY = """query MutationPlanProductByHandle($query: String!) {
   products(first: 2, query: $query) { nodes {
     id title handle descriptionHtml vendor productType status tags
@@ -31,7 +35,7 @@ PRODUCT_BY_HANDLE_QUERY = """query MutationPlanProductByHandle($query: String!) 
     variants(first: 250) { nodes {
       id title price compareAtPrice sku barcode taxable taxCode inventoryPolicy
       selectedOptions { name value }
-      inventoryItem { id sku cost tracked requiresShipping measurement { weight { value unit } } }
+      inventoryItem { id sku unitCost { amount } tracked requiresShipping measurement { weight { value unit } } }
     } pageInfo { hasNextPage endCursor } }
     metafields(first: 250) { nodes { id namespace key value type } }
   } }
@@ -40,7 +44,7 @@ PRODUCT_VARIANTS_PAGE_QUERY = """query MutationPlanProductVariants($id: ID!, $af
   product(id: $id) { variants(first: 250, after: $after) { nodes {
     id title price compareAtPrice sku barcode taxable taxCode inventoryPolicy
     selectedOptions { name value }
-    inventoryItem { id sku cost tracked requiresShipping measurement { weight { value unit } } }
+    inventoryItem { id sku unitCost { amount } tracked requiresShipping measurement { weight { value unit } } }
   } pageInfo { hasNextPage endCursor } } }
 }"""
 
@@ -143,6 +147,9 @@ async def create_mutation_plan(
             .get("currentAppInstallation", {})
             .get("accessScopes", [])
         )
+        currency_code = str(
+            scopes_result.get("data", {}).get("shop", {}).get("currencyCode") or "USD"
+        ).upper()
         if "write_products" not in {
             x.get("handle") for x in scopes if isinstance(x, dict)
         }:
@@ -244,6 +251,9 @@ async def create_mutation_plan(
             blockers.extend(structured_blockers)
             unapplied.extend(structured_unapplied)
             changes = applicable_changes(live, proposed)
+            exact_review = review_changes(
+                live, product, proposed, blockers=blockers, unapplied=unapplied
+            )
             if blockers:
                 operation = "blocked"
             elif live and not changes:
@@ -253,6 +263,7 @@ async def create_mutation_plan(
             items.append(
                 {
                     "item_id": item_id,
+                    "currency_code": currency_code,
                     "source_index": index,
                     "source_evidence": product.get("source_refs") or [],
                     "live_snapshot": live,
@@ -262,6 +273,7 @@ async def create_mutation_plan(
                     "blockers": blockers,
                     "unapplied": unapplied,
                     "applicable_changes": changes,
+                    "review_changes": exact_review,
                     "selectable": selectable,
                     "selected": selectable,
                     "remedy": None,
@@ -278,6 +290,7 @@ async def create_mutation_plan(
         "draft_revision": int(draft.get("revision") or 1),
         "version": int((previous or {}).get("version") or 0) + 1,
         "status": "review",
+        "currency_code": currency_code,
         "items": items,
         "approved_at": None,
         "created_at": _now(),
@@ -351,10 +364,6 @@ async def approve_mutation_plan(
         or int(plan.get("draft_revision") or 0) != int(draft.get("revision") or 1)
     ):
         raise _review_error("Plan is stale")
-    approval_client = await _offline_client(
-        tenant
-    )  # approval cannot outlive a missing credential
-    await approval_client.close()
     selected = [x for x in plan.get("items", []) if x.get("selected")]
     if not selected:
         raise _review_error("Select at least one valid change")
@@ -364,6 +373,15 @@ async def approve_mutation_plan(
         "acknowledge_unapplied"
     ):
         raise _review_error("Deferred fields must be acknowledged")
+    plan_status = str(plan.get("status") or "").strip().lower()
+    if plan_status in {"approved", "executing"}:
+        return {"plan": plan}
+    if plan_status != "review":
+        raise _review_error("Execution is terminal; refresh Shopify review")
+    approval_client = await _offline_client(
+        tenant
+    )  # approval cannot outlive a missing credential
+    await approval_client.close()
     approved = {
         **plan,
         "status": "approved",

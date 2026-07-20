@@ -119,6 +119,8 @@ class SupabaseDomainAccessors:
             (
                 "save_product_intelligence_audit",
                 "save_product_intelligence_findings",
+                "save_product_intelligence_product_results",
+                "list_product_intelligence_product_results",
                 "list_product_intelligence_audits",
                 "get_product_intelligence_audit",
                 "list_product_intelligence_audit_artifacts",

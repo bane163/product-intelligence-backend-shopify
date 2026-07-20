@@ -237,6 +237,7 @@ def _save_draft_state(
             else _optional_str_field(existing, "submit_error")
         ),
         require_lifecycle_columns=True,
+        revision=int(existing.get("revision") or 1),
         products=products if products is not None else _draft_products(existing),
     )
 
@@ -558,16 +559,18 @@ class OffloadWorker:
             shop_access_token=shop_access_token,
         )
         result_rows = result.get("results", []) if isinstance(result, dict) else []
+        if not isinstance(result_rows, list) or len(result_rows) != len(selected):
+            raise RuntimeError(
+                "Shopify submit result count does not match selected mutation plan "
+                f"items (expected={len(selected)}, actual="
+                f"{len(result_rows) if isinstance(result_rows, list) else 'invalid'})"
+            )
         selected_index = 0
         updated_items = []
         for item in plan.get("items", []):
             item = dict(item)
-            if item.get("selected"):
-                item["execution"] = (
-                    result_rows[selected_index]
-                    if selected_index < len(result_rows)
-                    else None
-                )
+            if item.get("selected") and not item.get("blockers"):
+                item["execution"] = result_rows[selected_index]
                 selected_index += 1
             updated_items.append(item)
         failed_count = (
@@ -581,6 +584,15 @@ class OffloadWorker:
         partial_count = (
             int(result.get("partial_count") or 0) if isinstance(result, dict) else 0
         )
+        if (
+            success_count + failed_count != len(selected)
+            or partial_count > success_count
+        ):
+            raise RuntimeError(
+                "Shopify submit counts do not match selected mutation plan items "
+                f"(selected={len(selected)}, success={success_count}, "
+                f"failed={failed_count}, partial={partial_count})"
+            )
         lifecycle = (
             "partially_applied"
             if partial_count or (success_count and failed_count)
@@ -602,6 +614,9 @@ class OffloadWorker:
             isinstance(result, dict)
             and isinstance(result.get("submitted_id"), str)
             and result.get("submitted_id")
+            and success_count == len(selected)
+            and failed_count == 0
+            and partial_count == 0
         )
         error_detail: str | None = None
         if not submit_succeeded and isinstance(result, dict):
@@ -661,39 +676,63 @@ class OffloadWorker:
         plan_id = _optional_str(payload.get("plan_id"))
         shop_domain = _optional_str(job.get("shop_domain"))
         if job_type == "shopify_submit" and plan_id and shop_domain:
-            plan_store = getattr(self.ctx.supabase, "_service", self.ctx.supabase)
-            plan = plan_store.get_mutation_plan(plan_id, shop_domain=shop_domain)
-            if isinstance(plan, dict):
-                plan_store.save_mutation_plan(
-                    {**plan, "status": "failed", "execution_error": error}
+            try:
+                plan_store = getattr(self.ctx.supabase, "_service", self.ctx.supabase)
+                plan = plan_store.get_mutation_plan(plan_id, shop_domain=shop_domain)
+                if isinstance(plan, dict) and plan.get("status") not in {
+                    "completed",
+                    "partially_applied",
+                }:
+                    plan_store.save_mutation_plan({**plan, "status": "failed"})
+            except Exception:
+                LOG.exception(
+                    "Failed marking mutation plan failure plan_id=%s", plan_id
                 )
 
         if run_id:
-            self.ctx.supabase.runs.finalize_run(run_id, status="failed", error=error)
-            self.ctx.services.tracing.complete_run(run_id)
+            try:
+                self.ctx.supabase.runs.finalize_run(
+                    run_id, status="failed", error=error
+                )
+            except Exception:
+                LOG.exception("Failed marking submit run failure run_id=%s", run_id)
+            try:
+                self.ctx.services.tracing.complete_run(run_id)
+            except Exception:
+                LOG.exception("Failed completing failed run trace run_id=%s", run_id)
         if not draft_id:
             return
         if job_type == "document_import":
-            _save_draft_state(
-                ctx=self.ctx,
-                draft_id=draft_id,
-                shop_domain=_optional_str(job.get("shop_domain")),
-                fallback_run_id=run_id,
-                extraction_status="failed",
-                extraction_run_id=run_id,
-                extraction_error=error,
-            )
+            try:
+                _save_draft_state(
+                    ctx=self.ctx,
+                    draft_id=draft_id,
+                    shop_domain=_optional_str(job.get("shop_domain")),
+                    fallback_run_id=run_id,
+                    extraction_status="failed",
+                    extraction_run_id=run_id,
+                    extraction_error=error,
+                )
+            except Exception:
+                LOG.exception(
+                    "Failed marking import draft failure draft_id=%s", draft_id
+                )
             return
         if job_type == "shopify_submit":
-            _save_draft_state(
-                ctx=self.ctx,
-                draft_id=draft_id,
-                shop_domain=_optional_str(job.get("shop_domain")),
-                fallback_run_id=run_id,
-                submit_status="failed",
-                submit_run_id=run_id,
-                submit_error=error,
-            )
+            try:
+                _save_draft_state(
+                    ctx=self.ctx,
+                    draft_id=draft_id,
+                    shop_domain=_optional_str(job.get("shop_domain")),
+                    fallback_run_id=run_id,
+                    submit_status="failed",
+                    submit_run_id=run_id,
+                    submit_error=error,
+                )
+            except Exception:
+                LOG.exception(
+                    "Failed marking submit draft failure draft_id=%s", draft_id
+                )
 
     async def _process_job(self, job: dict[str, Any]) -> dict[str, Any]:
         job_type = _optional_str(job.get("job_type")) or ""

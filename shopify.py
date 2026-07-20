@@ -658,6 +658,31 @@ class ShopifyClient:
 
         return collected
 
+    async def list_products_by_ids(self, product_ids: list[str]) -> list[Dict[str, Any]]:
+        """Fetch exact products without trusting a browser-supplied snapshot."""
+        normalized_ids = list(dict.fromkeys(
+            str(value or "").strip() for value in product_ids
+            if str(value or "").startswith("gid://shopify/Product/")
+        ))
+        products: list[Dict[str, Any]] = []
+        for gid in normalized_ids:
+            response = await self.get_product(gid)
+            node = response.get("data", {}).get("node") if isinstance(response, dict) else None
+            if not isinstance(node, dict):
+                continue
+            seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
+            variants = node.get("variants") if isinstance(node.get("variants"), dict) else {}
+            products.append({
+                "id": node.get("id"), "title": node.get("title"),
+                "handle": node.get("handle"), "vendor": node.get("vendor"),
+                "product_type": node.get("productType"), "status": node.get("status"),
+                "tags": node.get("tags"), "body_html": node.get("descriptionHtml"),
+                "seo_title": seo.get("title"), "seo_description": seo.get("description"),
+                "options": node.get("options") if isinstance(node.get("options"), list) else [],
+                "variants": variants.get("nodes") if isinstance(variants.get("nodes"), list) else [],
+            })
+        return products
+
     # ── Bulk Operation helpers ──────────────────────────────────────────
 
     async def create_staged_upload(self) -> Dict[str, Any]:

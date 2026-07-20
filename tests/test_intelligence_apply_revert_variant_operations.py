@@ -185,6 +185,31 @@ class _FakeShopifyRevert:
         self.deleted_variants = []
         self.updated_payload = None
 
+    async def get_product(self, gid: str):
+        return {
+            "data": {
+                "node": {
+                    "id": gid,
+                    "title": "Catalog Product",
+                    "descriptionHtml": "",
+                    "vendor": "Vendor",
+                    "handle": "catalog-product",
+                    "productType": "Shirt",
+                    "status": "ACTIVE",
+                    "tags": [],
+                    "seo": {"title": None, "description": None},
+                    "variants": {"nodes": [
+                        {"id": "gid://shopify/ProductVariant/11"},
+                        {"id": "gid://shopify/ProductVariant/12"},
+                    ]},
+                }
+            }
+        }
+
+    async def get_product_metafields(self, gid: str, identifiers):
+        _ = gid, identifiers
+        return []
+
     async def bulk_delete_product_variants(self, product_id: str, variant_ids):
         self.deleted_variants.append((product_id, list(variant_ids)))
         return {"data": {"productVariantsBulkDelete": {"userErrors": []}}}

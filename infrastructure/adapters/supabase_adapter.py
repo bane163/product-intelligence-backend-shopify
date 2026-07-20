@@ -149,9 +149,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         fields: dict[str, Any],
         *,
         require_persistent_queue: bool = False,
+        create_once: bool = False,
     ) -> dict[str, Any] | None:
         return self._service.enqueue_offload_job(
-            job_id, fields, require_persistent_queue=require_persistent_queue
+            job_id,
+            fields,
+            require_persistent_queue=require_persistent_queue,
+            create_once=create_once,
         )
 
     def claim_next_offload_job(
@@ -342,6 +346,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         component_scores: dict[str, int],
         totals: dict[str, Any],
         shop_domain: str | None = None,
+        scoring_version: str = "legacy-catalog-v1",
     ) -> dict[str, Any]:
         return self._service.save_product_intelligence_audit(
             audit_id=audit_id,
@@ -354,6 +359,22 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             component_scores=component_scores,
             totals=totals,
             shop_domain=shop_domain,
+            scoring_version=scoring_version,
+        )
+
+    def save_product_intelligence_product_results(
+        self, *, audit_id: str, results: list[dict[str, Any]],
+        shop_domain: str | None = None,
+    ) -> int:
+        return self._service.save_product_intelligence_product_results(
+            audit_id=audit_id, results=results, shop_domain=shop_domain,
+        )
+
+    def list_product_intelligence_product_results(
+        self, *, product_ids: list[str], shop_domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._service.list_product_intelligence_product_results(
+            product_ids=product_ids, shop_domain=shop_domain,
         )
 
     def save_product_intelligence_findings(

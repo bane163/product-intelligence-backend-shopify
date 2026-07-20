@@ -1,5 +1,5 @@
 schema:
-	./shopify-2025-10.schema
+	./shopify-2026-07.schema
 documents:
   "./**/*.graphql"
 extensions:

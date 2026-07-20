@@ -5,6 +5,16 @@ from typing import Any
 
 from application.ports.supabase_port import SupabaseNamespacedPort
 
+SCORING_VERSION = "product-mean-v2"
+COMPONENT_WEIGHTS = {
+    "completeness": 25,
+    "consistency": 20,
+    "seo_readiness": 20,
+    "ai_discoverability": 20,
+    "compliance": 10,
+    "enrichment": 5,
+}
+
 
 def _to_text(value: Any) -> str:
     if value is None:
@@ -32,6 +42,7 @@ def _add_finding(
     suggestion: str,
     field_path: str,
     patch_payload: dict[str, Any] | None = None,
+    product_id: str = "",
 ) -> None:
     finding_id = str(uuid.uuid4())
     findings.append(
@@ -39,6 +50,7 @@ def _add_finding(
             "finding_id": finding_id,
             "product_index": product_index,
             "product_title": product_title,
+            "product_id": product_id,
             "category": category,
             "severity": severity,
             "code": code,
@@ -50,7 +62,7 @@ def _add_finding(
     )
 
 
-def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], list[dict[str, Any]]]:
+def _score_product(product: dict[str, Any], *, product_index: int = 0) -> tuple[dict[str, int], list[dict[str, Any]]]:
     findings: list[dict[str, Any]] = []
     dimensions = {
         "completeness": 100,
@@ -61,18 +73,19 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
         "enrichment": 100,
     }
 
-    for index, product in enumerate(products):
-        title = _to_text(product.get("title")) or f"Product #{index + 1}"
-        vendor = _to_text(product.get("vendor"))
-        body_html = _to_text(product.get("body_html") or product.get("descriptionHtml"))
-        product_type = _to_text(product.get("product_type") or product.get("productType"))
-        seo_title = _to_text(product.get("seo_title"))
-        seo_description = _to_text(product.get("seo_description"))
-        tags = _to_tags(product.get("tags"))
-        status = _to_text(product.get("status")).lower()
-        variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    index = product_index
+    product_id = _to_text(product.get("id"))
+    title = _to_text(product.get("title")) or f"Product #{index + 1}"
+    vendor = _to_text(product.get("vendor"))
+    body_html = _to_text(product.get("body_html") or product.get("descriptionHtml"))
+    product_type = _to_text(product.get("product_type") or product.get("productType"))
+    seo_title = _to_text(product.get("seo_title"))
+    seo_description = _to_text(product.get("seo_description"))
+    tags = _to_tags(product.get("tags"))
+    status = _to_text(product.get("status")).lower()
+    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
 
-        if not _to_text(product.get("title")):
+    if not _to_text(product.get("title")):
             dimensions["completeness"] -= 20
             _add_finding(
                 findings,
@@ -86,7 +99,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 field_path="title",
                 patch_payload={"title": title},
             )
-        if not vendor:
+    if not vendor:
             dimensions["completeness"] -= 8
             _add_finding(
                 findings,
@@ -100,7 +113,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 field_path="vendor",
                 patch_payload={"vendor": "Unknown Vendor"},
             )
-        if not body_html:
+    if not body_html:
             dimensions["completeness"] -= 10
             _add_finding(
                 findings,
@@ -113,7 +126,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 suggestion="Add a detailed product description.",
                 field_path="body_html",
             )
-        if not product_type:
+    if not product_type:
             dimensions["completeness"] -= 6
             _add_finding(
                 findings,
@@ -128,7 +141,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 patch_payload={"product_type": "General"},
             )
 
-        if status and status not in {"active", "draft", "archived"}:
+    if status and status not in {"active", "draft", "archived"}:
             dimensions["consistency"] -= 12
             _add_finding(
                 findings,
@@ -141,7 +154,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 suggestion="Use active, draft, or archived.",
                 field_path="status",
             )
-        if variants and all(not _to_text(v.get("sku")) for v in variants if isinstance(v, dict)):
+    if variants and all(not _to_text(v.get("sku")) for v in variants if isinstance(v, dict)):
             dimensions["consistency"] -= 8
             _add_finding(
                 findings,
@@ -155,7 +168,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 field_path="variants[].sku",
             )
 
-        if len(_to_text(product.get("title"))) < 20:
+    if len(_to_text(product.get("title"))) < 20:
             dimensions["seo_readiness"] -= 12
             _add_finding(
                 findings,
@@ -168,7 +181,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 suggestion="Use a more descriptive, keyword-rich title.",
                 field_path="title",
             )
-        if not seo_title:
+    if not seo_title:
             dimensions["seo_readiness"] -= 10
             _add_finding(
                 findings,
@@ -182,7 +195,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 field_path="seo_title",
                 patch_payload={"seo_title": title[:70]},
             )
-        if not seo_description and len(body_html) < 120:
+    if not seo_description and len(body_html) < 120:
             dimensions["seo_readiness"] -= 12
             _add_finding(
                 findings,
@@ -203,7 +216,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 },
             )
 
-        if not tags:
+    if not tags:
             dimensions["ai_discoverability"] -= 10
             _add_finding(
                 findings,
@@ -217,7 +230,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 field_path="tags",
                 patch_payload={"tags": ", ".join([t for t in [vendor, product_type] if t]) or "General"},
             )
-        if not _to_text(product.get("product_category") or product.get("google_shopping_category")):
+    if not _to_text(product.get("product_category") or product.get("google_shopping_category")):
             dimensions["ai_discoverability"] -= 12
             _add_finding(
                 findings,
@@ -232,7 +245,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 patch_payload={"product_category": product_type or "General"},
             )
 
-        if any(word in body_html.lower() for word in ["guaranteed cure", "100% safe"]):
+    if any(word in body_html.lower() for word in ["guaranteed cure", "100% safe"]):
             dimensions["compliance"] -= 20
             _add_finding(
                 findings,
@@ -246,7 +259,7 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
                 field_path="body_html",
             )
 
-        if body_html and "\n" not in body_html and "•" not in body_html and "- " not in body_html:
+    if body_html and "\n" not in body_html and "•" not in body_html and "- " not in body_html:
             dimensions["enrichment"] -= 8
             _add_finding(
                 findings,
@@ -262,8 +275,43 @@ def _score_products(products: list[dict[str, Any]]) -> tuple[dict[str, int], lis
 
     for key, value in dimensions.items():
         dimensions[key] = max(0, min(100, value))
+    for finding in findings:
+        finding["product_id"] = product_id
 
     return dimensions, findings
+
+
+def _score_products(
+    products: list[dict[str, Any]],
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
+    """Compatibility helper returning catalog means and product-tagged findings."""
+    results = _build_product_results(products)
+    component_scores = {
+        key: int(round(sum(row["component_scores"][key] for row in results) / len(results)))
+        for key in COMPONENT_WEIGHTS
+    }
+    return component_scores, [finding for row in results for finding in row["findings"]]
+
+
+def _build_product_results(products: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for index, product in enumerate(products):
+        component_scores, findings = _score_product(product, product_index=index)
+        score = int(round(sum(
+            component_scores[key] * weight
+            for key, weight in COMPONENT_WEIGHTS.items()
+        ) / 100))
+        results.append({
+            "product_id": _to_text(product.get("id")),
+            "product_title": _to_text(product.get("title")),
+            "score": score,
+            "component_scores": component_scores,
+            "findings_count": len(findings),
+            "audited_snapshot": dict(product),
+            "scoring_version": SCORING_VERSION,
+            "findings": findings,
+        })
+    return results
 
 
 async def execute(
@@ -291,7 +339,12 @@ async def execute(
             message="Scoring products for intelligence audit",
             payload_preview={"products_count": len(products)},
         )
-    component_scores, findings = _score_products(products)
+    product_results = _build_product_results(products)
+    component_scores = {
+        key: int(round(sum(row["component_scores"][key] for row in product_results) / len(product_results)))
+        for key in COMPONENT_WEIGHTS
+    }
+    findings = [finding for row in product_results for finding in row["findings"]]
     if callable(trace_event):
         trace_event(
             phase="audit_scoring_done",
@@ -301,16 +354,7 @@ async def execute(
                 "component_scores": component_scores,
             },
         )
-    weights = {
-        "completeness": 25,
-        "consistency": 20,
-        "seo_readiness": 20,
-        "ai_discoverability": 20,
-        "compliance": 10,
-        "enrichment": 5,
-    }
-    weighted_sum = sum(component_scores[key] * weight for key, weight in weights.items())
-    overall_score = int(round(weighted_sum / 100))
+    overall_score = int(round(sum(row["score"] for row in product_results) / len(product_results)))
 
     totals = {
         "products_analyzed": len(products),
@@ -347,6 +391,7 @@ async def execute(
         component_scores=component_scores,
         totals=totals,
         shop_domain=tenant,
+        scoring_version=SCORING_VERSION,
     )
     if callable(trace_event):
         trace_event(
@@ -355,6 +400,11 @@ async def execute(
             payload_preview={"audit_id": audit_id, "run_id": run_id},
         )
     supabase.intelligence.save_product_intelligence_findings(audit_id=audit_id, findings=findings, shop_domain=tenant)
+    supabase.intelligence.save_product_intelligence_product_results(
+        audit_id=audit_id,
+        results=[{key: value for key, value in row.items() if key != "findings"} for row in product_results],
+        shop_domain=tenant,
+    )
     if callable(trace_event):
         trace_event(
             phase="findings_persisted",

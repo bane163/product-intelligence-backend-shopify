@@ -27,6 +27,7 @@ async def test_release_gate_intelligence_path_audit_apply_revert_is_tenant_scope
 ):
     _force_in_memory_storage(monkeypatch)
     tenant_header = {"x-shop-domain": "release-gate-path.myshopify.com"}
+    live_vendor = {"value": "Brand"}
 
     async def fake_get_product(self, gid):
         return {
@@ -35,7 +36,7 @@ async def test_release_gate_intelligence_path_audit_apply_revert_is_tenant_scope
                     "id": gid,
                     "title": "Catalog Product",
                     "descriptionHtml": "",
-                    "vendor": "Brand",
+                    "vendor": live_vendor["value"],
                     "handle": "catalog-product",
                     "productType": "General",
                     "status": "ACTIVE",
@@ -46,6 +47,8 @@ async def test_release_gate_intelligence_path_audit_apply_revert_is_tenant_scope
         }
 
     async def fake_update_product_from_input(self, product):
+        if "vendor" in product:
+            live_vendor["value"] = product["vendor"]
         return {
             "data": {
                 "productUpdate": {

@@ -806,6 +806,52 @@ def _review_row(
     value_type: str | None = None,
     reason_codes: list[str] | None = None,
 ) -> dict[str, Any]:
+    resolved_value_type = value_type or (
+        "money"
+        if field in {"price", "compareAtPrice", "inventoryItem.cost"}
+        else (
+            "weight"
+            if field.startswith("inventoryItem.weight")
+            else (
+                "boolean"
+                if isinstance(current, bool) or isinstance(proposed, bool)
+                else (
+                    "json"
+                    if isinstance(current, (dict, list))
+                    or isinstance(proposed, (dict, list))
+                    else "text"
+                )
+            )
+        )
+    )
+    enum_values = {
+        "status": ["ACTIVE", "ARCHIVED", "DRAFT", "UNLISTED"],
+        "inventoryPolicy": ["DENY", "CONTINUE"],
+        "inventoryItem.weight.unit": ["GRAMS", "KILOGRAMS", "OUNCES", "POUNDS"],
+    }.get(field)
+    editor = "text"
+    edit_schema: dict[str, Any] = {"editor": editor, "required": field in {"title", "handle"}}
+    if field in {"tags", "values"}:
+        edit_schema = {"editor": "list", "required": False, "item_type": "text"}
+        if field == "values":
+            edit_schema["same_count_only"] = True
+    elif resolved_value_type in {"money", "weight"} and field != "inventoryItem.weight.unit":
+        edit_schema = {"editor": "decimal", "required": False, "minimum": 0}
+    elif resolved_value_type == "boolean":
+        edit_schema = {"editor": "boolean", "required": False, "options": [True, False]}
+    elif enum_values:
+        edit_schema = {"editor": "enum", "required": False, "options": enum_values}
+    elif resolved_value_type == "json":
+        edit_schema = {"editor": "json", "required": False}
+    elif resolved_value_type == "metafield" and isinstance(proposed, str):
+        try:
+            parsed_metafield = __import__("json").loads(proposed)
+        except (TypeError, ValueError):
+            parsed_metafield = None
+        if isinstance(parsed_metafield, (dict, list)):
+            edit_schema = {"editor": "json", "required": False, "preserve_string": True}
+    if field == "handle":
+        edit_schema["format"] = "handle"
     row = {
         "scope": scope,
         "subject": subject,
@@ -814,25 +860,8 @@ def _review_row(
         "proposed": proposed,
         "disposition": disposition,
         "change_kind": change_kind,
-        "value_type": value_type
-        or (
-            "money"
-            if field in {"price", "compareAtPrice", "inventoryItem.cost"}
-            else (
-                "weight"
-                if field.startswith("inventoryItem.weight")
-                else (
-                    "boolean"
-                    if isinstance(current, bool) or isinstance(proposed, bool)
-                    else (
-                        "json"
-                        if isinstance(current, (dict, list))
-                        or isinstance(proposed, (dict, list))
-                        else "text"
-                    )
-                )
-            )
-        ),
+        "value_type": resolved_value_type,
+        "edit_schema": edit_schema,
     }
     if reason_codes:
         row["reason_codes"] = reason_codes

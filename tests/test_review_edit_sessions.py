@@ -300,24 +300,16 @@ async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
             },
         )
         resumed = await client.get(base, headers=headers)
-        undone_sessions = []
-        for expected_revision in range(2, 7):
-            undone = await client.post(
-                f"{base}/{session['session_id']}/undo",
-                headers=headers,
-                json={"expected_edit_revision": expected_revision},
-            )
-            assert undone.status_code == 200, undone.text
-            undone_sessions.append(undone.json()["session"])
-        redone_sessions = []
-        for expected_revision in range(7, 12):
-            redone = await client.post(
-                f"{base}/{session['session_id']}/redo",
-                headers=headers,
-                json={"expected_edit_revision": expected_revision},
-            )
-            assert redone.status_code == 200, redone.text
-            redone_sessions.append(redone.json()["session"])
+        undone = await client.post(
+            f"{base}/{session['session_id']}/undo",
+            headers=headers,
+            json={"expected_edit_revision": 2},
+        )
+        redone = await client.post(
+            f"{base}/{session['session_id']}/redo",
+            headers=headers,
+            json={"expected_edit_revision": 3},
+        )
 
     assert patched.status_code == 200, patched.text
     patched_session = patched.json()["session"]
@@ -325,28 +317,26 @@ async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
         "filterValues": {"changes": "all", "query": "shirt"},
         "expandedItemIds": ["item-1"],
         "pagesByItem": {"item-1": 3},
-        "workspaceView": "changes",
     }
-    assert [entry["operation"] for entry in patched_session["history"]] == [
-        "filters", "expansion", "pagination", "workspace_view", "selection"
-    ]
+    assert [entry["operation"] for entry in patched_session["history"]] == ["selection"]
     assert all(entry["operation_id"] for entry in patched_session["history"])
-    assert patched_session["history_cursor"] == 5
-    assert resumed.json()["session"]["history_cursor"] == 5
-    base_session = undone_sessions[-1]
+    assert patched_session["history_cursor"] == 1
+    assert resumed.json()["session"]["history_cursor"] == 1
+    assert undone.status_code == 200, undone.text
+    base_session = undone.json()["session"]
     base_item = base_session["working_plan"]["items"][0]
     assert base_session["history_cursor"] == 0
     assert base_session["grid_state"] == {
-        "filterValues": {"changes": "hide_deferred"},
-        "expandedItemIds": [],
-        "pagesByItem": {},
-        "workspaceView": "split",
+        "filterValues": {"changes": "all", "query": "shirt"},
+        "expandedItemIds": ["item-1"],
+        "pagesByItem": {"item-1": 3},
     }
     assert base_item["selected"] is True
     assert [row["included"] for row in base_item["review_changes"]] == [True, True]
-    redone_session = redone_sessions[-1]
+    assert redone.status_code == 200, redone.text
+    redone_session = redone.json()["session"]
     redone_item = redone_session["working_plan"]["items"][0]
-    assert redone_session["history_cursor"] == 5
+    assert redone_session["history_cursor"] == 1
     assert redone_session["grid_state"] == patched_session["grid_state"]
     assert redone_item["selected"] is False
     assert [row["included"] for row in redone_item["review_changes"]] == [False, False]
@@ -415,9 +405,10 @@ async def test_undo_redo_replays_value_and_new_operation_truncates_redo():
     assert redone.json()["session"]["history_cursor"] == 1
     assert undo_again.status_code == 200, undo_again.text
     branched_session = branched.json()["session"]
-    assert branched_session["history_cursor"] == 1
+    assert branched.status_code == 200, branched.text
+    assert branched_session["history_cursor"] == 0
     assert len(branched_session["history"]) == 1
-    assert branched_session["history"][0]["operation"] == "workspace_view"
+    assert branched_session["history"][0]["operation"] == "value_edit"
 
 
 @pytest.mark.asyncio
@@ -483,10 +474,9 @@ async def test_reset_restores_base_plan_products_and_grid_from_partial_history()
     assert reset_item["selected"] is True
     assert [row["included"] for row in reset_item["review_changes"]] == [True, True]
     assert reset_session["grid_state"] == {
-        "filterValues": {"changes": "hide_deferred"},
+        "filterValues": {},
         "expandedItemIds": [],
         "pagesByItem": {},
-        "workspaceView": "split",
     }
     assert reset_session["history"] == []
     assert reset_session["history_cursor"] == 0
@@ -811,6 +801,156 @@ async def test_grid_discard_leaves_draft_and_canonical_workbook_unchanged():
     assert canonical["content_revision"] == canonical_revision
 
 
+@pytest.mark.asyncio
+async def test_invalid_value_operations_return_atomic_structured_422():
+    service = get_app_context().services.supabase._service
+    shop = "atomic-validation.myshopify.com"
+    draft_id = "atomic-validation-draft"
+    _seed_durable_history_review(service, shop, draft_id)
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(base, headers=headers, json={"surface": "grid", "base_revision": 1})
+        session_id = created.json()["session"]["session_id"]
+        rejected = await client.patch(
+            f"{base}/{session_id}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operations": [
+                    {"type": "value_edit", "change_id": "vendor-change", "value_path": "vendor", "value": "Changed first"},
+                    {"type": "value_edit", "change_id": "title-change", "value_path": "title", "value": ""},
+                ],
+            },
+        )
+        resumed = await client.get(base, headers=headers)
+
+    assert rejected.status_code == 422, rejected.text
+    detail = rejected.json()["detail"]
+    assert detail["code"] == "REVIEW_FIELD_VALIDATION_FAILED"
+    assert detail["field_errors"] == [{
+        "change_id": "title-change",
+        "value_path": "title",
+        "code": "INVALID_REVIEW_VALUE",
+        "message": "This field is required.",
+    }]
+    active = resumed.json()["session"]
+    assert active["edit_revision"] == 1
+    assert active["pending_products"][0]["vendor"] == "Base vendor"
+    assert active["history"] == []
+
+
+@pytest.mark.asyncio
+async def test_option_value_rename_cascades_undoes_redoes_and_applies(monkeypatch):
+    import api.agents.review_edit_sessions as sessions_api
+
+    service = get_app_context().services.supabase._service
+    shop = "option-rename.myshopify.com"
+    draft_id = "option-rename-draft"
+    canonical_id = "option-rename-workbook"
+    service.save_file(
+        canonical_id,
+        "generated-import.xlsx",
+        b"before",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_origin="workflow_output",
+        shop_domain=shop,
+    )
+    previous_revision = service.get_file(canonical_id)["content_revision"]
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "output_file_id": canonical_id,
+        "output_filename": "generated-import.xlsx",
+        "products": [{
+            "handle": "forest-shirt",
+            "title": "Forest shirt",
+            "options": [{"name": "Color", "values": ["Black", "Forest Green"]}],
+            "variants": [
+                {"option1": "Black", "sku": "BLACK", "price": 20},
+                {"option1": "Forest Green", "sku": "GREEN", "price": 20},
+            ],
+        }],
+    }
+    service.mutation_plans["option-rename-plan"] = {
+        "plan_id": "option-rename-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [{
+            "item_id": "item-1",
+            "source_index": 0,
+            "selectable": True,
+            "selected": True,
+            "review_changes": [{
+                "change_id": "color-values",
+                "value_path": "option[color].values",
+                "field": "values",
+                "scope": "option",
+                "subject": "Color",
+                "proposed": ["Black", "Forest Green"],
+                "disposition": "applicable",
+                "included": True,
+            }, {
+                "change_id": "forest-price",
+                "value_path": "variant[color-forest-green].price",
+                "field": "price",
+                "scope": "variant",
+                "subject": "Color: Forest Green",
+                "proposed": 20,
+                "disposition": "applicable",
+                "included": True,
+            }],
+        }],
+    }
+
+    async def fake_create_plan(draft_id, request, ctx):
+        saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
+        assert saved["products"][0]["options"][0]["values"] == ["Black", "Forest Red"]
+        assert saved["products"][0]["variants"][1]["option1"] == "Forest Red"
+        return {"plan": {
+            "plan_id": "option-rename-rebuilt",
+            "draft_id": draft_id,
+            "shop_domain": shop,
+            "draft_revision": 2,
+            "review_contract_version": 2,
+            "items": [],
+        }}
+
+    monkeypatch.setattr(sessions_api, "create_mutation_plan", fake_create_plan)
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(base, headers=headers, json={"surface": "grid", "base_revision": 1})
+        session_id = created.json()["session"]["session_id"]
+        edited = await client.patch(
+            f"{base}/{session_id}", headers=headers,
+            json={"expected_edit_revision": 1, "operation": {
+                "type": "value_edit", "change_id": "color-values",
+                "value_path": "option[color].values", "value": ["Black", "Forest Red"],
+            }},
+        )
+        undone = await client.post(f"{base}/{session_id}/undo", headers=headers, json={"expected_edit_revision": 2})
+        redone = await client.post(f"{base}/{session_id}/redo", headers=headers, json={"expected_edit_revision": 3})
+        applied = await client.post(f"{base}/{session_id}/apply", headers=headers, json={"expected_edit_revision": 4})
+
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["session"]["pending_products"][0]["variants"][1]["option1"] == "Forest Red"
+    assert edited.json()["session"]["working_plan"]["items"][0]["review_changes"][1]["subject"] == "Color: Forest Red"
+    assert undone.status_code == 200, undone.text
+    assert undone.json()["session"]["pending_products"][0]["variants"][1]["option1"] == "Forest Green"
+    assert undone.json()["session"]["working_plan"]["items"][0]["review_changes"][1]["subject"] == "Color: Forest Green"
+    assert redone.status_code == 200, redone.text
+    assert redone.json()["session"]["pending_products"][0]["variants"][1]["option1"] == "Forest Red"
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["workbook_revision"] != previous_revision
+    assert applied.json()["draft"]["revision"] == 2
+
+
 def test_expired_workbook_sessions_are_cleaned_up_with_their_working_copy():
     service = get_app_context().services.supabase._service
     shop = "expired-edits.myshopify.com"
@@ -857,7 +997,6 @@ def test_legacy_review_edit_session_is_lazily_hydrated_with_safe_history_default
         "filterValues": {"changes": "hide_deferred"},
         "expandedItemIds": [],
         "pagesByItem": {},
-        "workspaceView": "split",
     }
     assert session["history"] == []
     assert session["history_cursor"] == 0
@@ -891,12 +1030,12 @@ def test_review_edit_session_hydration_bounds_history_cursor_and_grid_state():
     })
 
     assert session["base_plan_id"] == "base-plan"
-    assert session["history_cursor"] == 2
+    assert session["history_cursor"] == 0
+    assert session["history"] == []
     assert session["grid_state"] == {
         "filterValues": {},
         "expandedItemIds": ["item-1"],
         "pagesByItem": {"item-1": 2},
-        "workspaceView": "split",
     }
 
     session["history_cursor"] = -10
@@ -905,3 +1044,31 @@ def test_review_edit_session_hydration_bounds_history_cursor_and_grid_state():
     )
     assert hydrated is not None
     assert hydrated["history_cursor"] == 0
+
+
+def test_hydration_exposes_malformed_option_value_session_field_error():
+    service = get_app_context().services.supabase._service
+    session = service.save_review_edit_session({
+        "session_id": "malformed-option-session",
+        "draft_id": "malformed-option-draft",
+        "shop_domain": "malformed-option.myshopify.com",
+        "surface": "grid",
+        "base_draft_revision": 1,
+        "edit_revision": 2,
+        "pending_products": [],
+        "working_plan": {"items": [{"source_index": 0, "review_changes": [{
+            "change_id": "color-values",
+            "value_path": "option[color].values",
+            "field": "values",
+            "scope": "option",
+            "proposed": "Black,Forest Red",
+        }]}]},
+        "status": "active",
+    })
+
+    assert session["field_errors"] == [{
+        "change_id": "color-values",
+        "value_path": "option[color].values",
+        "code": "INVALID_LIST",
+        "message": "Enter one value per line, or revert this field.",
+    }]

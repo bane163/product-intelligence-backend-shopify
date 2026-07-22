@@ -15,8 +15,41 @@ class SupabaseMutationPlansMixin:
             "filterValues": {"changes": "hide_deferred"},
             "expandedItemIds": [],
             "pagesByItem": {},
-            "workspaceView": "split",
         }
+
+    @staticmethod
+    def _session_field_errors(working_plan: dict[str, Any]) -> list[dict[str, str]]:
+        errors: list[dict[str, str]] = []
+        for item in working_plan.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            for row in item.get("review_changes", []):
+                if not isinstance(row, dict):
+                    continue
+                value = row.get("proposed")
+                field = str(row.get("field") or "")
+                code = message = None
+                if field in {"tags", "values"} and not isinstance(value, list):
+                    code, message = "INVALID_LIST", "Enter one value per line, or revert this field."
+                elif row.get("value_type") in {"money", "weight"} and field != "inventoryItem.weight.unit":
+                    if value is None or value == "":
+                        continue
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        number = -1
+                    if number < 0 or number != number or number in {float("inf"), float("-inf")}:
+                        code, message = "INVALID_DECIMAL", "Enter a finite number that is zero or greater."
+                elif field == "title" and (not isinstance(value, str) or not value.strip()):
+                    code, message = "REQUIRED", "This field is required."
+                if code and message:
+                    errors.append({
+                        "change_id": str(row.get("change_id") or ""),
+                        "value_path": str(row.get("value_path") or ""),
+                        "code": code,
+                        "message": message,
+                    })
+        return errors
 
     @classmethod
     def _hydrate_review_edit_session(
@@ -48,21 +81,28 @@ class SupabaseMutationPlansMixin:
                     for key, value in pages.items()
                     if isinstance(value, int) and not isinstance(value, bool) and value >= 0
                 }
-            workspace_view = raw_grid_state.get("workspaceView")
-            if workspace_view in {"split", "changes", "spreadsheet"}:
-                grid_state["workspaceView"] = workspace_view
         hydrated["grid_state"] = grid_state
 
         raw_history = hydrated.get("history")
-        history = deepcopy(raw_history) if isinstance(raw_history, list) else []
-        hydrated["history"] = history
+        unfiltered_history = deepcopy(raw_history) if isinstance(raw_history, list) else []
         raw_cursor = hydrated.get("history_cursor")
-        cursor = (
+        old_cursor = (
             raw_cursor
             if isinstance(raw_cursor, int) and not isinstance(raw_cursor, bool)
-            else len(history)
+            else len(unfiltered_history)
+        )
+        content_operations = {"value_edit", "value_revert", "selection"}
+        history = [
+            entry for entry in unfiltered_history
+            if isinstance(entry, dict) and entry.get("operation") in content_operations
+        ]
+        hydrated["history"] = history
+        cursor = sum(
+            1 for entry in unfiltered_history[:max(0, old_cursor)]
+            if isinstance(entry, dict) and entry.get("operation") in content_operations
         )
         hydrated["history_cursor"] = max(0, min(cursor, len(history)))
+        hydrated["field_errors"] = cls._session_field_errors(hydrated["working_plan"])
 
         base_plan_id = hydrated.get("base_plan_id")
         if not isinstance(base_plan_id, str) or not base_plan_id:
@@ -200,8 +240,9 @@ class SupabaseMutationPlansMixin:
         stored = self._hydrate_review_edit_session({**session, "shop_domain": tenant})
         client = self._get_supabase_client()
         if client:
+            persisted = {key: value for key, value in stored.items() if key != "field_errors"}
             client.table("product_draft_review_edits").upsert(
-                stored, on_conflict="session_id"
+                persisted, on_conflict="session_id"
             ).execute()
         self.review_edit_sessions[str(stored["session_id"])] = stored
         return stored

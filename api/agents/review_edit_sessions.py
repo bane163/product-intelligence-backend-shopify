@@ -4,23 +4,36 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+import json
+import re
 import uuid
 import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from pydantic import ValidationError
 
 from ai.excel_writer import create_excel_bytes
 from ai.excel_reader import WorkbookValidationError, read_generated_workbook
 from ai.models import ProductsList
 from app_context import AppContext, get_ctx
 from application.use_cases.files.save_file import execute as save_file
-from application.domain.shopify_mutation_plan import _normalized_path_part, _schema_from_product, _variant_subject, _variants
+from application.domain.shopify_mutation_plan import (
+    _normalized_path_part,
+    _review_row as _domain_review_row,
+    _schema_from_product,
+    _variant_subject,
+    _variants,
+)
 from .mutation_plans import REVIEW_REQUIRED, UNSUPPORTED_REVIEW_CONTRACT, create_mutation_plan
 from .utils import require_authenticated_shop_domain
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
+REVIEW_FIELD_VALIDATION_FAILED = "REVIEW_FIELD_VALIDATION_FAILED"
+CONTENT_HISTORY_OPERATIONS = {"value_edit", "value_revert", "selection"}
+HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _service(ctx: AppContext) -> Any:
@@ -56,6 +69,193 @@ def _workbook_model(products: list[dict[str, Any]]) -> ProductsList:
         if isinstance(product.get("_value_origins"), dict) and not isinstance(product.get("value_origins"), dict):
             product["value_origins"] = product["_value_origins"]
     return ProductsList.model_validate({"products": normalized})
+
+
+def _field_error(row: dict[str, Any], code: str, message: str) -> dict[str, str]:
+    return {
+        "change_id": str(row.get("change_id") or ""),
+        "value_path": str(row.get("value_path") or ""),
+        "code": code,
+        "message": message,
+    }
+
+
+def _validation_failure(
+    errors: list[dict[str, str]], *, draft_id: str | None = None, session_id: str | None = None
+) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail={
+            "code": REVIEW_FIELD_VALIDATION_FAILED,
+            "message": "Correct the invalid review fields before applying edits.",
+            "field_errors": errors,
+        },
+    )
+
+
+def _preflight_field_errors(
+    exc: Exception, working_plan: dict[str, Any]
+) -> list[dict[str, str]]:
+    validation_items = exc.errors() if isinstance(exc, ValidationError) else []
+    errors: list[dict[str, str]] = []
+    for validation in validation_items:
+        loc = validation.get("loc") if isinstance(validation, dict) else ()
+        loc = tuple(loc) if isinstance(loc, (tuple, list)) else ()
+        product_index = loc[1] if len(loc) > 1 and isinstance(loc[1], int) else None
+        model_field = str(loc[2]) if len(loc) > 2 else "product"
+        aliases = {
+            "body_html": "descriptionHtml",
+            "product_type": "productType",
+            "compare_at_price": "compareAtPrice",
+            "cost_per_item": "inventoryItem.cost",
+        }
+        field = aliases.get(model_field, model_field)
+        matching_row: dict[str, Any] | None = None
+        for item in working_plan.get("items", []):
+            if not isinstance(item, dict) or item.get("source_index") != product_index:
+                continue
+            matching_row = next(
+                (row for row in item.get("review_changes", []) if isinstance(row, dict) and row.get("field") == field),
+                None,
+            )
+            if matching_row:
+                break
+        message = str(validation.get("msg") or "This value is invalid.") if isinstance(validation, dict) else "This value is invalid."
+        errors.append(
+            _field_error(matching_row or {"value_path": ".".join(map(str, loc))}, "INVALID_PRODUCT", message)
+        )
+    if not errors:
+        errors.append({
+            "change_id": "",
+            "value_path": "product",
+            "code": "INVALID_PRODUCT",
+            "message": "One or more product values cannot be written to the workbook.",
+        })
+    return errors
+
+
+def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
+    schema = row.get("edit_schema") if isinstance(row.get("edit_schema"), dict) else {}
+    editor = str(schema.get("editor") or "text")
+    if editor == "list":
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError("Enter one value per line.")
+        values = [item.strip() for item in value if item.strip()]
+        if len({item.casefold() for item in values}) != len(values):
+            raise ValueError("Values must be unique.")
+        return values
+    if editor == "decimal":
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if isinstance(value, bool):
+            raise ValueError("Enter a non-negative number.")
+        try:
+            number = Decimal(str(value).strip())
+        except (InvalidOperation, ValueError):
+            raise ValueError("Enter a non-negative number.") from None
+        if not number.is_finite() or number < 0:
+            raise ValueError("Enter a finite number that is zero or greater.")
+        return float(number)
+    if editor == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.casefold() in {"true", "false"}:
+            return value.casefold() == "true"
+        raise ValueError("Choose Yes or No.")
+    if editor == "enum":
+        options = schema.get("options") if isinstance(schema.get("options"), list) else []
+        if value not in options:
+            raise ValueError("Choose one of the available values.")
+        return value
+    if editor == "json":
+        if not isinstance(value, str):
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            raise ValueError("Enter valid JSON.") from None
+        return value if schema.get("preserve_string") else parsed
+    if not isinstance(value, str):
+        raise ValueError("Enter a text value.")
+    normalized = value.strip() if schema.get("required") or schema.get("format") else value
+    if schema.get("required") and not normalized:
+        raise ValueError("This field is required.")
+    if schema.get("format") == "handle" and normalized and not HANDLE_RE.fullmatch(normalized):
+        raise ValueError("Use lowercase letters, numbers, and single hyphens only.")
+    return normalized
+
+
+def _option_rename_map(row: dict[str, Any], value: list[str]) -> dict[str, str]:
+    before = row.get("proposed")
+    if not isinstance(before, list) or any(not isinstance(item, str) for item in before):
+        before = row.get("original_proposed")
+    if not isinstance(before, list) or any(not isinstance(item, str) for item in before):
+        raise ValueError("This option list is malformed. Revert it or edit the workbook.")
+    if len(value) != len(before):
+        raise ValueError("Add or remove option values in the workbook instead.")
+    old_by_fold = {item.casefold(): item for item in before}
+    new_by_fold = {item.casefold(): item for item in value}
+    removed = [old_by_fold[key] for key in old_by_fold.keys() - new_by_fold.keys()]
+    added = [new_by_fold[key] for key in new_by_fold.keys() - old_by_fold.keys()]
+    if len(removed) != len(added):
+        raise ValueError("Add or remove option values in the workbook instead.")
+    if len(removed) > 1:
+        raise ValueError("Rename one option value at a time, or edit the workbook.")
+    return dict(zip(removed, added, strict=True))
+
+
+def _cascade_option_renames(
+    product: dict[str, Any], option: dict[str, Any], rename_map: dict[str, str]
+) -> None:
+    if not rename_map:
+        return
+    folded = {old.casefold(): new for old, new in rename_map.items()}
+    options = product.get("options") if isinstance(product.get("options"), list) else []
+    option_index = next((index for index, candidate in enumerate(options) if candidate is option), -1)
+    option_name = str(option.get("name") or "")
+    for variant in _variants(product):
+        positional = f"option{option_index + 1}"
+        if option_index >= 0 and isinstance(variant.get(positional), str):
+            replacement = folded.get(str(variant[positional]).casefold())
+            if replacement:
+                variant[positional] = replacement
+        for key in ("selectedOptions", "selected_options", "optionValues", "option_values"):
+            pairs = variant.get(key)
+            if not isinstance(pairs, list):
+                continue
+            for pair in pairs:
+                if not isinstance(pair, dict):
+                    continue
+                pair_name = pair.get("optionName") or pair.get("option_name") or pair.get("name")
+                value_key = "value" if "value" in pair else "name"
+                if str(pair_name or "").casefold() != option_name.casefold():
+                    continue
+                replacement = folded.get(str(pair.get(value_key) or "").casefold())
+                if replacement:
+                    pair[value_key] = replacement
+
+
+def _cascade_plan_variant_subjects(
+    working_plan: dict[str, Any], product_index: int, option_name: str, rename_map: dict[str, str]
+) -> None:
+    if not rename_map:
+        return
+    item = next(
+        (
+            candidate for candidate in working_plan.get("items", [])
+            if isinstance(candidate, dict) and candidate.get("source_index") == product_index
+        ),
+        None,
+    )
+    if not isinstance(item, dict):
+        return
+    for candidate in item.get("review_changes", []):
+        if not isinstance(candidate, dict) or candidate.get("scope") not in {"variant", "inventory"}:
+            continue
+        subject = str(candidate.get("subject") or "")
+        for old, new in rename_map.items():
+            subject = subject.replace(f"{option_name}: {old}", f"{option_name}: {new}")
+        candidate["subject"] = subject
 
 
 def _mark_workbook_edits(
@@ -133,7 +333,7 @@ def _coerce_review_value(row: dict[str, Any], value: Any) -> Any:
             return float(value)
         except ValueError:
             return value
-    if value_type in {"json", "metafield"} and isinstance(value, str):
+    if value_type == "json" and isinstance(value, str):
         try:
             return __import__("json").loads(value)
         except ValueError:
@@ -188,6 +388,8 @@ def _set_product_value(
         target = next((option for option in options if isinstance(option, dict) and str(option.get("name") or "") == subject), None)
         if target is None:
             raise HTTPException(status_code=422, detail=f"Option is unavailable for {path}")
+        if field == "values" and isinstance(value, list):
+            _cascade_option_renames(product, target, _option_rename_map(row, value))
         target[field] = value
     elif scope == "metafield":
         namespace, _, key = subject.partition(".")
@@ -219,6 +421,18 @@ def _snapshot_working_plan(plan: dict[str, Any]) -> dict[str, Any]:
         for row in item.get("review_changes", []):
             if not isinstance(row, dict):
                 continue
+            if not isinstance(row.get("edit_schema"), dict):
+                inferred = _domain_review_row(
+                    scope=str(row.get("scope") or "product"),
+                    subject=str(row.get("subject") or "Product"),
+                    field=str(row.get("field") or "value"),
+                    current=row.get("current"),
+                    proposed=row.get("proposed"),
+                    disposition=str(row.get("disposition") or "applicable"),
+                    change_kind=str(row.get("change_kind") or "updated"),
+                    value_type=str(row.get("value_type")) if row.get("value_type") else None,
+                )
+                row["edit_schema"] = inferred["edit_schema"]
             row.setdefault("original_proposed", deepcopy(row.get("proposed")))
             row.setdefault("original_origin", row.get("origin", "unknown"))
             row.setdefault(
@@ -393,16 +607,35 @@ def _apply_value_operations(
             if isinstance(row.get("source_ref"), dict)
             else None,
         }
+        option_renames: dict[str, str] = {}
         if operation_type == "value_revert":
             value = deepcopy(row.get("original_proposed"))
+            if row.get("scope") == "option" and row.get("field") == "values" and isinstance(value, list):
+                option_renames = _option_rename_map(row, value)
             origin = str(row.get("original_origin") or "unknown")
             source_ref = row.get("original_source_ref")
         else:
-            value = operation.get("value")
+            try:
+                value = _canonical_review_value(row, operation.get("value"))
+                if row.get("scope") == "option" and row.get("field") == "values":
+                    option_renames = _option_rename_map(row, value)
+            except ValueError as exc:
+                raise _validation_failure([
+                    _field_error(row, "INVALID_REVIEW_VALUE", str(exc))
+                ]) from None
             origin = "merchant_edited"
             source_ref = None
 
-        _set_product_value(products[product_index], row, value, origin=origin)
+        try:
+            _set_product_value(products[product_index], row, value, origin=origin)
+        except ValueError as exc:
+            raise _validation_failure([
+                _field_error(row, "INVALID_OPTION_VALUES", str(exc))
+            ]) from None
+        if option_renames:
+            _cascade_plan_variant_subjects(
+                working_plan, product_index, str(row.get("subject") or ""), option_renames
+            )
         row["proposed"] = deepcopy(_coerce_review_value(row, value))
         row["origin"] = origin
         if isinstance(source_ref, dict):
@@ -434,7 +667,7 @@ def _apply_ui_operation(
     working_plan: dict[str, Any],
     grid_state: dict[str, Any],
     operation: dict[str, Any],
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     operation_type = operation.get("operation") or operation.get("type")
     if operation_type == "selection":
         item_id = str(operation.get("item_id") or "")
@@ -476,41 +709,34 @@ def _apply_ui_operation(
         value = operation.get("filterValues")
         if not isinstance(value, dict):
             raise HTTPException(status_code=400, detail="filterValues must be an object")
-        before = deepcopy(grid_state.get("filterValues") or {})
         after = deepcopy(value)
         grid_state["filterValues"] = after
-        return _history_entry("filters", before, after)
+        return None
 
     if operation_type == "expansion":
         after = _validate_string_list(
             operation.get("expandedItemIds"), "expandedItemIds"
         )
-        before = deepcopy(grid_state.get("expandedItemIds") or [])
         grid_state["expandedItemIds"] = after
-        return _history_entry("expansion", before, after)
+        return None
 
     if operation_type == "pagination":
         after = _validated_pages(operation.get("pagesByItem"))
-        before = deepcopy(grid_state.get("pagesByItem") or {})
         grid_state["pagesByItem"] = after
-        return _history_entry("pagination", before, after)
+        return None
 
+    # Older browser tabs may still flush this operation. Layout is local now,
+    # so accept it as a no-op without persisting it or adding history.
     if operation_type == "workspace_view":
-        after = operation.get("workspaceView")
-        if after not in {"split", "changes", "spreadsheet"}:
-            raise HTTPException(
-                status_code=400,
-                detail="workspaceView must be split, changes, or spreadsheet",
-            )
-        before = str(grid_state.get("workspaceView") or "split")
-        grid_state["workspaceView"] = after
-        return _history_entry("workspace_view", before, after)
+        if operation.get("workspaceView") not in {"split", "changes", "spreadsheet"}:
+            raise HTTPException(status_code=400, detail="workspaceView is invalid")
+        return None
 
     raise HTTPException(
         status_code=400,
         detail=(
             "operation must be value_edit, value_revert, selection, filters, "
-            "expansion, pagination, or workspace_view"
+            "expansion, pagination, or legacy workspace_view"
         ),
     )
 
@@ -530,7 +756,14 @@ def _set_row_history_state(
         raise HTTPException(status_code=409, detail="History product is unavailable")
     proposed = deepcopy(state.get("proposed"))
     origin = str(state.get("origin") or "unknown")
+    option_renames: dict[str, str] = {}
+    if row.get("scope") == "option" and row.get("field") == "values" and isinstance(proposed, list):
+        option_renames = _option_rename_map(row, proposed)
     _set_product_value(products[product_index], row, proposed, origin=origin)
+    if option_renames:
+        _cascade_plan_variant_subjects(
+            working_plan, product_index, str(row.get("subject") or ""), option_renames
+        )
     row["proposed"] = proposed
     row["origin"] = origin
     source_ref = state.get("source_ref")
@@ -561,22 +794,6 @@ def _replay_history_entry(
         if item is None or not isinstance(state, dict):
             raise HTTPException(status_code=409, detail="Selection history is invalid")
         _set_selection_state(item, state)
-    elif operation == "filters":
-        if not isinstance(state, dict):
-            raise HTTPException(status_code=409, detail="Filter history is invalid")
-        grid_state["filterValues"] = deepcopy(state)
-    elif operation == "expansion":
-        if not isinstance(state, list):
-            raise HTTPException(status_code=409, detail="Expansion history is invalid")
-        grid_state["expandedItemIds"] = deepcopy(state)
-    elif operation == "pagination":
-        if not isinstance(state, dict):
-            raise HTTPException(status_code=409, detail="Pagination history is invalid")
-        grid_state["pagesByItem"] = deepcopy(state)
-    elif operation == "workspace_view":
-        if not isinstance(state, str):
-            raise HTTPException(status_code=409, detail="Workspace history is invalid")
-        grid_state["workspaceView"] = state
     else:
         raise HTTPException(status_code=409, detail="History operation is unsupported")
 
@@ -589,7 +806,7 @@ def _apply_operations(
     history: list[dict[str, Any]],
     history_cursor: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    durable_history = deepcopy(history[:history_cursor])
+    durable_history = deepcopy(history)
     for operation in operations:
         operation_type = operation.get("operation") or operation.get("type")
         if operation_type in {"value_edit", "value_revert"}:
@@ -598,13 +815,14 @@ def _apply_operations(
                 working_plan,
                 [operation],
                 durable_history,
-                len(durable_history),
+                history_cursor,
             )
         else:
-            durable_history.append(
-                _apply_ui_operation(working_plan, grid_state, operation)
-            )
-            history_cursor = len(durable_history)
+            entry = _apply_ui_operation(working_plan, grid_state, operation)
+            if entry is not None:
+                durable_history = durable_history[:history_cursor]
+                durable_history.append(entry)
+                history_cursor = len(durable_history)
     return products, durable_history, history_cursor
 
 
@@ -698,7 +916,6 @@ async def create_review_edit_session(
             "filterValues": {"changes": "hide_deferred"},
             "expandedItemIds": [],
             "pagesByItem": {},
-            "workspaceView": "split",
         },
         "history": [],
         "history_cursor": 0,
@@ -752,7 +969,6 @@ async def patch_review_edit_session(
             "filterValues": {"changes": "hide_deferred"},
             "expandedItemIds": [],
             "pagesByItem": {},
-            "workspaceView": "split",
         }
     if operations is None:
         changes = payload.get("changes")
@@ -766,14 +982,29 @@ async def patch_review_edit_session(
         ]
     if any(not isinstance(operation, dict) for operation in operations):
         raise HTTPException(status_code=400, detail="changes must contain objects")
-    pending, history, history_cursor = _apply_operations(
-        pending,
-        working_plan,
-        grid_state,
-        operations,
-        history,
-        history_cursor,
-    )
+    try:
+        pending, history, history_cursor = _apply_operations(
+            pending,
+            working_plan,
+            grid_state,
+            operations,
+            history,
+            history_cursor,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if exc.status_code == 422 and detail.get("code") == REVIEW_FIELD_VALIDATION_FAILED:
+            LOG.warning(
+                "import_review_field_validation_failed draft_id=%s session_id=%s change_ids=%s",
+                draft_id,
+                session_id,
+                ",".join(
+                    str(error.get("change_id") or "")
+                    for error in detail.get("field_errors", [])[:10]
+                    if isinstance(error, dict)
+                ),
+            )
+        raise
     saved = _service(ctx).save_review_edit_session({
         **session,
         "pending_products": pending,
@@ -975,10 +1206,37 @@ async def apply_review_edit_session(
         products = _mark_workbook_edits(pending_before, parsed)
     else:
         products = pending_before
+    existing_field_errors = session.get("field_errors")
+    if isinstance(existing_field_errors, list) and existing_field_errors:
+        LOG.warning(
+            "import_review_apply_validation_failed draft_id=%s session_id=%s change_ids=%s",
+            draft_id,
+            session_id,
+            ",".join(
+                str(error.get("change_id") or "")
+                for error in existing_field_errors[:10]
+                if isinstance(error, dict)
+            ),
+        )
+        raise _validation_failure([
+            error for error in existing_field_errors if isinstance(error, dict)
+        ])
+    working_plan = session.get("working_plan") if isinstance(session.get("working_plan"), dict) else {}
+    try:
+        workbook_model = _workbook_model(products)
+        workbook = create_excel_bytes(workbook_model)
+    except (ValidationError, WorkbookValidationError, ValueError, TypeError) as exc:
+        field_errors = _preflight_field_errors(exc, working_plan)
+        LOG.warning(
+            "import_review_apply_validation_failed draft_id=%s session_id=%s change_ids=%s",
+            draft_id,
+            session_id,
+            ",".join(error.get("change_id", "") for error in field_errors[:10]),
+        )
+        raise _validation_failure(field_errors) from None
     new_revision = int(draft.get("revision") or 1) + 1
     output_file_id = str(draft.get("output_file_id") or uuid.uuid4())
     output_filename = str(draft.get("output_filename") or "generated-import.xlsx")
-    workbook = create_excel_bytes(_workbook_model(products))
     save_file(
         supabase=ctx.supabase,
         file_id=output_file_id,

@@ -494,8 +494,9 @@ class OffloadWorker:
             revision
         ):
             raise RuntimeError("REVIEW_REQUIRED: draft changed after approval")
+        is_v2_approval = isinstance(plan.get("approved_selection"), list)
         selected = [
-            item.get("proposed")
+            item.get("execution_proposed") if is_v2_approval else item.get("proposed")
             for item in plan.get("items", [])
             if isinstance(item, dict)
             and item.get("selected")
@@ -558,6 +559,25 @@ class OffloadWorker:
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
         )
+        submitted_result_id = result.get("submitted_id") if isinstance(result, dict) else None
+        if isinstance(submitted_result_id, str) and submitted_result_id:
+            submitted = self.ctx.supabase.submitted.get_submitted_document(
+                submitted_result_id, shop_domain=shop_domain
+            )
+            if isinstance(submitted, dict):
+                from application.domain.shopify_mutation_plan import approved_value_provenance
+                self.ctx.supabase.submitted.save_submitted_document(
+                    submitted_id=submitted_result_id,
+                    run_id=submitted.get("run_id"),
+                    draft_id=submitted.get("draft_id"),
+                    name=str(submitted.get("name") or document_name or "Submitted document"),
+                    import_mode=str(submitted.get("import_mode") or "auto"),
+                    shop_domain=shop_domain,
+                    product_count=int(submitted.get("product_count") or len(selected)),
+                    products=submitted.get("products") if isinstance(submitted.get("products"), list) else selected,
+                    approved_selection=plan.get("approved_selection") if isinstance(plan.get("approved_selection"), list) else None,
+                    value_provenance=approved_value_provenance(plan),
+                )
         result_rows = result.get("results", []) if isinstance(result, dict) else []
         if not isinstance(result_rows, list) or len(result_rows) != len(selected):
             raise RuntimeError(

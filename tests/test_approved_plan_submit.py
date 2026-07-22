@@ -119,6 +119,21 @@ async def test_approved_products_override_five_product_draft_and_keep_metadata(
     draft_id, plan_id = _seed_plan(
         draft_products=draft_products, selected_indexes=[1, 3]
     )
+    service = get_app_context().services.supabase._service
+    plan = service.mutation_plans[plan_id]
+    plan["approved_selection"] = [
+        {"item_id": "item-1", "included": True, "included_change_ids": ["title-1"]},
+        {"item_id": "item-3", "included": True, "included_change_ids": ["title-3"]},
+    ]
+    for index in (1, 3):
+        plan["items"][index]["execution_proposed"] = draft_products[index]
+        plan["items"][index]["review_changes"] = [{
+            "change_id": f"title-{index}",
+            "value_path": "title",
+            "origin": "source",
+            "included": True,
+            "source_ref": {"source_file_id": "source-file", "sheet": "Products", "cell": f"A{index + 2}"},
+        }]
     captured: dict[str, Any] = {}
     _patch_bulk(
         monkeypatch,
@@ -169,6 +184,8 @@ async def test_approved_products_override_five_product_draft_and_keep_metadata(
     assert stored["name"] == "approved-selection.xlsx"
     assert stored["draft_id"] == draft_id
     assert stored["product_count"] == 2
+    assert stored["approved_selection"] == plan["approved_selection"]
+    assert stored["value_provenance"]["item-1"]["title"]["origin"] == "source"
 
 
 @pytest.mark.asyncio

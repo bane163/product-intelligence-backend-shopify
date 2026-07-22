@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+import hashlib
 import re
 from typing import Any
 
@@ -32,6 +34,7 @@ DEFERRED_FIELDS = {
     "googleShopping": "TODO_GOOGLE_SHOPPING",
 }
 VALID_STATUSES = {"ACTIVE", "ARCHIVED", "DRAFT", "UNLISTED"}
+VALUE_ORIGINS = {"source", "ai_assisted", "merchant_edited", "derived", "unknown"}
 HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_OPTIONS = 3
 MAX_VARIANTS = 2048
@@ -742,7 +745,12 @@ def _variant_subject(variant: dict[str, Any], option_names: list[str]) -> str:
     pairs = _variant_pairs(variant, option_names)
     if pairs:
         return " / ".join(f"{name}: {value}" for name, value in pairs)
-    return _text(variant.get("title")) or _text(variant.get("id")) or "Variant"
+    return (
+        _text(variant.get("title"))
+        or _text(variant.get("id"))
+        or _text(variant.get("sku"))
+        or "Variant"
+    )
 
 
 def _flatten_variant(variant: dict[str, Any]) -> dict[str, Any]:
@@ -829,6 +837,184 @@ def _review_row(
     if reason_codes:
         row["reason_codes"] = reason_codes
     return row
+
+
+def _normalized_path_part(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().casefold()).strip("-") or "value"
+
+
+def _value_path(row: dict[str, Any]) -> str:
+    scope = str(row.get("scope") or "product")
+    field = str(row.get("field") or "value")
+    if scope == "product":
+        return field
+    return f"{scope}[{_normalized_path_part(row.get('subject'))}].{field}"
+
+
+def _matching_source_ref(
+    imported: dict[str, Any], row: dict[str, Any]
+) -> dict[str, Any] | None:
+    refs = imported.get("source_refs")
+    if not isinstance(refs, list):
+        return None
+    value_path = _value_path(row)
+    exact = [
+        ref for ref in refs
+        if isinstance(ref, dict) and str(ref.get("value_path") or "") == value_path
+    ]
+    if len(exact) == 1:
+        return deepcopy(exact[0])
+    # Field-only fallback exists solely for unambiguous legacy product values.
+    if str(row.get("scope") or "product") != "product":
+        return None
+    field = str(row.get("field") or "")
+    aliases = {field, field.split(".")[-1]}
+    if field.startswith("seo."):
+        aliases.add(f"seo_{field.split('.', 1)[1]}")
+    if field == "descriptionHtml":
+        aliases.add("body_html")
+    if field == "productType":
+        aliases.update({"product_type", "product_category"})
+    if field == "inventoryItem.cost":
+        aliases.update({"cost", "cost_per_item"})
+    legacy = [
+        ref for ref in refs
+        if isinstance(ref, dict)
+        and not ref.get("value_path")
+        and str(ref.get("field") or "") in aliases
+    ]
+    return deepcopy(legacy[0]) if len(legacy) == 1 else None
+
+
+def _decorate_review_rows(
+    rows: list[dict[str, Any]], imported: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Attach stable identity, inclusion, and value-level provenance contracts."""
+    product_identity = (
+        imported.get("shopify_gid")
+        or imported.get("id")
+        or imported.get("handle")
+        or imported.get("title")
+        or "product"
+    )
+    raw_origins = imported.get("value_origins") or imported.get("_value_origins")
+    origins = raw_origins if isinstance(raw_origins, dict) else {}
+    for row in rows:
+        value_path = _value_path(row)
+        source_ref = _matching_source_ref(imported, row)
+        requested_origin = origins.get(value_path, origins.get(str(row.get("field") or "")))
+        origin = str(requested_origin) if requested_origin in VALUE_ORIGINS else (
+            "source" if source_ref else "unknown"
+        )
+        disposition = str(row.get("disposition") or "applicable")
+        required = bool(
+            disposition == "applicable"
+            and (
+                (row.get("scope") == "product" and row.get("field") == "title" and row.get("current") is None)
+                or row.get("scope") == "option"
+                or row.get("field") == "variant"
+            )
+        )
+        identity = "\x1f".join(
+            (
+                str(product_identity).strip().casefold(),
+                str(row.get("scope") or "").strip().casefold(),
+                str(row.get("subject") or "").strip().casefold(),
+                value_path.casefold(),
+            )
+        )
+        row.update(
+            {
+                "change_id": hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32],
+                "value_path": value_path,
+                "origin": origin,
+                "included": disposition == "applicable",
+                "selectable": disposition == "applicable" and not required,
+                "required": required,
+            }
+        )
+        if origin == "source" and source_ref:
+            row["source_ref"] = source_ref
+        else:
+            row.pop("source_ref", None)
+    return rows
+
+
+def _set_or_remove(container: dict[str, Any], path: str, value: Any, *, present: bool) -> None:
+    parts = path.split(".")
+    target = container
+    for part in parts[:-1]:
+        child = target.get(part)
+        if not isinstance(child, dict):
+            if not present:
+                return
+            child = {}
+            target[part] = child
+        target = child
+    if present:
+        target[parts[-1]] = deepcopy(value)
+    else:
+        target.pop(parts[-1], None)
+
+
+def materialize_execution_proposed(item: dict[str, Any]) -> dict[str, Any]:
+    """Build the immutable Shopify payload from only approved review rows."""
+    proposed = deepcopy(item.get("proposed") or {})
+    current = item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else {}
+    rows = item.get("review_changes") if isinstance(item.get("review_changes"), list) else []
+    option_names = _schema_from_product({"options": proposed.get("productOptions", [])}) or _schema_from_product(current)
+
+    for row in rows:
+        if not isinstance(row, dict) or row.get("included") or row.get("disposition") != "applicable":
+            continue
+        scope = str(row.get("scope") or "product")
+        field = str(row.get("field") or "")
+        subject = str(row.get("subject") or "")
+        if scope == "product":
+            _set_or_remove(proposed, field, row.get("current"), present=row.get("current") is not None)
+            continue
+        if scope == "option":
+            # Option values are structural dependencies and should have been rejected
+            # by selection validation. Keep this guard for historical plans.
+            continue
+        if scope in {"variant", "inventory"}:
+            candidates = proposed.get("variants") if isinstance(proposed.get("variants"), list) else []
+            target = next(
+                (variant for variant in candidates if isinstance(variant, dict) and _variant_subject(variant, option_names) == subject),
+                None,
+            )
+            if isinstance(target, dict):
+                _set_or_remove(target, field, row.get("current"), present=row.get("current") is not None)
+            continue
+        if scope == "metafield":
+            candidates = proposed.get("metafields") if isinstance(proposed.get("metafields"), list) else []
+            target = next(
+                (
+                    metafield
+                    for metafield in candidates
+                    if isinstance(metafield, dict)
+                    and f"{metafield.get('namespace')}.{metafield.get('key')}" == subject
+                ),
+                None,
+            )
+            if isinstance(target, dict):
+                _set_or_remove(target, field, row.get("current"), present=row.get("current") is not None)
+    return proposed
+
+
+def approved_value_provenance(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        str(item.get("item_id")): {
+            str(row.get("value_path")): {
+                "origin": row.get("origin", "unknown"),
+                **({"source_ref": deepcopy(row["source_ref"])} if isinstance(row.get("source_ref"), dict) else {}),
+            }
+            for row in item.get("review_changes", [])
+            if isinstance(row, dict) and row.get("value_path")
+        }
+        for item in plan.get("items", [])
+        if isinstance(item, dict)
+    }
 
 
 def _kind(current: Any, proposed: Any) -> str:
@@ -1084,4 +1270,4 @@ def review_changes(
                 reason_codes=[str(entry.get("code"))] if entry.get("code") else None,
             )
         )
-    return rows
+    return _decorate_review_rows(rows, imported)

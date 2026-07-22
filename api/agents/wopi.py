@@ -37,7 +37,7 @@ async def wopi_check_file_info(
         "OwnerId": "shopify_user",
         "UserId": "shopify_user",
         "UserFriendlyName": "Shopify User",
-        "Version": "1.0",
+        "Version": str(file_data.get("content_revision") or "unknown"),
         "SupportsUpdate": can_write,
         "SupportsLocks": False,
         "UserCanWrite": can_write,

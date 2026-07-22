@@ -70,7 +70,7 @@ def test_unique_sku_selects_correct_row_when_title_is_duplicated():
     }
 
 
-def test_variants_range_anchors_first_row_and_sheet_for_price_and_sku():
+def test_variants_range_emits_exact_refs_for_every_variant():
     products = [{
         "title": "Lamp", "variants": [{"sku": "L-1", "price": 12}, {"sku": "L-2", "price": 13}],
         "source_refs": [{"field": "variants", "sheet": "Spring Catalog", "cell_range": "C2:D3"}],
@@ -80,10 +80,28 @@ def test_variants_range_anchors_first_row_and_sheet_for_price_and_sku():
         ("Spring Catalog", [["Title", "Price", "SKU"], ["Lamp", 12, "L-1"], ["Lamp", 13, "L-2"]]),
     ])
     enrich_spreadsheet_source_refs(products, data, "p.xlsx")
-    refs = {ref["field"]: ref for ref in products[0]["source_refs"] if ref.get("field") in {"sku", "price"}}
-    assert refs["price"] | {"value": "12"} == refs["price"]
-    assert (refs["price"]["sheet"], refs["price"]["cell"]) == ("Spring Catalog", "B2")
-    assert (refs["sku"]["sheet"], refs["sku"]["cell"]) == ("Spring Catalog", "C2")
+    refs = [ref for ref in products[0]["source_refs"] if ref.get("field") in {"sku", "price"}]
+    assert {(ref["value_path"], ref["cell"]) for ref in refs} == {
+        ("variant[l-1].sku", "C2"), ("variant[l-1].price", "B2"),
+        ("variant[l-2].sku", "C3"), ("variant[l-2].price", "B3"),
+    }
+
+
+def test_variant_refs_use_unique_sku_rows_and_reject_mismatched_price():
+    products = [{
+        "title": "Tee", "options": [{"name": "Size", "values": ["S", "M"]}],
+        "variants": [
+            {"option1": "S", "sku": "TEE-S", "price": 10},
+            {"option1": "M", "sku": "TEE-M", "price": 999},
+        ],
+    }]
+    enrich_spreadsheet_source_refs(products, workbook_bytes([
+        ["Title", "SKU", "Price"], ["Tee", "TEE-S", 10], ["Tee", "TEE-M", 10],
+    ]), "p.xlsx", source_file_id="source-file")
+    refs = products[0]["source_refs"]
+    assert next(ref for ref in refs if ref["value_path"] == "variant[size-s].price")["cell"] == "C2"
+    assert not any(ref["value_path"] == "variant[size-m].price" for ref in refs)
+    assert all(ref["source_file_id"] == "source-file" for ref in refs)
 
 
 def test_identical_products_are_resolved_on_their_own_anchored_sheets():

@@ -122,6 +122,8 @@ class SupabasePort(Protocol):
         require_lifecycle_columns: bool = False,
         revision: int | None = None,
         products: list[dict[str, Any]],
+        approved_selection: list[dict[str, Any]] | None = None,
+        value_provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     def list_product_drafts(
@@ -153,6 +155,8 @@ class SupabasePort(Protocol):
         shop_domain: str | None = None,
         product_count: int,
         products: list[dict[str, Any]],
+        approved_selection: list[dict[str, Any]] | None = None,
+        value_provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     def list_submitted_documents(

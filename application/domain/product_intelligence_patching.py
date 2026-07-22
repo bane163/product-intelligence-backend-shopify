@@ -168,6 +168,22 @@ def apply_suggestions_to_products(
             product=enhanced_products[product_index],
             patch_payload=patch_payload,
         )
+        origin = suggestion.get("value_origin")
+        if origin in {"ai_assisted", "derived"}:
+            origins = updated.get("value_origins")
+            if not isinstance(origins, dict):
+                origins = {}
+                updated["value_origins"] = origins
+            aliases = {
+                "body_html": "descriptionHtml",
+                "product_type": "productType",
+                "product_category": "productType",
+                "seo_title": "seo.title",
+                "seo_description": "seo.description",
+            }
+            for field in patch_payload:
+                if field not in {"variant_operations", "metafields"}:
+                    origins[aliases.get(field, field)] = origin
         enhanced_products[product_index] = updated
         if variant_operations.get("create_options") or variant_operations.get(
             "create_variants"
@@ -176,4 +192,3 @@ def apply_suggestions_to_products(
                 variant_operations
             )
     return enhanced_products, variant_operations_by_index
-

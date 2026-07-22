@@ -34,6 +34,7 @@ class SupabaseService(
         self.llm_run_events: dict[str, list[dict[str, Any]]] = {}
         self.product_drafts: dict[str, dict[str, Any]] = {}
         self.mutation_plans: dict[str, dict[str, Any]] = {}
+        self.review_edit_sessions: dict[str, dict[str, Any]] = {}
         self.submitted_documents: dict[str, dict[str, Any]] = {}
         self.product_intelligence_audits: dict[str, dict[str, Any]] = {}
         self.product_intelligence_findings: dict[str, list[dict[str, Any]]] = {}

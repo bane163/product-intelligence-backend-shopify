@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from . import billing, compliance, drafts, files, imports, intelligence, llm_configs, mutation_plans, runs, submit, submitted, wopi
+from . import billing, compliance, drafts, files, imports, intelligence, llm_configs, mutation_plans, review_edit_sessions, runs, submit, submitted, wopi
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -13,6 +13,7 @@ router.include_router(files.router)
 router.include_router(imports.router)
 router.include_router(drafts.router)
 router.include_router(mutation_plans.router)
+router.include_router(review_edit_sessions.router)
 router.include_router(intelligence.router)
 router.include_router(submit.router)
 router.include_router(submitted.router)

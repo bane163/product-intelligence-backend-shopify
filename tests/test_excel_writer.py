@@ -37,6 +37,9 @@ def test_create_excel_bytes_includes_generated_fields_and_ai_sheet():
 
     assert "Products" in workbook.sheetnames
     assert "AI Enhancements" in workbook.sheetnames
+    assert "__Stockpile" in workbook.sheetnames
+    assert workbook["__Stockpile"].sheet_state == "veryHidden"
+    assert workbook["__Stockpile"]["A2"].value == 1
 
     products_sheet = workbook["Products"]
     headers = [cell.value for cell in products_sheet[1]]

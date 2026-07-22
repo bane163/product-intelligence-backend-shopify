@@ -191,7 +191,17 @@ async def submit_products_to_shopify(
     ]
     if not selected_items or any(x.get("blockers") for x in selected_items):
         raise HTTPException(status_code=409, detail=review_detail)
-    products_json = json.dumps([x.get("proposed") for x in selected_items])
+    is_v2_approval = isinstance(plan.get("approved_selection"), list)
+    execution_products = [
+        x.get("execution_proposed") if is_v2_approval else x.get("proposed")
+        for x in selected_items
+    ]
+    if any(not isinstance(product, dict) for product in execution_products):
+        raise HTTPException(
+            status_code=409,
+            detail={**review_detail, "message": "Approved selection is missing its immutable execution payload"},
+        )
+    products_json = json.dumps(execution_products)
 
     effective_run_id = str(
         uuid.uuid5(uuid.NAMESPACE_URL, f"shopify-mutation-plan:{plan_id}")
@@ -325,6 +335,25 @@ async def submit_products_to_shopify(
             shop_domain=resolved_shop_domain,
             shop_access_token=resolved_shop_access_token,
         )
+        submitted_result_id = result.get("submitted_id") if isinstance(result, dict) else None
+        if isinstance(submitted_result_id, str) and submitted_result_id:
+            submitted = ctx.supabase.submitted.get_submitted_document(
+                submitted_result_id, shop_domain=resolved_shop_domain
+            )
+            if isinstance(submitted, dict):
+                from application.domain.shopify_mutation_plan import approved_value_provenance
+                ctx.supabase.submitted.save_submitted_document(
+                    submitted_id=submitted_result_id,
+                    run_id=submitted.get("run_id"),
+                    draft_id=submitted.get("draft_id"),
+                    name=str(submitted.get("name") or document_name or "Submitted document"),
+                    import_mode=str(submitted.get("import_mode") or "auto"),
+                    shop_domain=resolved_shop_domain,
+                    product_count=int(submitted.get("product_count") or len(execution_products)),
+                    products=submitted.get("products") if isinstance(submitted.get("products"), list) else execution_products,
+                    approved_selection=plan.get("approved_selection") if isinstance(plan.get("approved_selection"), list) else None,
+                    value_provenance=approved_value_provenance(plan),
+                )
         return result
     except RuntimeError as exc:
         if SHOPIFY_REAUTH_REQUIRED in str(exc):

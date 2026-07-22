@@ -11,6 +11,12 @@ from typing import Any, Iterable
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter, range_boundaries
 
+from application.domain.shopify_mutation_plan import (
+    _normalized_path_part,
+    _schema_from_product,
+    _variant_subject,
+)
+
 
 ALIASES = {
     "title": {"title", "product title", "product name", "name"},
@@ -107,7 +113,8 @@ def _table_for_sheet(
 
 
 def enrich_spreadsheet_source_refs(
-    products: list[dict[str, Any]], file_bytes: bytes, filename: str | None
+    products: list[dict[str, Any]], file_bytes: bytes, filename: str | None,
+    source_file_id: str | None = None,
 ) -> None:
     """Mutate products with deterministic, sheet-qualified single-cell refs."""
     tables: list[tuple[str, list[list[Any]], int, dict[str, int]]] = []
@@ -218,19 +225,24 @@ def enrich_spreadsheet_source_refs(
             or ref is valid_sku_ref
         ]
 
+        # Only references reconstructed and value-checked below may be exposed
+        # as evidence. Structural range anchors remain internal hints.
+        refs[:] = [
+            ref for ref in refs
+            if not isinstance(ref, dict)
+            or _canonical_ref_field(ref.get("field")) not in {"title", "vendor", "sku", "price"}
+        ]
         if not candidate:
             continue
         sheet, rows, _, columns, row_index = candidate
         row = rows[row_index]
-        present = {
-            canonical
-            for ref in refs
-            if isinstance(ref, dict)
-            for canonical in [_canonical_ref_field(ref.get("field"))]
-            if canonical and (ref.get("cell") or ref.get("cell_range"))
+        # Add one verified reference per exact product and variant value.
+        present_product = {
+            str(ref.get("value_path") or ref.get("field") or "")
+            for ref in refs if isinstance(ref, dict) and (ref.get("cell") or ref.get("cell_range"))
         }
-        for field in ("title", "vendor", "sku", "price"):
-            if field in present or field not in columns or values[field] is None:
+        for field in ("title", "vendor"):
+            if field in present_product or field not in columns or values[field] is None:
                 continue
             column = columns[field]
             cell_value = row[column] if column < len(row) else None
@@ -239,8 +251,65 @@ def enrich_spreadsheet_source_refs(
             coordinate = f"{get_column_letter(column + 1)}{row_index + 1}"
             refs.append({
                 "field": field,
+                "value_path": field,
                 "document_kind": "spreadsheet",
+                "source_file_id": source_file_id,
                 "sheet": sheet,
                 "cell": coordinate,
                 "value": str(cell_value),
             })
+
+        option_names = _schema_from_product(product)
+        allowed_sheets = anchored_sheets or {sheet}
+        for variant in (item for item in variants if isinstance(item, dict)):
+            subject = _variant_subject(variant, option_names)
+            path_prefix = f"variant[{_normalized_path_part(subject)}]"
+            sku = variant.get("sku")
+            price = variant.get("price")
+            matches: list[tuple[str, list[list[Any]], int, dict[str, int], int]] = []
+            for table in tables:
+                table_sheet, table_rows, header_index, table_columns = table
+                if table_sheet not in allowed_sheets:
+                    continue
+                for index in range(header_index + 1, len(table_rows)):
+                    source_row = table_rows[index]
+                    if sku is not None and "sku" in table_columns:
+                        column = table_columns["sku"]
+                        if _matches("sku", source_row[column] if column < len(source_row) else None, sku):
+                            matches.append((*table, index))
+            # SKU is the only safe identity when several variant rows exist.
+            if sku is None:
+                price_matches: list[tuple[str, list[list[Any]], int, dict[str, int], int]] = []
+                for table in tables:
+                    table_sheet, table_rows, header_index, table_columns = table
+                    if table_sheet not in allowed_sheets or "price" not in table_columns:
+                        continue
+                    for index in range(header_index + 1, len(table_rows)):
+                        source_row = table_rows[index]
+                        title_ok = "title" not in table_columns or _matches(
+                            "title", source_row[table_columns["title"]] if table_columns["title"] < len(source_row) else None, product.get("title")
+                        )
+                        column = table_columns["price"]
+                        if title_ok and _matches("price", source_row[column] if column < len(source_row) else None, price):
+                            price_matches.append((*table, index))
+                matches = price_matches
+            if len(matches) != 1:
+                continue
+            variant_sheet, variant_rows, _, variant_columns, variant_row_index = matches[0]
+            source_row = variant_rows[variant_row_index]
+            for field, expected in (("sku", sku), ("price", price)):
+                if expected is None or field not in variant_columns:
+                    continue
+                column = variant_columns[field]
+                cell_value = source_row[column] if column < len(source_row) else None
+                if not _matches(field, cell_value, expected):
+                    continue
+                refs.append({
+                    "field": field,
+                    "value_path": f"{path_prefix}.{field}",
+                    "document_kind": "spreadsheet",
+                    "source_file_id": source_file_id,
+                    "sheet": variant_sheet,
+                    "cell": f"{get_column_letter(column + 1)}{variant_row_index + 1}",
+                    "value": str(cell_value),
+                })

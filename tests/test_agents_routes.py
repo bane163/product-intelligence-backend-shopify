@@ -133,6 +133,18 @@ async def test_upload_and_wopi_get_file_contents():
         )
         assert check_file_info.status_code == 200
         assert check_file_info.json()["PostMessageOrigin"] == "https://app.example.com"
+        assert check_file_info.json()["Version"] == hashlib.sha256(file_bytes).hexdigest()
+
+        updated_bytes = _valid_xlsx_bytes("saved revision")
+        saved = await ac.post(
+            _wopi_contents_url(file_id),
+            content=updated_bytes,
+            headers={"X-WOPI-Override": "PUT"},
+        )
+        assert saved.status_code == 200
+        updated_info = await ac.get(_wopi_url(file_id, contents=False))
+        assert updated_info.json()["Version"] == hashlib.sha256(updated_bytes).hexdigest()
+        assert updated_info.json()["Version"] != check_file_info.json()["Version"]
 
 
 @pytest.mark.asyncio

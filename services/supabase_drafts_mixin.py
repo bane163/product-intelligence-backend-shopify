@@ -107,6 +107,7 @@ class SupabaseDraftsMixin:
                 rows.append({
                     "shop_domain": shop_domain, owner_column: owner_value,
                     "product_index": product_index, "field_name": ref.get("field"),
+                    "value_path": ref.get("value_path"),
                     "source_file_id": ref["source_file_id"], "sheet_name": ref.get("sheet"),
                     "cell_range": ref.get("cell_range") or ref.get("cell"),
                     "page_number": ref.get("page"), "bounding_box": ref.get("bbox"),
@@ -486,6 +487,8 @@ class SupabaseDraftsMixin:
         shop_domain: str | None = None,
         product_count: int,
         products: list[dict[str, Any]],
+        approved_selection: list[dict[str, Any]] | None = None,
+        value_provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         now = self._utc_now()
         normalized_shop_domain = _normalize_shop_domain(shop_domain)
@@ -498,6 +501,8 @@ class SupabaseDraftsMixin:
             "shop_domain": normalized_shop_domain,
             "product_count": product_count,
             "products": products,
+            "approved_selection": approved_selection,
+            "value_provenance": value_provenance,
             "submitted_at": now,
             "created_at": now,
             "updated_at": now,
@@ -516,6 +521,8 @@ class SupabaseDraftsMixin:
                     compat_payload = dict(payload)
                     compat_payload.pop("draft_id", None)
                     compat_payload.pop("shop_domain", None)
+                    compat_payload.pop("approved_selection", None)
+                    compat_payload.pop("value_provenance", None)
                     client.table("submitted_documents").upsert(
                         compat_payload, on_conflict="submitted_id"
                     ).execute()

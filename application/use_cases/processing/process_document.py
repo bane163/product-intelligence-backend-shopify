@@ -290,7 +290,9 @@ async def execute(
             if isinstance(raw_products, list):
                 result["products"] = products
             if products and document_format.is_spreadsheet:
-                enrich_spreadsheet_source_refs(products, file_bytes, input_name)
+                enrich_spreadsheet_source_refs(
+                    products, file_bytes, input_name, source_file_id=source_file_id
+                )
             if products and pdf_layout is not None:
                 from application.services.pdf_source_refs import verify_pdf_source_refs
                 resolved, dropped = verify_pdf_source_refs(
@@ -302,6 +304,14 @@ async def execute(
                     level="warning" if dropped else "info",
                     payload_preview={"resolved": resolved, "dropped_ambiguous": dropped, "provider": pdf_layout.provider},
                 )
+            for product in products:
+                refs = product.get("source_refs") if isinstance(product.get("source_refs"), list) else []
+                origins = product.get("value_origins") if isinstance(product.get("value_origins"), dict) else {}
+                for ref in refs:
+                    if isinstance(ref, dict) and isinstance(ref.get("field"), str) and ref["field"]:
+                        origins.setdefault(str(ref.get("value_path") or ref["field"]), "source")
+                if origins:
+                    product["value_origins"] = origins
             if products:
                 if not shop_domain:
                     enrichment_warning = "Import enrichment skipped: missing shop_domain"

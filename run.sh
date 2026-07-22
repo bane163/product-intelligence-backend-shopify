@@ -14,11 +14,15 @@ if command -v npx &> /dev/null; then
   # the core database/API stack still comes online from the existing backup.
   npx supabase start --ignore-health-check || echo "⚠️ Supabase start failed or already running"
 else
-  echo "⚠️ npx not available; skipping Supabase start"
+  echo "❌ npx is required to apply local Supabase migrations"
+  exit 1
 fi
 
+echo "🗃️ Applying pending Supabase migrations..."
+npx supabase migration up --local --yes
+
 # Run the backend, worker, and dependencies
-docker compose -f docker-compose.stack.yml up -d --build shopify-backend offload-worker
+docker compose -f docker-compose.stack.yml up -d --build --force-recreate shopify-backend offload-worker
 
 echo "⏳ Waiting for backend and Collabora viewer readiness..."
 ready=0

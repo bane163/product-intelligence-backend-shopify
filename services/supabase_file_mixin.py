@@ -1,4 +1,5 @@
 import logging
+import hashlib
 from collections.abc import Mapping, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
@@ -162,6 +163,7 @@ class SupabaseFileMixin:
             if not isinstance(content, (bytes, bytearray, memoryview)):
                 raise ValueError(f"Invalid content payload for file_id={file_id}")
             content_bytes = bytes(content)
+            content_hash = hashlib.sha256(content_bytes).hexdigest()
             raw_content_type = item.get("content_type")
             content_type = (
                 raw_content_type
@@ -187,6 +189,7 @@ class SupabaseFileMixin:
                     "shop_domain": normalized_shop,
                     "thumbnail_storage_path": None,
                     "thumbnail_content": None,
+                    "content_revision": content_hash,
                 }
                 persisted_file_ids.append(file_id)
             else:
@@ -228,12 +231,14 @@ class SupabaseFileMixin:
                 "content_type": content_type,
                 "size": len(content_bytes),
                 "file_origin": normalized_origin,
+                "content_revision": content_hash,
             }
             if normalized_shop:
                 payload["shop_domain"] = normalized_shop
             metadata_payloads.append(payload)
             legacy_payload = dict(payload)
             legacy_payload.pop("file_origin", None)
+            legacy_payload.pop("content_revision", None)
             legacy_metadata_payloads.append(legacy_payload)
 
         if not metadata_payloads:
@@ -372,6 +377,7 @@ class SupabaseFileMixin:
         file_origin = FILE_ORIGIN_MERCHANT_UPLOAD
         thumbnail_storage_path = None
         shop_domain = None
+        content_revision = hashlib.sha256(bytes(content)).hexdigest()
         try:
             client = self._get_supabase_client()
             if client:
@@ -399,6 +405,7 @@ class SupabaseFileMixin:
                     file_origin = self._normalize_file_row_origin(meta_dict)
                     thumbnail_storage_path = meta_dict.get("thumbnail_storage_path")
                     shop_domain = meta_dict.get("shop_domain")
+                    content_revision = meta_dict.get("content_revision") or content_revision
         except Exception:
             LOG.debug("DB metadata fetch failed for %s", file_id, exc_info=True)
 
@@ -410,6 +417,7 @@ class SupabaseFileMixin:
             "storage_path": file_id,
             "thumbnail_storage_path": thumbnail_storage_path,
             "shop_domain": shop_domain,
+            "content_revision": content_revision,
         }
 
     def set_file_shop_domain(self, file_id: str, shop_domain: str) -> None:

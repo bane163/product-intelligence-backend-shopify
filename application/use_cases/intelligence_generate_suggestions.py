@@ -736,6 +736,8 @@ async def execute(
             suggestions=parsed,
             shop_domain=shop_domain,
         )
+        for suggestion in llm_suggestions:
+            suggestion["value_origin"] = "ai_assisted"
     except Exception as exc:
         if callable(trace_event):
             trace_event(
@@ -750,6 +752,8 @@ async def execute(
         shop_domain=shop_domain,
         normalization_settings=normalization_settings or _default_normalization_settings(),
     )
+    for suggestion in deterministic_suggestions:
+        suggestion["value_origin"] = "derived"
 
     combined = [*llm_suggestions, *deterministic_suggestions]
     # Model-authored variant payloads are evidence only. Rebuild executable matrices

@@ -190,7 +190,11 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
     assert deselected.status_code == 200
     assert deselected.json()["plan"]["items"][0]["selected"] is False
     assert deselected.json()["plan"]["items"][0]["proposed"] == original_proposed
-    assert deselected.json()["plan"]["items"][0]["review_changes"] == original_review
+    assert all(
+        row["included"] is False
+        for row in deselected.json()["plan"]["items"][0]["review_changes"]
+        if row["disposition"] == "applicable"
+    )
     assert rejected.status_code == 409
     assert rejected.json()["detail"]["code"] == "REVIEW_REQUIRED"
 
@@ -210,7 +214,70 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
     assert reselected.status_code == 200
     assert approved.status_code == 200
     assert approved.json()["plan"]["items"][0]["proposed"] == original_proposed
-    assert approved.json()["plan"]["items"][0]["review_changes"] == original_review
+    assert {
+        row["change_id"] for row in approved.json()["plan"]["items"][0]["review_changes"]
+    } == {row["change_id"] for row in original_review}
+    assert all(
+        row["included"] is True
+        for row in approved.json()["plan"]["items"][0]["review_changes"]
+        if row["disposition"] == "applicable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_field_selection_enforces_required_rows_and_persists_optional_exclusion(monkeypatch):
+    draft_id = "field-selection-contract"
+    plan_id = "field-selection-plan"
+    shop_domain = "field-selection.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [{"title": "New product", "vendor": "Optional vendor"}],
+    }
+    service.mutation_plans[plan_id] = {
+        "plan_id": plan_id,
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [{
+            "item_id": "item-1",
+            "source_index": 0,
+            "selectable": True,
+            "selected": True,
+            "review_changes": [
+                {"change_id": "required-title", "disposition": "applicable", "required": True, "selectable": False, "included": True},
+                {"change_id": "optional-vendor", "disposition": "applicable", "required": False, "selectable": True, "included": True},
+            ],
+        }],
+    }
+    url = f"/agents/product-drafts/{draft_id}/mutation-plan/selection"
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        rejected = await client.patch(url, json={
+            "plan_id": plan_id,
+            "item_selections": [{"item_id": "item-1", "included": True, "included_change_ids": ["optional-vendor"]}],
+        })
+        accepted = await client.patch(url, json={
+            "plan_id": plan_id,
+            "item_selections": [{"item_id": "item-1", "included": True, "included_change_ids": ["required-title"]}],
+        })
+
+    assert rejected.status_code == 409
+    assert accepted.status_code == 200
+    rows = accepted.json()["plan"]["items"][0]["review_changes"]
+    assert {row["change_id"]: row["included"] for row in rows} == {
+        "required-title": True,
+        "optional-vendor": False,
+    }
 
 
 @pytest.mark.asyncio

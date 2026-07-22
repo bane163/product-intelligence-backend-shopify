@@ -3,6 +3,7 @@ from application.domain.shopify_mutation_plan import (
     canonical_product,
     merge_tags,
     merge_structured_product,
+    materialize_execution_proposed,
     preserve_blank_fields,
     review_changes,
     validate_product,
@@ -31,6 +32,81 @@ def test_invalid_status_is_blocked_before_transport():
         {"title": "Hat", "status": "published"}, creating=True
     )
     assert "INVALID_STATUS" in {item["code"] for item in blockers}
+
+
+def test_review_rows_have_stable_ids_paths_and_truthful_provenance():
+    imported = {
+        "handle": "catalog-hat",
+        "title": "New hat",
+        "vendor": "Merchant edit",
+        "source_refs": [
+            {"field": "title", "sheet": "Products", "cell": "A2"},
+            {"field": "vendor", "sheet": "Products", "cell": "B2"},
+        ],
+        "value_origins": {"vendor": "merchant_edited"},
+    }
+    first = review_changes(
+        {"title": "Old hat", "vendor": "Old vendor"},
+        imported,
+        {"title": "New hat", "vendor": "Merchant edit"},
+    )
+    second = review_changes(
+        {"title": "Old hat", "vendor": "Old vendor"},
+        imported,
+        {"title": "New hat", "vendor": "Merchant edit"},
+    )
+    assert [row["change_id"] for row in first] == [row["change_id"] for row in second]
+    title = next(row for row in first if row["field"] == "title")
+    vendor = next(row for row in first if row["field"] == "vendor")
+    assert title["value_path"] == "title"
+    assert title["origin"] == "source"
+    assert title["source_ref"]["cell"] == "A2"
+    assert vendor["origin"] == "merchant_edited"
+    assert "source_ref" not in vendor
+
+
+def test_variant_review_rows_match_evidence_by_exact_value_path_only():
+    imported = {
+        "title": "Tee", "options": [{"name": "Size", "values": ["S", "M"]}],
+        "variants": [
+            {"option1": "S", "sku": "TEE-S", "price": 10},
+            {"option1": "M", "sku": "TEE-M", "price": 12},
+        ],
+        "source_refs": [
+            {"field": "price", "value_path": "variant[size-s].price", "source_file_id": "f", "sheet": "Products", "cell": "C2"},
+            {"field": "price", "value_path": "variant[size-m].price", "source_file_id": "f", "sheet": "Products", "cell": "C3"},
+            {"field": "sku", "sheet": "Products", "cell": "B2"},
+        ],
+    }
+    proposed, _, _ = merge_structured_product(None, imported, {"title": "Tee"})
+    rows = review_changes(None, imported, proposed)
+    prices = {row["value_path"]: row for row in rows if row["field"] == "price"}
+    assert prices["variant[size-s].price"]["source_ref"]["cell"] == "C2"
+    assert prices["variant[size-m].price"]["source_ref"]["cell"] == "C3"
+    assert all(row["origin"] == "unknown" and "source_ref" not in row for row in rows if row["field"] == "sku")
+
+
+def test_execution_payload_reverts_excluded_updates_and_omits_excluded_create_values():
+    update_item = {
+        "live_snapshot": {"id": "gid://shopify/Product/1", "title": "Old", "vendor": "Keep"},
+        "proposed": {"id": "gid://shopify/Product/1", "title": "New", "vendor": "Replace"},
+        "review_changes": [
+            {"scope": "product", "field": "title", "current": "Old", "included": True, "disposition": "applicable"},
+            {"scope": "product", "field": "vendor", "current": "Keep", "included": False, "disposition": "applicable"},
+        ],
+    }
+    create_item = {
+        "live_snapshot": None,
+        "proposed": {"title": "New", "vendor": "Optional"},
+        "review_changes": [
+            {"scope": "product", "field": "title", "current": None, "included": True, "disposition": "applicable"},
+            {"scope": "product", "field": "vendor", "current": None, "included": False, "disposition": "applicable"},
+        ],
+    }
+    assert materialize_execution_proposed(update_item) == {
+        "id": "gid://shopify/Product/1", "title": "New", "vendor": "Keep"
+    }
+    assert materialize_execution_proposed(create_item) == {"title": "New"}
 
 
 def test_create_defaults_are_valid_and_deferred_fields_remain_unapplied():

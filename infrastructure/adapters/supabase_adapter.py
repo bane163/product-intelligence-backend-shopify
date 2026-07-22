@@ -287,6 +287,8 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         shop_domain: str | None = None,
         product_count: int,
         products: list[dict[str, Any]],
+        approved_selection: list[dict[str, Any]] | None = None,
+        value_provenance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return self._service.save_submitted_document(
             submitted_id=submitted_id,
@@ -297,6 +299,8 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             shop_domain=shop_domain,
             product_count=product_count,
             products=products,
+            approved_selection=approved_selection,
+            value_provenance=value_provenance,
         )
 
     def list_submitted_documents(

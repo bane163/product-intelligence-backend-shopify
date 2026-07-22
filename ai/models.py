@@ -75,6 +75,7 @@ class ProductSourceRef(BaseModel):
     source_file_id: Optional[str] = None
     anchor_id: Optional[str] = None
     field: Optional[str] = None
+    value_path: Optional[str] = None
     document_kind: Optional[str] = None
     sheet: Optional[str] = None
     cell: Optional[str] = None
@@ -107,6 +108,7 @@ class ProductInput(BaseModel):
     images: Optional[List[ProductImage]] = None
     metafields: Optional[List[ProductMetafield]] = None
     source_refs: Optional[List[ProductSourceRef]] = None
+    value_origins: Optional[dict[str, Literal["source", "ai_assisted", "merchant_edited", "derived", "unknown"]]] = None
 
     # Product-level image and metadata fields
     image_src: Optional[str] = None

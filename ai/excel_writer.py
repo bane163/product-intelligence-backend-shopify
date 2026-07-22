@@ -1,6 +1,9 @@
 import os
 from io import BytesIO
 from typing import Any
+import hashlib
+import json
+import uuid
 from openpyxl import Workbook
 from openpyxl.styles import Protection
 import csv
@@ -60,6 +63,19 @@ TEMPLATE_HEADERS = [
     "Price / International",
     "Compare At Price / International",
     "Status",
+]
+STOCKPILE_SCHEMA_VERSION = 1
+STOCKPILE_SHEET = "__Stockpile"
+STOCKPILE_HEADERS = [
+    "schema_version",
+    "visible_row",
+    "product_row_id",
+    "variant_row_id",
+    "handle",
+    "identity_fingerprint",
+    "value_paths",
+    "value_origins",
+    "provenance_fingerprint",
 ]
 
 
@@ -415,6 +431,77 @@ def _protect_header_row(worksheet) -> None:
     worksheet.protection.sheet = True
 
 
+def _fingerprint(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _append_stockpile_sheet(
+    workbook: Workbook, products: list[ProductInput], visible_rows: list[list[str]]
+) -> None:
+    metadata = workbook.create_sheet(STOCKPILE_SHEET)
+    metadata.append(STOCKPILE_HEADERS)
+    row_offset = 0
+    for product in products:
+        product_rows = _product_to_rows(product)
+        handle = (product.handle or "").strip() or _slugify_handle(product.title)
+        product_row_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"stockpile:product:{handle.casefold()}"))
+        origins = product.value_origins or {}
+        provenance_json = json.dumps(origins, ensure_ascii=False, sort_keys=True)
+        for variant_index, row in enumerate(product_rows):
+            identity = {
+                "handle": handle.casefold(),
+                "option1": row[HEADER_INDEX["Option1 Value"]],
+                "option2": row[HEADER_INDEX["Option2 Value"]],
+                "option3": row[HEADER_INDEX["Option3 Value"]],
+                "sku": row[HEADER_INDEX["Variant SKU"]],
+            }
+            variant_row_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"{product_row_id}:variant:{variant_index}:{_fingerprint(identity)}",
+                )
+            )
+            metadata.append(
+                [
+                    STOCKPILE_SCHEMA_VERSION,
+                    row_offset + variant_index + 2,
+                    product_row_id,
+                    variant_row_id,
+                    handle,
+                    _fingerprint(identity),
+                    json.dumps(TEMPLATE_HEADERS, ensure_ascii=False),
+                    provenance_json,
+                    _fingerprint(origins),
+                ]
+            )
+        row_offset += len(product_rows)
+    for row in metadata.iter_rows():
+        for cell in row:
+            cell.protection = Protection(locked=True)
+    metadata.protection.sheet = True
+    metadata.sheet_state = "veryHidden"
+
+
+def _populate_workbook(
+    workbook: Workbook,
+    products: list[ProductInput],
+    applied_suggestions: list[dict[str, Any]] | None = None,
+) -> None:
+    worksheet = workbook.active
+    worksheet.title = "Products"
+    worksheet.append(TEMPLATE_HEADERS)
+    visible_rows: list[list[str]] = []
+    for product in products:
+        rows = _product_to_rows(product)
+        visible_rows.extend(rows)
+        for row in rows:
+            worksheet.append(row)
+    _protect_header_row(worksheet)
+    _append_ai_enhancements_sheet(workbook, products, applied_suggestions)
+    _append_stockpile_sheet(workbook, products, visible_rows)
+
+
 def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
     """Create an XLSX workbook (Shopify template columns) for Collabora preview."""
     if not output_path:
@@ -431,14 +518,7 @@ def create_excel_workbook(products_list: ProductsList, output_path: str) -> str:
         else f"{absolute_path}.xlsx"
     )
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Products"
-    ws.append(TEMPLATE_HEADERS)
-    for product in products_list.products:
-        for row in _product_to_rows(product):
-            ws.append(row)
-    _protect_header_row(ws)
-    _append_ai_enhancements_sheet(wb, products_list.products)
+    _populate_workbook(wb, products_list.products)
     wb.save(xlsx_path)
     return xlsx_path
 
@@ -449,14 +529,7 @@ def create_excel_bytes(
 ) -> bytes:
     """Return XLSX bytes for the given ProductsList without writing to disk."""
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Products"
-    ws.append(TEMPLATE_HEADERS)
-    for product in products_list.products:
-        for row in _product_to_rows(product):
-            ws.append(row)
-    _protect_header_row(ws)
-    _append_ai_enhancements_sheet(wb, products_list.products, applied_suggestions)
+    _populate_workbook(wb, products_list.products, applied_suggestions)
 
     output = BytesIO()
     wb.save(output)

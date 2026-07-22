@@ -4,18 +4,11 @@ import re
 from typing import Any
 
 from application.ports.document_layout_port import DocumentAnchor, DocumentLayout
+from application.domain.shopify_mutation_plan import _normalized_path_part, _schema_from_product, _variant_subject
 
 
 def _normalized(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
-
-
-def _field_value(product: dict[str, Any], field: str) -> Any:
-    if field in {"sku", "price"}:
-        variants = product.get("variants")
-        if isinstance(variants, list) and variants and isinstance(variants[0], dict):
-            return variants[0].get(field)
-    return product.get(field)
 
 
 def verify_pdf_source_refs(
@@ -28,12 +21,20 @@ def verify_pdf_source_refs(
         refs = [ref for ref in incoming if isinstance(ref, dict)] if isinstance(incoming, list) else []
         verified: list[dict[str, Any]] = []
         product_page: int | None = None
-        for field in ("title", "vendor", "sku", "price"):
-            expected = _field_value(product, field)
+        fields = [(field, product.get(field), field) for field in ("title", "vendor")]
+        option_names = _schema_from_product(product)
+        variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+        for variant in (item for item in variants if isinstance(item, dict)):
+            prefix = f"variant[{_normalized_path_part(_variant_subject(variant, option_names))}]"
+            fields.extend((field, variant.get(field), f"{prefix}.{field}") for field in ("sku", "price"))
+        for field, expected, value_path in fields:
             needle = _normalized(expected)
             if not needle:
                 continue
-            candidate_ref = next((ref for ref in refs if str(ref.get("field") or "").casefold() == field), None)
+            candidate_ref = next((ref for ref in refs if str(ref.get("value_path") or "") == value_path), None)
+            if candidate_ref is None and value_path == field:
+                legacy = [ref for ref in refs if not ref.get("value_path") and str(ref.get("field") or "").casefold() == field]
+                candidate_ref = legacy[0] if len(legacy) == 1 else None
             anchor = layout.resolve(str(candidate_ref.get("anchor_id") or "")) if candidate_ref else None
             if anchor is not None and needle not in _normalized(anchor.text):
                 anchor = None
@@ -52,6 +53,7 @@ def verify_pdf_source_refs(
             verified.append({
                 "source_file_id": source_file_id,
                 "field": field,
+                "value_path": value_path,
                 "document_kind": "pdf",
                 "anchor_id": anchor.id,
                 "page": anchor.page,

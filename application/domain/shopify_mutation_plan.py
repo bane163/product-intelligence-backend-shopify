@@ -851,6 +851,50 @@ def _value_path(row: dict[str, Any]) -> str:
     return f"{scope}[{_normalized_path_part(row.get('subject'))}].{field}"
 
 
+def _normalized_origin_path(value: Any) -> str:
+    """Canonicalize persisted provenance keys without weakening source matching."""
+    path = str(value or "").strip()
+    structured = re.fullmatch(r"([^\[\]]+)\[(.*)\]\.(.+)", path)
+    if structured:
+        scope, subject, field = structured.groups()
+        scope = {
+            "options": "option",
+            "variants": "variant",
+            "metafields": "metafield",
+            "inventories": "inventory",
+        }.get(scope.strip().casefold(), scope.strip().casefold())
+        return f"{scope}[{_normalized_path_part(subject)}].{field.strip()}".casefold()
+    aliases = {
+        "body_html": "descriptionHtml",
+        "product_type": "productType",
+        "product_category": "productType",
+        "seo_title": "seo.title",
+        "seo_description": "seo.description",
+    }
+    return aliases.get(path.casefold(), path).casefold()
+
+
+def _matching_value_origin(
+    origins: dict[str, Any], row: dict[str, Any]
+) -> str | None:
+    """Resolve one exact value origin, tolerating equivalent path spellings."""
+    value_path = _value_path(row)
+    requested = origins.get(value_path)
+    if requested in VALUE_ORIGINS:
+        return str(requested)
+
+    normalized_path = _normalized_origin_path(value_path)
+    matches = {
+        str(origin)
+        for path, origin in origins.items()
+        if origin in VALUE_ORIGINS
+        and _normalized_origin_path(path) == normalized_path
+    }
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None
+
+
 def _matching_source_ref(
     imported: dict[str, Any], row: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -902,8 +946,8 @@ def _decorate_review_rows(
     for row in rows:
         value_path = _value_path(row)
         source_ref = _matching_source_ref(imported, row)
-        requested_origin = origins.get(value_path, origins.get(str(row.get("field") or "")))
-        origin = str(requested_origin) if requested_origin in VALUE_ORIGINS else (
+        requested_origin = _matching_value_origin(origins, row)
+        origin = requested_origin if requested_origin else (
             "source" if source_ref else "unknown"
         )
         disposition = str(row.get("disposition") or "applicable")

@@ -86,6 +86,92 @@ def test_variant_review_rows_match_evidence_by_exact_value_path_only():
     assert all(row["origin"] == "unknown" and "source_ref" not in row for row in rows if row["field"] == "sku")
 
 
+def test_ai_origins_resolve_for_every_proposed_value_path_category():
+    imported = {
+        "title": "AI planter",
+        "options": [{"name": "Size", "values": ["Small"]}],
+        "variants": [
+            {
+                "option_values": [{"option_name": "Size", "name": "Small"}],
+                "price": "30.99",
+                "inventory_quantity": 7,
+            }
+        ],
+        "metafields": [
+            {
+                "namespace": "custom",
+                "key": "details",
+                "value": "AI description",
+                "type": "single_line_text_field",
+            }
+        ],
+        "value_origins": {
+            "TITLE": "ai_assisted",
+            "options[Size].values": "ai_assisted",
+            "variants[Size: Small].price": "ai_assisted",
+            "metafields[custom.details].value": "ai_assisted",
+            "inventory[Size: Small].inventory_quantity": "ai_assisted",
+        },
+    }
+    proposed = preserve_blank_fields({}, imported)
+    proposed, blockers, unapplied = merge_structured_product(None, imported, proposed)
+
+    rows = review_changes(None, imported, proposed, blockers, unapplied)
+
+    expected_paths = {
+        "title",
+        "option[size].values",
+        "variant[size-small].price",
+        "metafield[custom-details].value",
+        "inventory[size-small].inventory_quantity",
+    }
+    by_path = {row["value_path"]: row for row in rows}
+    assert expected_paths <= by_path.keys()
+    assert all(by_path[path]["origin"] == "ai_assisted" for path in expected_paths)
+    assert all("source_ref" not in by_path[path] for path in expected_paths)
+
+
+def test_origin_resolution_keeps_source_refs_exact_and_unknown_fallback_safe():
+    imported = {
+        "title": "Tee",
+        "options": [{"name": "Size", "values": ["S"]}],
+        "variants": [
+            {
+                "option_values": [{"option_name": "Size", "name": "S"}],
+                "price": "12",
+                "sku": "TEE-S",
+            }
+        ],
+        "source_refs": [
+            {
+                "field": "price",
+                "value_path": "variant[size-s].price",
+                "sheet": "Products",
+                "cell": "C2",
+            },
+            {
+                "field": "sku",
+                "value_path": "variants[Size: S].sku",
+                "sheet": "Products",
+                "cell": "B2",
+            },
+        ],
+        "value_origins": {
+            "variants[Size: S].sku": "not-a-valid-origin",
+        },
+    }
+    proposed, blockers, unapplied = merge_structured_product(None, imported, {})
+
+    rows = review_changes(None, imported, proposed, blockers, unapplied)
+    price = next(row for row in rows if row["field"] == "price")
+    sku = next(row for row in rows if row["field"] == "sku")
+
+    assert price["origin"] == "source"
+    assert price["source_ref"]["cell"] == "C2"
+    assert sku["origin"] == "unknown"
+    assert "source_ref" not in sku
+
+
 def test_execution_payload_reverts_excluded_updates_and_omits_excluded_create_values():
     update_item = {
         "live_snapshot": {"id": "gid://shopify/Product/1", "title": "Old", "vendor": "Keep"},

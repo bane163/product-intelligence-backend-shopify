@@ -141,7 +141,13 @@ def _coerce_review_value(row: dict[str, Any], value: Any) -> Any:
     return value
 
 
-def _set_product_value(product: dict[str, Any], row: dict[str, Any], value: Any) -> None:
+def _set_product_value(
+    product: dict[str, Any],
+    row: dict[str, Any],
+    value: Any,
+    *,
+    origin: str = "merchant_edited",
+) -> None:
     path = str(row.get("value_path") or "")
     value = _coerce_review_value(row, value)
     aliases = {
@@ -192,11 +198,414 @@ def _set_product_value(product: dict[str, Any], row: dict[str, Any], value: Any)
         target[field] = value
     else:
         raise HTTPException(status_code=422, detail=f"Grid editing is not supported for {path}")
-    origins = product.get("_value_origins")
-    if not isinstance(origins, dict):
-        origins = {}
-        product["_value_origins"] = origins
-    origins[path] = "merchant_edited"
+    origin_maps = [
+        candidate
+        for candidate in (product.get("value_origins"), product.get("_value_origins"))
+        if isinstance(candidate, dict)
+    ]
+    if not origin_maps:
+        origin_maps = [{}]
+        product["_value_origins"] = origin_maps[0]
+    for origins in origin_maps:
+        origins[path] = origin
+
+
+def _snapshot_working_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Freeze the proposal and provenance that per-value revert must restore."""
+    working_plan = deepcopy(plan)
+    for item in working_plan.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        for row in item.get("review_changes", []):
+            if not isinstance(row, dict):
+                continue
+            row.setdefault("original_proposed", deepcopy(row.get("proposed")))
+            row.setdefault("original_origin", row.get("origin", "unknown"))
+            row.setdefault(
+                "original_source_ref",
+                deepcopy(row.get("source_ref"))
+                if isinstance(row.get("source_ref"), dict)
+                else None,
+            )
+    return working_plan
+
+
+def _working_rows(
+    plan: dict[str, Any],
+) -> dict[str, tuple[int, dict[str, Any]]]:
+    rows: dict[str, tuple[int, dict[str, Any]]] = {}
+    for item in plan.get("items", []):
+        if not isinstance(item, dict) or not isinstance(item.get("source_index"), int):
+            continue
+        for row in item.get("review_changes", []):
+            if isinstance(row, dict) and row.get("change_id"):
+                rows[str(row["change_id"])] = (int(item["source_index"]), row)
+    return rows
+
+
+def _working_items(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(item["item_id"]): item
+        for item in plan.get("items", [])
+        if isinstance(item, dict) and item.get("item_id")
+    }
+
+
+def _selection_state(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "selected": bool(item.get("selected")),
+        "included_change_ids": [
+            str(row["change_id"])
+            for row in item.get("review_changes", [])
+            if isinstance(row, dict) and row.get("change_id") and row.get("included")
+        ],
+    }
+
+
+def _set_selection_state(item: dict[str, Any], state: dict[str, Any]) -> None:
+    included_ids = set(state.get("included_change_ids") or [])
+    item["selected"] = bool(state.get("selected"))
+    for row in item.get("review_changes", []):
+        if isinstance(row, dict) and row.get("change_id"):
+            row["included"] = str(row["change_id"]) in included_ids
+
+
+def _preserve_working_selection(
+    rebuilt_plan: dict[str, Any], working_plan: dict[str, Any]
+) -> dict[str, Any]:
+    """Carry durable grid inclusion choices into a newly generated plan.
+
+    Plan generation assigns new item ids, so source_index and stable change ids
+    are the only identities that can safely bridge the old and new plans.
+    """
+    preserved_by_source_index = {
+        int(item["source_index"]): _selection_state(item)
+        for item in working_plan.get("items", [])
+        if isinstance(item, dict) and isinstance(item.get("source_index"), int)
+    }
+    result = deepcopy(rebuilt_plan)
+    for item in result.get("items", []):
+        if not isinstance(item, dict) or not isinstance(item.get("source_index"), int):
+            continue
+        preserved = preserved_by_source_index.get(int(item["source_index"]))
+        if preserved is None:
+            continue
+        item["selected"] = bool(item.get("selectable") and preserved["selected"])
+        included_ids = set(preserved["included_change_ids"])
+        for row in item.get("review_changes", []):
+            if not isinstance(row, dict):
+                continue
+            row["included"] = bool(
+                item["selected"]
+                and row.get("disposition") == "applicable"
+                and (row.get("required") or str(row.get("change_id") or "") in included_ids)
+            )
+    return result
+
+
+def _validate_string_list(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise HTTPException(status_code=400, detail=f"{field} must be an array of strings")
+    return list(dict.fromkeys(value))
+
+
+def _validated_pages(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="pagesByItem must be an object")
+    if any(
+        not isinstance(key, str)
+        or not isinstance(page, int)
+        or isinstance(page, bool)
+        or page < 0
+        for key, page in value.items()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="pagesByItem values must be non-negative integers",
+        )
+    return deepcopy(value)
+
+
+def _history_entry(
+    operation: str,
+    before: Any,
+    after: Any,
+    **identity: Any,
+) -> dict[str, Any]:
+    return {
+        "operation_id": str(uuid.uuid4()),
+        "operation": operation,
+        **identity,
+        "before": deepcopy(before),
+        "after": deepcopy(after),
+        "created_at": _now(),
+    }
+
+
+def _operation_payloads(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Return durable operations, or None when the legacy changes contract is used."""
+    if "operation" in payload and "operations" in payload:
+        raise HTTPException(status_code=400, detail="Use operation or operations, not both")
+    raw: Any
+    if "operation" in payload:
+        raw = payload["operation"]
+        if isinstance(raw, str):
+            return [{**payload, "operation": raw}]
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=400, detail="operation must be an object")
+        return [raw]
+    if "operations" in payload:
+        raw = payload["operations"]
+        if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+            raise HTTPException(status_code=400, detail="operations must be an array of objects")
+        return raw
+    return None
+
+
+def _apply_value_operations(
+    products: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    operations: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    history_cursor: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    rows = _working_rows(working_plan)
+    appended: list[dict[str, Any]] = []
+    for operation in operations:
+        operation_type = operation.get("operation") or operation.get("type")
+        if operation_type not in {"value_edit", "value_revert"}:
+            raise HTTPException(status_code=400, detail="operation must be value_edit or value_revert")
+        change_id = str(operation.get("change_id") or "")
+        match = rows.get(change_id)
+        if not match:
+            raise HTTPException(status_code=422, detail=f"Unknown change_id: {change_id}")
+        product_index, row = match
+        path = str(operation.get("value_path") or "")
+        if path != row.get("value_path"):
+            raise HTTPException(status_code=422, detail=f"value_path does not match {change_id}")
+        if product_index >= len(products):
+            raise HTTPException(status_code=422, detail="Change targets a missing product")
+
+        before = {
+            "proposed": deepcopy(row.get("proposed")),
+            "origin": row.get("origin", "unknown"),
+            "source_ref": deepcopy(row.get("source_ref"))
+            if isinstance(row.get("source_ref"), dict)
+            else None,
+        }
+        if operation_type == "value_revert":
+            value = deepcopy(row.get("original_proposed"))
+            origin = str(row.get("original_origin") or "unknown")
+            source_ref = row.get("original_source_ref")
+        else:
+            value = operation.get("value")
+            origin = "merchant_edited"
+            source_ref = None
+
+        _set_product_value(products[product_index], row, value, origin=origin)
+        row["proposed"] = deepcopy(_coerce_review_value(row, value))
+        row["origin"] = origin
+        if isinstance(source_ref, dict):
+            row["source_ref"] = deepcopy(source_ref)
+        else:
+            row.pop("source_ref", None)
+        after = {
+            "proposed": deepcopy(row.get("proposed")),
+            "origin": row["origin"],
+            "source_ref": deepcopy(row.get("source_ref"))
+            if isinstance(row.get("source_ref"), dict)
+            else None,
+        }
+        appended.append(_history_entry(
+            str(operation_type),
+            before,
+            after,
+            change_id=change_id,
+            value_path=path,
+        ))
+
+    # A fresh operation after undo replaces the abandoned redo branch.
+    durable_history = deepcopy(history[:history_cursor])
+    durable_history.extend(appended)
+    return products, durable_history, len(durable_history)
+
+
+def _apply_ui_operation(
+    working_plan: dict[str, Any],
+    grid_state: dict[str, Any],
+    operation: dict[str, Any],
+) -> dict[str, Any]:
+    operation_type = operation.get("operation") or operation.get("type")
+    if operation_type == "selection":
+        item_id = str(operation.get("item_id") or "")
+        item = _working_items(working_plan).get(item_id)
+        if item is None:
+            raise HTTPException(status_code=422, detail=f"Unknown item_id: {item_id}")
+        selected = operation.get("selected")
+        if not isinstance(selected, bool):
+            raise HTTPException(status_code=400, detail="selected must be a boolean")
+        included_ids = _validate_string_list(
+            operation.get("included_change_ids"), "included_change_ids"
+        )
+        valid_ids = {
+            str(row["change_id"])
+            for row in item.get("review_changes", [])
+            if isinstance(row, dict) and row.get("change_id")
+        }
+        unknown = set(included_ids) - valid_ids
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown included change_id: {sorted(unknown)[0]}",
+            )
+        if not selected and included_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="A deselected item cannot include changes",
+            )
+        if selected and item.get("selectable") is False:
+            raise HTTPException(status_code=422, detail=f"Item is not selectable: {item_id}")
+        before = _selection_state(item)
+        after = {"selected": selected, "included_change_ids": included_ids}
+        _set_selection_state(item, after)
+        return _history_entry(
+            "selection", before, after, item_id=item_id
+        )
+
+    if operation_type == "filters":
+        value = operation.get("filterValues")
+        if not isinstance(value, dict):
+            raise HTTPException(status_code=400, detail="filterValues must be an object")
+        before = deepcopy(grid_state.get("filterValues") or {})
+        after = deepcopy(value)
+        grid_state["filterValues"] = after
+        return _history_entry("filters", before, after)
+
+    if operation_type == "expansion":
+        after = _validate_string_list(
+            operation.get("expandedItemIds"), "expandedItemIds"
+        )
+        before = deepcopy(grid_state.get("expandedItemIds") or [])
+        grid_state["expandedItemIds"] = after
+        return _history_entry("expansion", before, after)
+
+    if operation_type == "pagination":
+        after = _validated_pages(operation.get("pagesByItem"))
+        before = deepcopy(grid_state.get("pagesByItem") or {})
+        grid_state["pagesByItem"] = after
+        return _history_entry("pagination", before, after)
+
+    if operation_type == "workspace_view":
+        after = operation.get("workspaceView")
+        if after not in {"split", "changes", "spreadsheet"}:
+            raise HTTPException(
+                status_code=400,
+                detail="workspaceView must be split, changes, or spreadsheet",
+            )
+        before = str(grid_state.get("workspaceView") or "split")
+        grid_state["workspaceView"] = after
+        return _history_entry("workspace_view", before, after)
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "operation must be value_edit, value_revert, selection, filters, "
+            "expansion, pagination, or workspace_view"
+        ),
+    )
+
+
+def _set_row_history_state(
+    products: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    entry: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    change_id = str(entry.get("change_id") or "")
+    match = _working_rows(working_plan).get(change_id)
+    if match is None:
+        raise HTTPException(status_code=409, detail=f"History row is unavailable: {change_id}")
+    product_index, row = match
+    if product_index >= len(products):
+        raise HTTPException(status_code=409, detail="History product is unavailable")
+    proposed = deepcopy(state.get("proposed"))
+    origin = str(state.get("origin") or "unknown")
+    _set_product_value(products[product_index], row, proposed, origin=origin)
+    row["proposed"] = proposed
+    row["origin"] = origin
+    source_ref = state.get("source_ref")
+    if isinstance(source_ref, dict):
+        row["source_ref"] = deepcopy(source_ref)
+    else:
+        row.pop("source_ref", None)
+
+
+def _replay_history_entry(
+    products: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    grid_state: dict[str, Any],
+    entry: dict[str, Any],
+    *,
+    direction: str,
+) -> None:
+    state = entry.get(direction)
+    if not isinstance(state, (dict, list, str)):
+        raise HTTPException(status_code=409, detail="History entry is not replayable")
+    operation = entry.get("operation")
+    if operation in {"value_edit", "value_revert"}:
+        if not isinstance(state, dict):
+            raise HTTPException(status_code=409, detail="Value history is invalid")
+        _set_row_history_state(products, working_plan, entry, state)
+    elif operation == "selection":
+        item = _working_items(working_plan).get(str(entry.get("item_id") or ""))
+        if item is None or not isinstance(state, dict):
+            raise HTTPException(status_code=409, detail="Selection history is invalid")
+        _set_selection_state(item, state)
+    elif operation == "filters":
+        if not isinstance(state, dict):
+            raise HTTPException(status_code=409, detail="Filter history is invalid")
+        grid_state["filterValues"] = deepcopy(state)
+    elif operation == "expansion":
+        if not isinstance(state, list):
+            raise HTTPException(status_code=409, detail="Expansion history is invalid")
+        grid_state["expandedItemIds"] = deepcopy(state)
+    elif operation == "pagination":
+        if not isinstance(state, dict):
+            raise HTTPException(status_code=409, detail="Pagination history is invalid")
+        grid_state["pagesByItem"] = deepcopy(state)
+    elif operation == "workspace_view":
+        if not isinstance(state, str):
+            raise HTTPException(status_code=409, detail="Workspace history is invalid")
+        grid_state["workspaceView"] = state
+    else:
+        raise HTTPException(status_code=409, detail="History operation is unsupported")
+
+
+def _apply_operations(
+    products: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    grid_state: dict[str, Any],
+    operations: list[dict[str, Any]],
+    history: list[dict[str, Any]],
+    history_cursor: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    durable_history = deepcopy(history[:history_cursor])
+    for operation in operations:
+        operation_type = operation.get("operation") or operation.get("type")
+        if operation_type in {"value_edit", "value_revert"}:
+            products, durable_history, history_cursor = _apply_value_operations(
+                products,
+                working_plan,
+                [operation],
+                durable_history,
+                len(durable_history),
+            )
+        else:
+            durable_history.append(
+                _apply_ui_operation(working_plan, grid_state, operation)
+            )
+            history_cursor = len(durable_history)
+    return products, durable_history, history_cursor
 
 
 def _apply_grid_changes(
@@ -243,7 +652,7 @@ async def create_review_edit_session(
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     tenant = require_authenticated_shop_domain(request, payload.get("shop_domain"))
-    _require_review_v2(ctx, draft_id, tenant)
+    plan = _require_review_v2(ctx, draft_id, tenant)
     surface = payload.get("surface")
     if surface not in {"grid", "workbook"}:
         raise HTTPException(status_code=400, detail="surface must be grid or workbook")
@@ -283,6 +692,16 @@ async def create_review_edit_session(
         "base_draft_revision": current_revision,
         "edit_revision": 1,
         "pending_products": products,
+        "working_plan": _snapshot_working_plan(plan) if isinstance(plan, dict) else {},
+        "base_plan_id": plan.get("plan_id") if isinstance(plan, dict) else None,
+        "grid_state": {
+            "filterValues": {"changes": "hide_deferred"},
+            "expandedItemIds": [],
+            "pagesByItem": {},
+            "workspaceView": "split",
+        },
+        "history": [],
+        "history_cursor": 0,
         "working_file_id": working_file_id,
         "status": "active",
         "created_at": now,
@@ -310,21 +729,207 @@ async def patch_review_edit_session(
     current = int(session.get("edit_revision") or 1)
     if not isinstance(expected, int) or expected != current:
         raise _conflict("Edit revision is stale")
-    changes = payload.get("changes")
-    if not isinstance(changes, list):
-        raise HTTPException(status_code=400, detail="changes must be an array")
-    plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
-    if not isinstance(plan, dict):
+    latest_plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
+    if not isinstance(latest_plan, dict):
         raise _conflict("Mutation plan is missing")
-    if plan.get("review_contract_version") != 2:
+    if latest_plan.get("review_contract_version") != 2:
         raise HTTPException(status_code=409, detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before editing"})
-    pending = _apply_grid_changes(_products({"products": session.get("pending_products")}), plan, changes)
+    working_plan = session.get("working_plan")
+    if not isinstance(working_plan, dict) or not working_plan.get("items"):
+        working_plan = _snapshot_working_plan(latest_plan)
+    else:
+        working_plan = _snapshot_working_plan(working_plan)
+    pending = _products({"products": session.get("pending_products")})
+    operations = _operation_payloads(payload)
+    history = session.get("history") if isinstance(session.get("history"), list) else []
+    history_cursor = session.get("history_cursor")
+    if not isinstance(history_cursor, int) or isinstance(history_cursor, bool):
+        history_cursor = len(history)
+    history_cursor = max(0, min(history_cursor, len(history)))
+    grid_state = deepcopy(session.get("grid_state"))
+    if not isinstance(grid_state, dict):
+        grid_state = {
+            "filterValues": {"changes": "hide_deferred"},
+            "expandedItemIds": [],
+            "pagesByItem": {},
+            "workspaceView": "split",
+        }
+    if operations is None:
+        changes = payload.get("changes")
+        if not isinstance(changes, list):
+            raise HTTPException(status_code=400, detail="changes must be an array")
+        operations = [
+            {**change, "operation": "value_edit"}
+            if isinstance(change, dict)
+            else change
+            for change in changes
+        ]
+    if any(not isinstance(operation, dict) for operation in operations):
+        raise HTTPException(status_code=400, detail="changes must contain objects")
+    pending, history, history_cursor = _apply_operations(
+        pending,
+        working_plan,
+        grid_state,
+        operations,
+        history,
+        history_cursor,
+    )
     saved = _service(ctx).save_review_edit_session({
         **session,
         "pending_products": pending,
+        "working_plan": working_plan,
+        "grid_state": grid_state,
+        "history": history,
+        "history_cursor": history_cursor,
         "edit_revision": current + 1,
         "updated_at": _now(),
     })
+    return {"session": saved}
+
+
+def _grid_session_for_action(
+    draft_id: str,
+    session_id: str,
+    tenant: str,
+    payload: dict[str, Any],
+    ctx: AppContext,
+) -> tuple[dict[str, Any], int]:
+    session = _service(ctx).get_review_edit_session(session_id, shop_domain=tenant)
+    if not session or session.get("draft_id") != draft_id:
+        raise HTTPException(status_code=404, detail="Edit session not found")
+    if session.get("status") != "active" or session.get("surface") != "grid":
+        raise _conflict("Grid edit session is not active")
+    current = int(session.get("edit_revision") or 1)
+    expected = payload.get("expected_edit_revision")
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected != current:
+        raise _conflict("Edit revision is stale")
+    return session, current
+
+
+def _save_history_action(
+    session: dict[str, Any],
+    current: int,
+    ctx: AppContext,
+    *,
+    cursor: int,
+    history: list[dict[str, Any]],
+    pending: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    grid_state: dict[str, Any],
+) -> dict[str, Any]:
+    return _service(ctx).save_review_edit_session({
+        **session,
+        "pending_products": pending,
+        "working_plan": working_plan,
+        "grid_state": grid_state,
+        "history": history,
+        "history_cursor": cursor,
+        "edit_revision": current + 1,
+        "updated_at": _now(),
+    })
+
+
+@router.post("/product-drafts/{draft_id}/review-edit-sessions/{session_id}/undo")
+async def undo_review_edit_session(
+    draft_id: str,
+    session_id: str,
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    tenant = require_authenticated_shop_domain(request, payload.get("shop_domain"))
+    session, current = _grid_session_for_action(
+        draft_id, session_id, tenant, payload, ctx
+    )
+    history = deepcopy(session.get("history") or [])
+    cursor = max(0, min(int(session.get("history_cursor") or 0), len(history)))
+    if cursor == 0:
+        raise _conflict("There is nothing to undo")
+    pending = _products({"products": session.get("pending_products")})
+    working_plan = deepcopy(session.get("working_plan") or {})
+    grid_state = deepcopy(session.get("grid_state") or {})
+    _replay_history_entry(
+        pending, working_plan, grid_state, history[cursor - 1], direction="before"
+    )
+    saved = _save_history_action(
+        session,
+        current,
+        ctx,
+        cursor=cursor - 1,
+        history=history,
+        pending=pending,
+        working_plan=working_plan,
+        grid_state=grid_state,
+    )
+    return {"session": saved}
+
+
+@router.post("/product-drafts/{draft_id}/review-edit-sessions/{session_id}/redo")
+async def redo_review_edit_session(
+    draft_id: str,
+    session_id: str,
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    tenant = require_authenticated_shop_domain(request, payload.get("shop_domain"))
+    session, current = _grid_session_for_action(
+        draft_id, session_id, tenant, payload, ctx
+    )
+    history = deepcopy(session.get("history") or [])
+    cursor = max(0, min(int(session.get("history_cursor") or 0), len(history)))
+    if cursor >= len(history):
+        raise _conflict("There is nothing to redo")
+    pending = _products({"products": session.get("pending_products")})
+    working_plan = deepcopy(session.get("working_plan") or {})
+    grid_state = deepcopy(session.get("grid_state") or {})
+    _replay_history_entry(
+        pending, working_plan, grid_state, history[cursor], direction="after"
+    )
+    saved = _save_history_action(
+        session,
+        current,
+        ctx,
+        cursor=cursor + 1,
+        history=history,
+        pending=pending,
+        working_plan=working_plan,
+        grid_state=grid_state,
+    )
+    return {"session": saved}
+
+
+@router.post("/product-drafts/{draft_id}/review-edit-sessions/{session_id}/reset")
+async def reset_review_edit_session(
+    draft_id: str,
+    session_id: str,
+    request: Request,
+    payload: dict[str, Any] = Body(...),
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    tenant = require_authenticated_shop_domain(request, payload.get("shop_domain"))
+    session, current = _grid_session_for_action(
+        draft_id, session_id, tenant, payload, ctx
+    )
+    history = deepcopy(session.get("history") or [])
+    cursor = max(0, min(int(session.get("history_cursor") or 0), len(history)))
+    pending = _products({"products": session.get("pending_products")})
+    working_plan = deepcopy(session.get("working_plan") or {})
+    grid_state = deepcopy(session.get("grid_state") or {})
+    for entry in reversed(history[:cursor]):
+        _replay_history_entry(
+            pending, working_plan, grid_state, entry, direction="before"
+        )
+    saved = _save_history_action(
+        session,
+        current,
+        ctx,
+        cursor=0,
+        history=[],
+        pending=pending,
+        working_plan=working_plan,
+        grid_state=grid_state,
+    )
     return {"session": saved}
 
 
@@ -400,6 +1005,10 @@ async def apply_review_edit_session(
         revision=new_revision,
     )
     plan_response = await create_mutation_plan(draft_id=draft_id, request=request, ctx=ctx)
+    rebuilt_plan = plan_response["plan"]
+    if session.get("surface") == "grid" and isinstance(session.get("working_plan"), dict):
+        rebuilt_plan = _preserve_working_selection(rebuilt_plan, session["working_plan"])
+        _service(ctx).save_mutation_plan(rebuilt_plan)
     applied = _service(ctx).save_review_edit_session({**session, "status": "applied", "updated_at": _now()})
     if isinstance(session.get("working_file_id"), str) and session["working_file_id"]:
         ctx.supabase.file.delete_file(session["working_file_id"])
@@ -407,8 +1016,10 @@ async def apply_review_edit_session(
     return {
         "session": applied,
         "draft": saved_draft,
+        "output_file_id": output_file_id,
+        "output_filename": output_filename,
         "workbook_revision": canonical_file.get("content_revision") or new_revision,
-        "plan": plan_response["plan"],
+        "plan": rebuilt_plan,
     }
 
 

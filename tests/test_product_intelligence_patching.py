@@ -75,6 +75,92 @@ def test_apply_suggestions_to_products_applies_supported_fields_and_operations()
     assert operations_by_index[0][0]["create_variants"][0]["sku"] == "DEMO-S"
 
 
+def test_apply_suggestions_records_exact_origins_for_all_review_value_paths():
+    products = [{"title": "Demo"}]
+    suggestions = [
+        {
+            "product_index": 0,
+            "value_origin": "ai_assisted",
+            "patch_payload": {
+                "body_html": "AI description",
+                "metafields": [
+                    {
+                        "namespace": " custom ",
+                        "key": "details",
+                        "type": "single_line_text_field",
+                        "value": "AI material",
+                    }
+                ],
+                "variant_operations": {
+                    "create_options": [
+                        {"name": " Size ", "values": ["Small"]}
+                    ],
+                    "create_variants": [
+                        {
+                            "option_values": [
+                                {"option_name": " Size ", "name": " Small "}
+                            ],
+                            "sku": "DEMO-S",
+                            "price": "12.00",
+                            "inventory_quantity": 4,
+                        }
+                    ],
+                },
+            },
+        }
+    ]
+
+    enhanced, _ = apply_suggestions_to_products(
+        products=products, suggestions=suggestions
+    )
+
+    assert enhanced[0]["value_origins"] == {
+        "descriptionHtml": "ai_assisted",
+        "metafield[custom-details].value": "ai_assisted",
+        "metafield[custom-details].type": "ai_assisted",
+        "option[size].values": "ai_assisted",
+        "variant[size-small].sku": "ai_assisted",
+        "variant[size-small].price": "ai_assisted",
+        "inventory[size-small].inventory_quantity": "ai_assisted",
+    }
+
+
+def test_later_suggestion_updates_exact_origin_without_touching_unpatched_values():
+    products = [
+        {
+            "title": "Demo",
+            "value_origins": {
+                "title": "source",
+                "metafield[custom-details].value": "source",
+            },
+        }
+    ]
+    suggestions = [
+        {
+            "product_index": 0,
+            "value_origin": "derived",
+            "patch_payload": {
+                "metafields": [
+                    {
+                        "namespace": "custom",
+                        "key": "details",
+                        "value": "Normalized",
+                    }
+                ]
+            },
+        }
+    ]
+
+    enhanced, _ = apply_suggestions_to_products(
+        products=products, suggestions=suggestions
+    )
+
+    assert enhanced[0]["value_origins"] == {
+        "title": "source",
+        "metafield[custom-details].value": "derived",
+    }
+
+
 def test_apply_suggestions_to_products_ignores_invalid_payloads():
     products = [{"title": "Demo"}]
     suggestions = [

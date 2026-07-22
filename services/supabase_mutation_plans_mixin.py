@@ -1,5 +1,6 @@
 """Tenant-scoped persistence for versioned Shopify mutation plans."""
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
@@ -7,6 +8,72 @@ from typing import Any
 class SupabaseMutationPlansMixin:
     mutation_plans: dict[str, dict[str, Any]]
     review_edit_sessions: dict[str, dict[str, Any]]
+
+    @staticmethod
+    def _default_review_grid_state() -> dict[str, Any]:
+        return {
+            "filterValues": {"changes": "hide_deferred"},
+            "expandedItemIds": [],
+            "pagesByItem": {},
+            "workspaceView": "split",
+        }
+
+    @classmethod
+    def _hydrate_review_edit_session(
+        cls, session: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Add safe durable-state defaults to sessions created before history support."""
+        hydrated = deepcopy(session)
+
+        working_plan = hydrated.get("working_plan")
+        hydrated["working_plan"] = working_plan if isinstance(working_plan, dict) else {}
+
+        raw_grid_state = hydrated.get("grid_state")
+        grid_state = cls._default_review_grid_state()
+        if isinstance(raw_grid_state, dict):
+            filter_values = raw_grid_state.get("filterValues")
+            if isinstance(filter_values, dict):
+                grid_state["filterValues"] = {
+                    str(key): value for key, value in filter_values.items()
+                }
+            expanded_ids = raw_grid_state.get("expandedItemIds")
+            if isinstance(expanded_ids, list):
+                grid_state["expandedItemIds"] = list(
+                    dict.fromkeys(item for item in expanded_ids if isinstance(item, str))
+                )
+            pages = raw_grid_state.get("pagesByItem")
+            if isinstance(pages, dict):
+                grid_state["pagesByItem"] = {
+                    str(key): value
+                    for key, value in pages.items()
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                }
+            workspace_view = raw_grid_state.get("workspaceView")
+            if workspace_view in {"split", "changes", "spreadsheet"}:
+                grid_state["workspaceView"] = workspace_view
+        hydrated["grid_state"] = grid_state
+
+        raw_history = hydrated.get("history")
+        history = deepcopy(raw_history) if isinstance(raw_history, list) else []
+        hydrated["history"] = history
+        raw_cursor = hydrated.get("history_cursor")
+        cursor = (
+            raw_cursor
+            if isinstance(raw_cursor, int) and not isinstance(raw_cursor, bool)
+            else len(history)
+        )
+        hydrated["history_cursor"] = max(0, min(cursor, len(history)))
+
+        base_plan_id = hydrated.get("base_plan_id")
+        if not isinstance(base_plan_id, str) or not base_plan_id:
+            plan_id = hydrated["working_plan"].get("plan_id")
+            base_plan_id = plan_id if isinstance(plan_id, str) and plan_id else None
+        hydrated["base_plan_id"] = base_plan_id
+
+        edit_revision = hydrated.get("edit_revision")
+        if not isinstance(edit_revision, int) or isinstance(edit_revision, bool) or edit_revision < 1:
+            hydrated["edit_revision"] = 1
+        return hydrated
 
     def cleanup_expired_review_edit_sessions(self, *, shop_domain: str | None = None) -> int:
         """Expire stale sessions and remove their isolated workbook copies."""
@@ -130,7 +197,7 @@ class SupabaseMutationPlansMixin:
         tenant = str(session.get("shop_domain") or "").strip().lower()
         if not tenant:
             raise ValueError("Review edit session requires shop_domain")
-        stored = {**session, "shop_domain": tenant}
+        stored = self._hydrate_review_edit_session({**session, "shop_domain": tenant})
         client = self._get_supabase_client()
         if client:
             client.table("product_draft_review_edits").upsert(
@@ -145,7 +212,9 @@ class SupabaseMutationPlansMixin:
         tenant = shop_domain.strip().lower()
         memory = self.review_edit_sessions.get(session_id)
         if memory and memory.get("shop_domain") == tenant:
-            return memory
+            hydrated = self._hydrate_review_edit_session(memory)
+            self.review_edit_sessions[session_id] = hydrated
+            return hydrated
         client = self._get_supabase_client()
         if client:
             result = (
@@ -157,7 +226,7 @@ class SupabaseMutationPlansMixin:
                 .execute()
             )
             if result.data:
-                return result.data[0]
+                return self._hydrate_review_edit_session(result.data[0])
         return None
 
     def get_active_review_edit_session(
@@ -173,7 +242,10 @@ class SupabaseMutationPlansMixin:
             and session.get("status") == "active"
         ]
         if candidates:
-            return max(candidates, key=lambda session: session.get("updated_at") or "")
+            session = max(candidates, key=lambda session: session.get("updated_at") or "")
+            hydrated = self._hydrate_review_edit_session(session)
+            self.review_edit_sessions[str(hydrated["session_id"])] = hydrated
+            return hydrated
         client = self._get_supabase_client()
         if client:
             result = (
@@ -187,5 +259,5 @@ class SupabaseMutationPlansMixin:
                 .execute()
             )
             if result.data:
-                return result.data[0]
+                return self._hydrate_review_edit_session(result.data[0])
         return None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 SUPPORTED_SUGGESTION_FIELDS = {
@@ -17,6 +18,70 @@ SUPPORTED_SUGGESTION_FIELDS = {
 }
 
 VARIANT_OPERATIONS_FIELD = "_variant_operations"
+
+_SCALAR_ORIGIN_PATHS = {
+    "body_html": "descriptionHtml",
+    "product_type": "productType",
+    "product_category": "productType",
+    "seo_title": "seo.title",
+    "seo_description": "seo.description",
+}
+
+
+def _normalized_path_part(value: Any) -> str:
+    return (
+        re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().casefold()).strip("-")
+        or "value"
+    )
+
+
+def _variant_subject_path(variant: dict[str, Any]) -> str:
+    option_values = variant.get("option_values")
+    parts: list[str] = []
+    if isinstance(option_values, list):
+        for item in option_values:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("option_name") or "").strip()
+            value = str(item.get("name") or "").strip()
+            if name and value:
+                parts.append(f"{name}: {value}")
+    return _normalized_path_part(" / ".join(parts))
+
+
+def _record_patch_origins(
+    *,
+    origins: dict[str, Any],
+    patch_payload: dict[str, Any],
+    variant_operations: dict[str, Any],
+    origin: str,
+) -> None:
+    for field in SUPPORTED_SUGGESTION_FIELDS - {"metafields"}:
+        if field in patch_payload and patch_payload.get(field) is not None:
+            origins[_SCALAR_ORIGIN_PATHS.get(field, field)] = origin
+
+    for metafield in _normalize_metafields_payload(patch_payload.get("metafields")):
+        subject = _normalized_path_part(
+            f"{metafield['namespace']}.{metafield['key']}"
+        )
+        origins[f"metafield[{subject}].value"] = origin
+        if "type" in metafield:
+            origins[f"metafield[{subject}].type"] = origin
+
+    for option in variant_operations.get("create_options", []):
+        if isinstance(option, dict):
+            subject = _normalized_path_part(option.get("name"))
+            origins[f"option[{subject}].values"] = origin
+
+    for variant in variant_operations.get("create_variants", []):
+        if not isinstance(variant, dict):
+            continue
+        subject = _variant_subject_path(variant)
+        for field in ("sku", "price"):
+            if field in variant:
+                origins[f"variant[{subject}].{field}"] = origin
+        if "inventory_quantity" in variant:
+            origins[f"inventory[{subject}].inventory_quantity"] = origin
 
 
 def _normalize_tags(value: Any) -> str | list[str] | None:
@@ -174,16 +239,12 @@ def apply_suggestions_to_products(
             if not isinstance(origins, dict):
                 origins = {}
                 updated["value_origins"] = origins
-            aliases = {
-                "body_html": "descriptionHtml",
-                "product_type": "productType",
-                "product_category": "productType",
-                "seo_title": "seo.title",
-                "seo_description": "seo.description",
-            }
-            for field in patch_payload:
-                if field not in {"variant_operations", "metafields"}:
-                    origins[aliases.get(field, field)] = origin
+            _record_patch_origins(
+                origins=origins,
+                patch_payload=patch_payload,
+                variant_operations=variant_operations,
+                origin=origin,
+            )
         enhanced_products[product_index] = updated
         if variant_operations.get("create_options") or variant_operations.get(
             "create_variants"

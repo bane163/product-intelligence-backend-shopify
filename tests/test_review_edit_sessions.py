@@ -67,7 +67,430 @@ async def test_grid_edit_session_autosaves_by_change_id_and_resumes():
     assert saved.json()["session"]["edit_revision"] == 2
     assert saved.json()["session"]["pending_products"][0]["title"] == "Edited"
     assert saved.json()["session"]["pending_products"][0]["_value_origins"]["title"] == "merchant_edited"
+    assert saved.json()["session"]["history_cursor"] == 1
+    assert saved.json()["session"]["history"][0]["operation"] == "value_edit"
     assert active.json()["session"]["session_id"] == session["session_id"]
+
+
+@pytest.mark.asyncio
+async def test_value_edit_revert_restores_provenance_and_new_edit_truncates_redo():
+    service = get_app_context().services.supabase._service
+    shop = "durable-value-operations.myshopify.com"
+    draft_id = "durable-value-operations-draft"
+    source_ref = {
+        "file_id": "source-file",
+        "sheet": "Products",
+        "cell": "A2",
+        "value_path": "title",
+    }
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "products": [{
+            "title": "Imported title",
+            "value_origins": {"title": "source"},
+            "source_refs": [source_ref],
+        }],
+    }
+    service.mutation_plans["durable-value-operations-plan"] = {
+        "plan_id": "durable-value-operations-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [{
+            "item_id": "item-1",
+            "source_index": 0,
+            "review_changes": [{
+                "change_id": "title-change",
+                "value_path": "title",
+                "field": "title",
+                "scope": "product",
+                "proposed": "Imported title",
+                "origin": "source",
+                "source_ref": source_ref,
+            }],
+        }],
+    }
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        assert created.status_code == 200, created.text
+        session = created.json()["session"]
+        original_row = session["working_plan"]["items"][0]["review_changes"][0]
+        assert original_row["original_proposed"] == "Imported title"
+        assert original_row["original_origin"] == "source"
+        assert original_row["original_source_ref"] == source_ref
+
+        edited = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operation": {
+                    "type": "value_edit",
+                    "change_id": "title-change",
+                    "value_path": "title",
+                    "value": "Merchant title",
+                },
+            },
+        )
+        assert edited.status_code == 200, edited.text
+        edited_session = edited.json()["session"]
+        edited_row = edited_session["working_plan"]["items"][0]["review_changes"][0]
+        assert edited_session["pending_products"][0]["title"] == "Merchant title"
+        assert edited_session["pending_products"][0]["value_origins"]["title"] == "merchant_edited"
+        assert edited_row["proposed"] == "Merchant title"
+        assert edited_row["origin"] == "merchant_edited"
+        assert "source_ref" not in edited_row
+
+        reverted = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 2,
+                "operation": "value_revert",
+                "change_id": "title-change",
+                "value_path": "title",
+            },
+        )
+        assert reverted.status_code == 200, reverted.text
+        reverted_session = reverted.json()["session"]
+        reverted_row = reverted_session["working_plan"]["items"][0]["review_changes"][0]
+        assert reverted_session["pending_products"][0]["title"] == "Imported title"
+        assert reverted_session["pending_products"][0]["value_origins"]["title"] == "source"
+        assert reverted_row["proposed"] == "Imported title"
+        assert reverted_row["origin"] == "source"
+        assert reverted_row["source_ref"] == source_ref
+        assert reverted_session["history_cursor"] == 2
+        assert [entry["operation"] for entry in reverted_session["history"]] == [
+            "value_edit",
+            "value_revert",
+        ]
+
+        undo_revert = await client.post(
+            f"{base}/{session['session_id']}/undo",
+            headers=headers,
+            json={"expected_edit_revision": 3},
+        )
+        redo_revert = await client.post(
+            f"{base}/{session['session_id']}/redo",
+            headers=headers,
+            json={"expected_edit_revision": 4},
+        )
+        undo_before_branch = await client.post(
+            f"{base}/{session['session_id']}/undo",
+            headers=headers,
+            json={"expected_edit_revision": 5},
+        )
+        branched = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 6,
+                "operations": [{
+                    "operation": "value_edit",
+                    "change_id": "title-change",
+                    "value_path": "title",
+                    "value": "Branched title",
+                }],
+            },
+        )
+
+    assert undo_revert.status_code == 200, undo_revert.text
+    undo_revert_session = undo_revert.json()["session"]
+    assert undo_revert_session["pending_products"][0]["title"] == "Merchant title"
+    assert undo_revert_session["pending_products"][0]["value_origins"]["title"] == "merchant_edited"
+    assert undo_revert_session["working_plan"]["items"][0]["review_changes"][0]["origin"] == "merchant_edited"
+    assert redo_revert.status_code == 200, redo_revert.text
+    assert redo_revert.json()["session"]["pending_products"][0]["title"] == "Imported title"
+    assert redo_revert.json()["session"]["working_plan"]["items"][0]["review_changes"][0]["source_ref"] == source_ref
+    assert undo_before_branch.status_code == 200, undo_before_branch.text
+    assert branched.status_code == 200, branched.text
+    branched_session = branched.json()["session"]
+    assert branched_session["history_cursor"] == 2
+    assert len(branched_session["history"]) == 2
+    assert branched_session["history"][1]["operation"] == "value_edit"
+    assert branched_session["history"][1]["after"]["proposed"] == "Branched title"
+
+
+def _seed_durable_history_review(service, shop: str, draft_id: str) -> None:
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "products": [{
+            "title": "Base title",
+            "vendor": "Base vendor",
+            "value_origins": {"title": "source", "vendor": "source"},
+        }],
+    }
+    service.mutation_plans[f"{draft_id}-plan"] = {
+        "plan_id": f"{draft_id}-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [{
+            "item_id": "item-1",
+            "source_index": 0,
+            "selectable": True,
+            "selected": True,
+            "review_changes": [
+                {
+                    "change_id": "title-change",
+                    "value_path": "title",
+                    "field": "title",
+                    "scope": "product",
+                    "proposed": "Base title",
+                    "origin": "source",
+                    "included": True,
+                },
+                {
+                    "change_id": "vendor-change",
+                    "value_path": "vendor",
+                    "field": "vendor",
+                    "scope": "product",
+                    "proposed": "Base vendor",
+                    "origin": "source",
+                    "included": True,
+                },
+            ],
+        }],
+    }
+
+
+@pytest.mark.asyncio
+async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
+    service = get_app_context().services.supabase._service
+    shop = "durable-ui-state.myshopify.com"
+    draft_id = "durable-ui-state-draft"
+    _seed_durable_history_review(service, shop, draft_id)
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        session = created.json()["session"]
+        patched = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operations": [
+                    {"type": "filters", "filterValues": {"changes": "all", "query": "shirt"}},
+                    {"type": "expansion", "expandedItemIds": ["item-1"]},
+                    {"type": "pagination", "pagesByItem": {"item-1": 3}},
+                    {"type": "workspace_view", "workspaceView": "changes"},
+                    {
+                        "type": "selection",
+                        "item_id": "item-1",
+                        "selected": False,
+                        "included_change_ids": [],
+                    },
+                ],
+            },
+        )
+        resumed = await client.get(base, headers=headers)
+        undone_sessions = []
+        for expected_revision in range(2, 7):
+            undone = await client.post(
+                f"{base}/{session['session_id']}/undo",
+                headers=headers,
+                json={"expected_edit_revision": expected_revision},
+            )
+            assert undone.status_code == 200, undone.text
+            undone_sessions.append(undone.json()["session"])
+        redone_sessions = []
+        for expected_revision in range(7, 12):
+            redone = await client.post(
+                f"{base}/{session['session_id']}/redo",
+                headers=headers,
+                json={"expected_edit_revision": expected_revision},
+            )
+            assert redone.status_code == 200, redone.text
+            redone_sessions.append(redone.json()["session"])
+
+    assert patched.status_code == 200, patched.text
+    patched_session = patched.json()["session"]
+    assert patched_session["grid_state"] == {
+        "filterValues": {"changes": "all", "query": "shirt"},
+        "expandedItemIds": ["item-1"],
+        "pagesByItem": {"item-1": 3},
+        "workspaceView": "changes",
+    }
+    assert [entry["operation"] for entry in patched_session["history"]] == [
+        "filters", "expansion", "pagination", "workspace_view", "selection"
+    ]
+    assert all(entry["operation_id"] for entry in patched_session["history"])
+    assert patched_session["history_cursor"] == 5
+    assert resumed.json()["session"]["history_cursor"] == 5
+    base_session = undone_sessions[-1]
+    base_item = base_session["working_plan"]["items"][0]
+    assert base_session["history_cursor"] == 0
+    assert base_session["grid_state"] == {
+        "filterValues": {"changes": "hide_deferred"},
+        "expandedItemIds": [],
+        "pagesByItem": {},
+        "workspaceView": "split",
+    }
+    assert base_item["selected"] is True
+    assert [row["included"] for row in base_item["review_changes"]] == [True, True]
+    redone_session = redone_sessions[-1]
+    redone_item = redone_session["working_plan"]["items"][0]
+    assert redone_session["history_cursor"] == 5
+    assert redone_session["grid_state"] == patched_session["grid_state"]
+    assert redone_item["selected"] is False
+    assert [row["included"] for row in redone_item["review_changes"]] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_undo_redo_replays_value_and_new_operation_truncates_redo():
+    service = get_app_context().services.supabase._service
+    shop = "value-history-actions.myshopify.com"
+    draft_id = "value-history-actions-draft"
+    _seed_durable_history_review(service, shop, draft_id)
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        session_id = created.json()["session"]["session_id"]
+        edited = await client.patch(
+            f"{base}/{session_id}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operation": {
+                    "type": "value_edit",
+                    "change_id": "title-change",
+                    "value_path": "title",
+                    "value": "Edited title",
+                },
+            },
+        )
+        undone = await client.post(
+            f"{base}/{session_id}/undo",
+            headers=headers,
+            json={"expected_edit_revision": 2},
+        )
+        reloaded = await client.get(base, headers=headers)
+        redone = await client.post(
+            f"{base}/{session_id}/redo",
+            headers=headers,
+            json={"expected_edit_revision": 3},
+        )
+        undo_again = await client.post(
+            f"{base}/{session_id}/undo",
+            headers=headers,
+            json={"expected_edit_revision": 4},
+        )
+        branched = await client.patch(
+            f"{base}/{session_id}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 5,
+                "operation": {"type": "workspace_view", "workspaceView": "spreadsheet"},
+            },
+        )
+
+    assert edited.status_code == 200, edited.text
+    assert undone.json()["session"]["pending_products"][0]["title"] == "Base title"
+    assert undone.json()["session"]["pending_products"][0]["value_origins"]["title"] == "source"
+    undone_row = undone.json()["session"]["working_plan"]["items"][0]["review_changes"][0]
+    assert undone_row["proposed"] == "Base title"
+    assert undone_row["origin"] == "source"
+    assert reloaded.json()["session"]["history_cursor"] == 0
+    assert redone.json()["session"]["pending_products"][0]["title"] == "Edited title"
+    assert redone.json()["session"]["history_cursor"] == 1
+    assert undo_again.status_code == 200, undo_again.text
+    branched_session = branched.json()["session"]
+    assert branched_session["history_cursor"] == 1
+    assert len(branched_session["history"]) == 1
+    assert branched_session["history"][0]["operation"] == "workspace_view"
+
+
+@pytest.mark.asyncio
+async def test_reset_restores_base_plan_products_and_grid_from_partial_history():
+    service = get_app_context().services.supabase._service
+    shop = "reset-history.myshopify.com"
+    draft_id = "reset-history-draft"
+    _seed_durable_history_review(service, shop, draft_id)
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        session_id = created.json()["session"]["session_id"]
+        changed = await client.patch(
+            f"{base}/{session_id}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operations": [
+                    {
+                        "type": "value_edit",
+                        "change_id": "vendor-change",
+                        "value_path": "vendor",
+                        "value": "Changed vendor",
+                    },
+                    {
+                        "type": "selection",
+                        "item_id": "item-1",
+                        "selected": True,
+                        "included_change_ids": ["title-change"],
+                    },
+                    {"type": "filters", "filterValues": {}},
+                    {"type": "workspace_view", "workspaceView": "spreadsheet"},
+                ],
+            },
+        )
+        undone = await client.post(
+            f"{base}/{session_id}/undo",
+            headers=headers,
+            json={"expected_edit_revision": 2},
+        )
+        reset = await client.post(
+            f"{base}/{session_id}/reset",
+            headers=headers,
+            json={"expected_edit_revision": 3},
+        )
+        redo_after_reset = await client.post(
+            f"{base}/{session_id}/redo",
+            headers=headers,
+            json={"expected_edit_revision": 4},
+        )
+
+    assert changed.status_code == 200, changed.text
+    assert undone.status_code == 200, undone.text
+    assert reset.status_code == 200, reset.text
+    reset_session = reset.json()["session"]
+    assert reset_session["pending_products"][0]["vendor"] == "Base vendor"
+    assert reset_session["pending_products"][0]["value_origins"]["vendor"] == "source"
+    reset_item = reset_session["working_plan"]["items"][0]
+    assert reset_item["selected"] is True
+    assert [row["included"] for row in reset_item["review_changes"]] == [True, True]
+    assert reset_session["grid_state"] == {
+        "filterValues": {"changes": "hide_deferred"},
+        "expandedItemIds": [],
+        "pagesByItem": {},
+        "workspaceView": "split",
+    }
+    assert reset_session["history"] == []
+    assert reset_session["history_cursor"] == 0
+    assert redo_after_reset.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -164,6 +587,230 @@ async def test_workbook_apply_parses_saved_copy_and_rebuilds_once(monkeypatch):
     assert service.get_file(session["working_file_id"]) is None
 
 
+@pytest.mark.asyncio
+async def test_grid_apply_replaces_canonical_workbook_and_preserves_selection(monkeypatch):
+    import api.agents.review_edit_sessions as sessions_api
+
+    service = get_app_context().services.supabase._service
+    shop = "grid-apply.myshopify.com"
+    draft_id = "grid-apply-draft"
+    canonical_id = "grid-canonical-workbook"
+    service.save_file(
+        canonical_id,
+        "generated-import.xlsx",
+        b"canonical-before-grid-apply",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_origin="workflow_output",
+        shop_domain=shop,
+    )
+    original_revision = service.get_file(canonical_id)["content_revision"]
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "output_file_id": canonical_id,
+        "output_filename": "generated-import.xlsx",
+        "products": [{"title": "Original", "vendor": "Original vendor"}],
+    }
+    service.mutation_plans["grid-apply-plan"] = {
+        "plan_id": "grid-apply-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [{
+            "item_id": "working-item",
+            "source_index": 0,
+            "selectable": True,
+            "selected": True,
+            "review_changes": [
+                {
+                    "change_id": "title-change",
+                    "value_path": "title",
+                    "field": "title",
+                    "scope": "product",
+                    "disposition": "applicable",
+                    "included": True,
+                },
+                {
+                    "change_id": "vendor-change",
+                    "value_path": "vendor",
+                    "field": "vendor",
+                    "scope": "product",
+                    "disposition": "applicable",
+                    "included": True,
+                },
+            ],
+        }],
+    }
+
+    async def fake_create_plan(draft_id, request, ctx):
+        saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
+        assert saved["revision"] == 2
+        assert saved["products"][0]["title"] == "Grid edited"
+        return {"plan": {
+            "plan_id": "rebuilt-grid-plan",
+            "draft_id": draft_id,
+            "shop_domain": shop,
+            "draft_revision": 2,
+            "version": 2,
+            "status": "review",
+            "review_contract_version": 2,
+            "items": [{
+                "item_id": "new-item-id",
+                "source_index": 0,
+                "selectable": True,
+                "selected": True,
+                "review_changes": [
+                    {
+                        "change_id": "title-change",
+                        "disposition": "applicable",
+                        "required": False,
+                        "included": True,
+                    },
+                    {
+                        "change_id": "vendor-change",
+                        "disposition": "applicable",
+                        "required": False,
+                        "included": True,
+                    },
+                ],
+            }],
+        }}
+
+    monkeypatch.setattr(sessions_api, "create_mutation_plan", fake_create_plan)
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    headers = {"x-shop-domain": shop}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        session = created.json()["session"]
+        patched = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operations": [
+                    {
+                        "type": "value_edit",
+                        "change_id": "title-change",
+                        "value_path": "title",
+                        "value": "Grid edited",
+                    },
+                    {
+                        "type": "selection",
+                        "item_id": "working-item",
+                        "selected": True,
+                        "included_change_ids": ["title-change"],
+                    },
+                ],
+            },
+        )
+        applied = await client.post(
+            f"{base}/{session['session_id']}/apply",
+            headers=headers,
+            json={"expected_edit_revision": patched.json()["session"]["edit_revision"]},
+        )
+
+    assert applied.status_code == 200, applied.text
+    payload = applied.json()
+    canonical = service.get_file(canonical_id)
+    assert payload["output_file_id"] == canonical_id
+    assert payload["output_filename"] == "generated-import.xlsx"
+    assert payload["workbook_revision"] == canonical["content_revision"]
+    assert payload["workbook_revision"] != original_revision
+    assert canonical["content"] != b"canonical-before-grid-apply"
+    assert payload["draft"]["revision"] == 2
+    rebuilt_item = payload["plan"]["items"][0]
+    assert rebuilt_item["selected"] is True
+    assert [row["included"] for row in rebuilt_item["review_changes"]] == [True, False]
+    latest_item = service.get_latest_mutation_plan(draft_id, shop_domain=shop)["items"][0]
+    assert [row["included"] for row in latest_item["review_changes"]] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_grid_discard_leaves_draft_and_canonical_workbook_unchanged():
+    service = get_app_context().services.supabase._service
+    shop = "grid-discard.myshopify.com"
+    draft_id = "grid-discard-draft"
+    canonical_id = "grid-discard-canonical"
+    canonical_bytes = b"canonical-must-not-change"
+    service.save_file(
+        canonical_id,
+        "generated-import.xlsx",
+        canonical_bytes,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_origin="workflow_output",
+        shop_domain=shop,
+    )
+    canonical_revision = service.get_file(canonical_id)["content_revision"]
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "output_file_id": canonical_id,
+        "output_filename": "generated-import.xlsx",
+        "products": [{"title": "Base title"}],
+    }
+    service.mutation_plans["grid-discard-plan"] = {
+        "plan_id": "grid-discard-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [{
+            "item_id": "item-1",
+            "source_index": 0,
+            "selectable": True,
+            "selected": True,
+            "review_changes": [{
+                "change_id": "title-change",
+                "value_path": "title",
+                "field": "title",
+                "scope": "product",
+                "disposition": "applicable",
+                "included": True,
+            }],
+        }],
+    }
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    headers = {"x-shop-domain": shop}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        session = created.json()["session"]
+        patched = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operation": {
+                    "type": "value_edit",
+                    "change_id": "title-change",
+                    "value_path": "title",
+                    "value": "Unapplied title",
+                },
+            },
+        )
+        assert patched.status_code == 200, patched.text
+        discarded = await client.delete(
+            f"{base}/{session['session_id']}", headers=headers
+        )
+
+    assert discarded.status_code == 200, discarded.text
+    assert discarded.json()["session"]["status"] == "discarded"
+    draft = service.get_product_draft(draft_id, shop_domain=shop)
+    canonical = service.get_file(canonical_id)
+    assert draft["revision"] == 1
+    assert draft["products"] == [{"title": "Base title"}]
+    assert canonical["content"] == canonical_bytes
+    assert canonical["content_revision"] == canonical_revision
+
+
 def test_expired_workbook_sessions_are_cleaned_up_with_their_working_copy():
     service = get_app_context().services.supabase._service
     shop = "expired-edits.myshopify.com"
@@ -186,3 +833,75 @@ def test_expired_workbook_sessions_are_cleaned_up_with_their_working_copy():
     assert service.get_active_review_edit_session("expired-draft", shop_domain=shop) is None
     assert service.review_edit_sessions["expired-session"]["status"] == "expired"
     assert service.get_file(file_id) is None
+
+
+def test_legacy_review_edit_session_is_lazily_hydrated_with_safe_history_defaults():
+    service = get_app_context().services.supabase._service
+    shop = "legacy-review-edits.myshopify.com"
+    service.review_edit_sessions["legacy-session"] = {
+        "session_id": "legacy-session",
+        "draft_id": "legacy-draft",
+        "shop_domain": shop,
+        "surface": "grid",
+        "base_draft_revision": 2,
+        "edit_revision": 4,
+        "pending_products": [],
+        "status": "active",
+    }
+
+    session = service.get_review_edit_session("legacy-session", shop_domain=shop)
+
+    assert session is not None
+    assert session["working_plan"] == {}
+    assert session["grid_state"] == {
+        "filterValues": {"changes": "hide_deferred"},
+        "expandedItemIds": [],
+        "pagesByItem": {},
+        "workspaceView": "split",
+    }
+    assert session["history"] == []
+    assert session["history_cursor"] == 0
+    assert session["base_plan_id"] is None
+    assert session["edit_revision"] == 4
+    assert service.get_review_edit_session(
+        "legacy-session", shop_domain="another-shop.myshopify.com"
+    ) is None
+
+
+def test_review_edit_session_hydration_bounds_history_cursor_and_grid_state():
+    service = get_app_context().services.supabase._service
+    session = service.save_review_edit_session({
+        "session_id": "history-session",
+        "draft_id": "history-draft",
+        "shop_domain": "history.myshopify.com",
+        "surface": "grid",
+        "base_draft_revision": 1,
+        "edit_revision": 2,
+        "pending_products": [],
+        "working_plan": {"plan_id": "base-plan", "items": []},
+        "grid_state": {
+            "filterValues": {},
+            "expandedItemIds": ["item-1", 7, "item-1"],
+            "pagesByItem": {"item-1": 2, "bad": -1, "boolean": True},
+            "workspaceView": "invalid",
+        },
+        "history": [{"operation": "filters"}, {"operation": "expansion"}],
+        "history_cursor": 99,
+        "status": "active",
+    })
+
+    assert session["base_plan_id"] == "base-plan"
+    assert session["history_cursor"] == 2
+    assert session["grid_state"] == {
+        "filterValues": {},
+        "expandedItemIds": ["item-1"],
+        "pagesByItem": {"item-1": 2},
+        "workspaceView": "split",
+    }
+
+    session["history_cursor"] = -10
+    hydrated = service.get_review_edit_session(
+        "history-session", shop_domain="history.myshopify.com"
+    )
+    assert hydrated is not None
+    assert hydrated["history_cursor"] == 0

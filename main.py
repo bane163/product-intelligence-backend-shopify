@@ -19,6 +19,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+async def _review_session_cleanup_loop() -> None:
+    interval = max(60, int(os.getenv("IMPORT_REVIEW_CLEANUP_INTERVAL_SECONDS", "3600")))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            from app_context import get_app_context
+
+            adapter = get_app_context().services.supabase
+            service = getattr(adapter, "_service", adapter)
+            cleaned = await asyncio.to_thread(service.cleanup_expired_review_edit_sessions)
+            if cleaned:
+                logger.info("import_review_sessions_expired count=%s", cleaned)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("import_review_session_cleanup_failed")
+
+
 def _normalize_origin(value: str) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -57,6 +75,9 @@ def _resolve_allowed_origins() -> list[str]:
 async def lifespan(app: FastAPI):
     """Manage application lifespan events."""
     tunnel_task: asyncio.Task[str | None] | None = None
+    review_cleanup_task: asyncio.Task[None] = asyncio.create_task(
+        _review_session_cleanup_loop()
+    )
     debug_enabled = os.getenv("DEBUG", "").lower() in ("1", "true")
 
     def _log_tunnel_result(task: asyncio.Task[str | None]) -> None:
@@ -87,6 +108,9 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         # Shutdown
+        review_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await review_cleanup_task
         if tunnel_task is not None and not tunnel_task.done():
             tunnel_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -143,6 +167,27 @@ async def readiness_check():
     get_app_context()
     from services.collabora_service import CollaboraUnavailable
     ctx = get_app_context()
+    service = getattr(ctx.services.supabase, "_service", ctx.services.supabase)
+    client = service._get_supabase_client()
+    if client is not None:
+        probes = {
+            "product_draft_review_edits": "session_id,base_draft_revision,edit_revision,pending_products,working_file_id,status",
+            "submitted_documents": "approved_selection,value_provenance",
+            "shopify_mutation_plans": "approved_selection,review_contract_version",
+            "file_metadata": "content_revision",
+            "product_source_references": "value_path",
+        }
+        try:
+            for table, columns in probes.items():
+                client.table(table).select(columns).limit(1).execute()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "IMPORT_REVIEW_SCHEMA_NOT_READY",
+                    "message": "Import Review v2 database migration is not active",
+                },
+            ) from exc
     try:
         collabora = ctx.services.collabora.readiness()
     except CollaboraUnavailable as exc:
@@ -161,6 +206,8 @@ async def readiness_check():
             )
     return {
         "status": "ready",
+        "review_contract_version": 2,
+        "review_schema_ready": True,
         "services": ["supabase", "llm", "collabora", "tracing", "shopify"],
         "collabora": {key: value for key, value in collabora.items() if key != "discovery"},
         "document_layout": {

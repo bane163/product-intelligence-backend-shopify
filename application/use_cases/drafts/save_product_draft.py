@@ -22,9 +22,23 @@ def execute(
     submit_run_id: str | None = None,
     submit_error: str | None = None,
     require_lifecycle_columns: bool = False,
+    ai_enhancements_enabled: bool | None = None,
     revision: int | None = None,
     products: List[Dict[str, object]] | None = None,
 ) -> Dict[str, object]:
+    resolved_ai_enhancements_enabled = ai_enhancements_enabled
+    if resolved_ai_enhancements_enabled is None:
+        existing = supabase.drafts.get_product_draft(
+            draft_id, shop_domain=shop_domain
+        )
+        existing_setting = (
+            existing.get("ai_enhancements_enabled")
+            if isinstance(existing, dict)
+            else None
+        )
+        resolved_ai_enhancements_enabled = (
+            existing_setting if isinstance(existing_setting, bool) else True
+        )
     return supabase.drafts.save_product_draft(
         draft_id=draft_id,
         run_id=run_id,
@@ -42,6 +56,7 @@ def execute(
         submit_run_id=submit_run_id,
         submit_error=submit_error,
         require_lifecycle_columns=require_lifecycle_columns,
+        ai_enhancements_enabled=resolved_ai_enhancements_enabled,
         revision=revision,
         products=products or [],
     )

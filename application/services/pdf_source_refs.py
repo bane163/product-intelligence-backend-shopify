@@ -1,64 +1,98 @@
+"""Verify canonical review-value evidence against trusted PDF layout anchors."""
+
 from __future__ import annotations
 
 import re
 from typing import Any
 
+from application.domain.review_value_paths import (
+    ReviewValue,
+    canonical_value_path,
+    is_numeric_field,
+    iter_review_values,
+    values_equal,
+)
 from application.ports.document_layout_port import DocumentAnchor, DocumentLayout
-from application.domain.shopify_mutation_plan import _normalized_path_part, _schema_from_product, _variant_subject
 
 
 def _normalized(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+    return re.sub(r"[^a-z0-9]+", "", str(value if value is not None else "").casefold())
+
+
+def _anchor_matches(anchor: DocumentAnchor, item: ReviewValue) -> bool:
+    if values_equal(anchor.text, item.value, numeric_strings=is_numeric_field(item.field)):
+        return True
+    # Layout anchors frequently include a label beside an exact scalar value.
+    if isinstance(item.value, str):
+        needle = _normalized(item.value)
+        return bool(needle) and needle in _normalized(anchor.text)
+    return False
+
+
+def _origin_for(product: dict[str, Any], path: str) -> str | None:
+    origins = product.get("value_origins") or product.get("_value_origins")
+    if not isinstance(origins, dict):
+        return None
+    matches = {str(origin) for key, origin in origins.items() if canonical_value_path(key) == canonical_value_path(path)}
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def verify_pdf_source_refs(
     products: list[dict[str, Any]], layout: DocumentLayout, source_file_id: str
 ) -> tuple[int, int]:
-    """Replace model locations with trusted anchors and discard ambiguous evidence."""
+    """Replace model locations with resolved anchors and omit ambiguous evidence."""
     resolved_count = dropped_count = 0
     for product in products:
         incoming = product.get("source_refs")
         refs = [ref for ref in incoming if isinstance(ref, dict)] if isinstance(incoming, list) else []
         verified: list[dict[str, Any]] = []
         product_page: int | None = None
-        fields = [(field, product.get(field), field) for field in ("title", "vendor")]
-        option_names = _schema_from_product(product)
-        variants = product.get("variants") if isinstance(product.get("variants"), list) else []
-        for variant in (item for item in variants if isinstance(item, dict)):
-            prefix = f"variant[{_normalized_path_part(_variant_subject(variant, option_names))}]"
-            fields.extend((field, variant.get(field), f"{prefix}.{field}") for field in ("sku", "price"))
-        for field, expected, value_path in fields:
-            needle = _normalized(expected)
-            if not needle:
+        for item in iter_review_values(product):
+            if _origin_for(product, item.value_path) in {"ai_assisted", "derived", "merchant_edited", "unknown", "defaulted"}:
                 continue
-            candidate_ref = next((ref for ref in refs if str(ref.get("value_path") or "") == value_path), None)
-            if candidate_ref is None and value_path == field:
-                legacy = [ref for ref in refs if not ref.get("value_path") and str(ref.get("field") or "").casefold() == field]
-                candidate_ref = legacy[0] if len(legacy) == 1 else None
-            anchor = layout.resolve(str(candidate_ref.get("anchor_id") or "")) if candidate_ref else None
-            if anchor is not None and needle not in _normalized(anchor.text):
-                anchor = None
-            if anchor is None:
-                candidates = [item for item in layout.anchors if needle in _normalized(item.text)]
-                if field != "title" and product_page is not None:
-                    candidates = [item for item in candidates if item.page == product_page]
-                if len(candidates) == 1:
-                    anchor = candidates[0]
-            if anchor is None:
-                if candidate_ref is not None:
+            candidates_refs = [
+                ref for ref in refs
+                if canonical_value_path(ref.get("value_path")) == canonical_value_path(item.value_path)
+            ]
+            if not candidates_refs and item.scope == "product":
+                candidates_refs = [
+                    ref for ref in refs
+                    if not ref.get("value_path") and canonical_value_path(ref.get("field")) == canonical_value_path(item.field)
+                ]
+
+            if len(candidates_refs) > 1:
+                dropped_count += len(candidates_refs)
+                continue
+
+            anchors: dict[str, DocumentAnchor] = {}
+            for ref in candidates_refs:
+                anchor = layout.resolve(str(ref.get("anchor_id") or ""))
+                if anchor is not None and _anchor_matches(anchor, item):
+                    anchors[anchor.id] = anchor
+                else:
                     dropped_count += 1
+            if not anchors and not candidates_refs:
+                matches = [anchor for anchor in layout.anchors if _anchor_matches(anchor, item)]
+                if item.field != "title" and product_page is not None:
+                    matches = [anchor for anchor in matches if anchor.page == product_page]
+                if len(matches) == 1:
+                    anchors[matches[0].id] = matches[0]
+            if len(anchors) != 1:
+                if candidates_refs and anchors:
+                    dropped_count += len(candidates_refs)
                 continue
-            if field == "title":
+            anchor = next(iter(anchors.values()))
+            if item.field == "title":
                 product_page = anchor.page
             verified.append({
                 "source_file_id": source_file_id,
-                "field": field,
-                "value_path": value_path,
+                "field": item.field,
+                "value_path": item.value_path,
                 "document_kind": "pdf",
                 "anchor_id": anchor.id,
                 "page": anchor.page,
                 "bbox": list(anchor.bbox),
-                "value": str(expected),
+                "value": str(item.value),
                 "source_provider": anchor.provider,
             })
             resolved_count += 1

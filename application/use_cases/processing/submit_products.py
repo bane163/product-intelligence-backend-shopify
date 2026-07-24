@@ -406,6 +406,7 @@ async def execute(
     document_name: str | None = None,
     shop_domain: str | None = None,
     shop_access_token: str | None = None,
+    ai_enhancements_enabled: bool = True,
 ) -> dict[str, object]:
     submit_started_at = perf_counter()
     current_run_id = run_id or str(uuid.uuid4())
@@ -431,6 +432,7 @@ async def execute(
             "started_at": datetime.now(timezone.utc).isoformat(),
             "attempt": 1,
             "shop_domain": shop_domain,
+            "ai_enhancements_enabled": bool(ai_enhancements_enabled),
             **observability_fields,
         },
     )

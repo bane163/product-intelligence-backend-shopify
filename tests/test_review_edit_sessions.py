@@ -343,6 +343,66 @@ async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
 
 
 @pytest.mark.asyncio
+async def test_grid_selection_matches_mutation_plan_required_and_deferred_rules():
+    service = get_app_context().services.supabase._service
+    shop = "grid-selection-contract.myshopify.com"
+    draft_id = "grid-selection-contract-draft"
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "products": [{"title": "Review product"}],
+    }
+    service.mutation_plans["grid-selection-contract-plan"] = {
+        "plan_id": "grid-selection-contract-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [{
+            "item_id": "server-item-id",
+            "source_index": 0,
+            "selectable": True,
+            "selected": True,
+            "review_changes": [
+                {"change_id": "required-title", "disposition": "applicable", "required": True, "included": True},
+                {"change_id": "optional-vendor", "disposition": "applicable", "required": False, "included": True},
+                {"change_id": "deferred-sku", "disposition": "deferred", "required": False, "included": False},
+            ],
+        }],
+    }
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(base, headers=headers, json={"surface": "grid", "base_revision": 1})
+        session = created.json()["session"]
+        url = f"{base}/{session['session_id']}"
+        missing_required = await client.patch(url, headers=headers, json={
+            "expected_edit_revision": 1,
+            "operation": {"type": "selection", "item_id": "server-item-id", "selected": True, "included_change_ids": ["optional-vendor"]},
+        })
+        includes_deferred = await client.patch(url, headers=headers, json={
+            "expected_edit_revision": 1,
+            "operation": {"type": "selection", "item_id": "server-item-id", "selected": True, "included_change_ids": ["required-title", "deferred-sku"]},
+        })
+        accepted = await client.patch(url, headers=headers, json={
+            "expected_edit_revision": 1,
+            "operation": {"type": "selection", "item_id": "server-item-id", "selected": True, "included_change_ids": ["required-title"]},
+        })
+
+    assert missing_required.status_code == 422
+    assert includes_deferred.status_code == 422
+    assert accepted.status_code == 200
+    rows = accepted.json()["session"]["working_plan"]["items"][0]["review_changes"]
+    assert {row["change_id"]: row["included"] for row in rows} == {
+        "required-title": True,
+        "optional-vendor": False,
+        "deferred-sku": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_undo_redo_replays_value_and_new_operation_truncates_redo():
     service = get_app_context().services.supabase._service
     shop = "value-history-actions.myshopify.com"
@@ -930,8 +990,9 @@ async def test_option_value_rename_cascades_undoes_redoes_and_applies(monkeypatc
         edited = await client.patch(
             f"{base}/{session_id}", headers=headers,
             json={"expected_edit_revision": 1, "operation": {
-                "type": "value_edit", "change_id": "color-values",
-                "value_path": "option[color].values", "value": ["Black", "Forest Red"],
+                "type": "option_values_edit", "change_id": "color-values",
+                "value_path": "option[color].values", "action": "rename",
+                "from": "Forest Green", "to": "Forest Red",
             }},
         )
         undone = await client.post(f"{base}/{session_id}/undo", headers=headers, json={"expected_edit_revision": 2})
@@ -940,10 +1001,16 @@ async def test_option_value_rename_cascades_undoes_redoes_and_applies(monkeypatc
 
     assert edited.status_code == 200, edited.text
     assert edited.json()["session"]["pending_products"][0]["variants"][1]["option1"] == "Forest Red"
-    assert edited.json()["session"]["working_plan"]["items"][0]["review_changes"][1]["subject"] == "Color: Forest Red"
+    assert any(
+        row["subject"] == "Color: Forest Red"
+        for row in edited.json()["session"]["working_plan"]["items"][0]["review_changes"]
+    )
     assert undone.status_code == 200, undone.text
     assert undone.json()["session"]["pending_products"][0]["variants"][1]["option1"] == "Forest Green"
-    assert undone.json()["session"]["working_plan"]["items"][0]["review_changes"][1]["subject"] == "Color: Forest Green"
+    assert any(
+        row["subject"] == "Color: Forest Green"
+        for row in undone.json()["session"]["working_plan"]["items"][0]["review_changes"]
+    )
     assert redone.status_code == 200, redone.text
     assert redone.json()["session"]["pending_products"][0]["variants"][1]["option1"] == "Forest Red"
     assert applied.status_code == 200, applied.text

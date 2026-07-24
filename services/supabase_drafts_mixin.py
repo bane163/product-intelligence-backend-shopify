@@ -140,6 +140,7 @@ class SupabaseDraftsMixin:
         submit_run_id: str | None = None,
         submit_error: str | None = None,
         require_lifecycle_columns: bool = False,
+        ai_enhancements_enabled: bool = True,
         revision: int | None = None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -164,6 +165,7 @@ class SupabaseDraftsMixin:
             "submit_status": submit_status,
             "submit_run_id": submit_run_id,
             "submit_error": submit_error,
+            "ai_enhancements_enabled": bool(ai_enhancements_enabled),
             "products": products,
             "revision": max(1, int(revision or 1)),
             "product_count": len(products),
@@ -173,38 +175,37 @@ class SupabaseDraftsMixin:
         }
         client = self._get_supabase_client()
         if client:
-            try:
-                client.table("product_drafts").upsert(
-                    payload, on_conflict="draft_id"
-                ).execute()
-                self._sync_source_references(products=products, shop_domain=normalized_shop_domain, draft_id=draft_id)
-                return payload
-            except Exception as exc:
-                if _is_missing_column_error(
-                    exc, table="product_drafts", column="draft_name"
-                ):
-                    try:
-                        compat_payload = dict(payload)
-                        compat_payload.pop("draft_name", None)
-                        client.table("product_drafts").upsert(
-                            compat_payload, on_conflict="draft_id"
-                        ).execute()
-                        return payload
-                    except Exception as draft_name_exc:
-                        LOG.exception(
-                            "Retry without product_drafts.draft_name failed for draft %s",
-                            draft_id,
-                        )
-                        if require_lifecycle_columns:
-                            raise RuntimeError(
-                                "Draft lifecycle persistence failed (product_drafts)"
-                            ) from draft_name_exc
-                else:
-                    LOG.exception("Failed saving product draft %s", draft_id)
-                    if require_lifecycle_columns:
-                        raise RuntimeError(
-                            "Draft lifecycle persistence failed (product_drafts)"
-                        ) from exc
+            compat_payload = dict(payload)
+            exc: Exception | None = None
+            for _attempt in range(3):
+                try:
+                    client.table("product_drafts").upsert(
+                        compat_payload, on_conflict="draft_id"
+                    ).execute()
+                    self._sync_source_references(products=products, shop_domain=normalized_shop_domain, draft_id=draft_id)
+                    return payload
+                except Exception as attempt_exc:
+                    exc = attempt_exc
+                    removed_compat_column = False
+                    for column in ("ai_enhancements_enabled", "draft_name"):
+                        if column in compat_payload and _is_missing_column_error(
+                            attempt_exc, table="product_drafts", column=column
+                        ):
+                            compat_payload.pop(column, None)
+                            removed_compat_column = True
+                            break
+                    if not removed_compat_column:
+                        break
+            if exc is not None:
+                LOG.error(
+                    "Failed saving product draft %s",
+                    draft_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                if require_lifecycle_columns:
+                    raise RuntimeError(
+                        "Draft lifecycle persistence failed (product_drafts)"
+                    ) from exc
                 try:
                     compat_payload = dict(payload)
                     compat_payload.pop("first_product_title", None)
@@ -221,6 +222,7 @@ class SupabaseDraftsMixin:
                     compat_payload.pop("submit_error", None)
                     compat_payload.pop("shop_domain", None)
                     compat_payload.pop("extraction_progress", None)
+                    compat_payload.pop("ai_enhancements_enabled", None)
                     client.table("product_drafts").upsert(
                         compat_payload, on_conflict="draft_id"
                     ).execute()
@@ -317,7 +319,7 @@ class SupabaseDraftsMixin:
 
         if db_drafts_loaded:
             drafts_map: dict[str, dict[str, Any]] = {
-                str(item.get("draft_id")): item
+                str(item.get("draft_id")): {**item, "ai_enhancements_enabled": item.get("ai_enhancements_enabled", True)}
                 for item in db_drafts
                 if item.get("draft_id")
                 and _matches_shop_domain(item, normalized_shop_domain)
@@ -334,7 +336,12 @@ class SupabaseDraftsMixin:
                 drafts_map[key] = {**drafts_map.get(key, {}), **memory_draft}
         else:
             drafts_map = {
-                str(item.get("draft_id") or key): item
+                str(item.get("draft_id") or key): {
+                    **item,
+                    "ai_enhancements_enabled": item.get(
+                        "ai_enhancements_enabled", True
+                    ),
+                }
                 for key, item in self.product_drafts.items()
                 if _matches_shop_domain(item, normalized_shop_domain)
             }
@@ -378,6 +385,13 @@ class SupabaseDraftsMixin:
         self, draft_id: str, *, shop_domain: str | None = None
     ) -> dict[str, Any] | None:
         memory_draft = self.product_drafts.get(draft_id)
+        if memory_draft:
+            memory_draft = {
+                **memory_draft,
+                "ai_enhancements_enabled": memory_draft.get(
+                    "ai_enhancements_enabled", True
+                ),
+            }
         normalized_shop_domain = _normalize_shop_domain(shop_domain)
         if memory_draft and not _matches_shop_domain(memory_draft, normalized_shop_domain):
             memory_draft = None
@@ -390,7 +404,7 @@ class SupabaseDraftsMixin:
                 res = query.limit(1).execute()
                 rows = res.data or []
                 if rows:
-                    row = rows[0]
+                    row = {**rows[0], "ai_enhancements_enabled": rows[0].get("ai_enhancements_enabled", True)}
                     if not _matches_shop_domain(row, normalized_shop_domain):
                         return memory_draft
                     if memory_draft:
@@ -410,7 +424,7 @@ class SupabaseDraftsMixin:
                         )
                         rows = res.data or []
                         if rows:
-                            row = rows[0]
+                            row = {**rows[0], "ai_enhancements_enabled": rows[0].get("ai_enhancements_enabled", True)}
                             if not _matches_shop_domain(row, normalized_shop_domain):
                                 return memory_draft
                             if memory_draft:

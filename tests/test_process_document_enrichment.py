@@ -4,11 +4,21 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from ai.models import ProductsList
 from shared.observability import bind_observability_context
 
 import application.use_cases.processing.process_document as process_document_uc
+
+
+def _valid_xlsx_bytes() -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Title", "Vendor"])
+    worksheet.append(["Demo Product", "Source Vendor"])
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
 
 
 class _FakeRuns:
@@ -85,6 +95,7 @@ class _FakeFileStorage:
         *,
         content_type: str,
         file_origin: str,
+        shop_domain: str | None = None,
     ) -> None:
         self.saved_files.append(
             {
@@ -93,6 +104,7 @@ class _FakeFileStorage:
                 "content": content,
                 "content_type": content_type,
                 "file_origin": file_origin,
+                "shop_domain": shop_domain,
             }
         )
 
@@ -157,11 +169,12 @@ async def test_process_document_enriches_products_during_import(monkeypatch):
         trace_event=None,
     ):
         _ = supabase, shop_domain, normalization_settings, trace_event
-        assert products == [{"title": "Demo Product"}]
+        assert products[0]["title"] == "Demo Product"
         return [
             {
                 "product_index": 0,
                 "patch_payload": {"vendor": "Enriched Vendor"},
+                "value_origin": "ai_assisted",
             }
         ]
 
@@ -188,7 +201,7 @@ async def test_process_document_enriches_products_during_import(monkeypatch):
         llm=llm,
         tracing=tracing,
         ctx=SimpleNamespace(),
-        file_bytes=b"sheet-bytes",
+        file_bytes=_valid_xlsx_bytes(),
         input_name="catalog.xlsx",
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-import-enrich",
@@ -198,6 +211,36 @@ async def test_process_document_enriches_products_during_import(monkeypatch):
     assert result["result"]["products"][0]["vendor"] == "Enriched Vendor"
     assert result["result"]["enrichment_applied"] is True
     assert result["result"]["enrichment_suggestions_count"] == 1
+    assert result["result"]["products"][0]["value_origins"]["vendor"] == "ai_assisted"
+
+
+@pytest.mark.asyncio
+async def test_process_document_skips_suggestions_when_ai_enhancements_disabled(monkeypatch):
+    async def fail_generate_suggestions_execute(**kwargs):
+        _ = kwargs
+        raise AssertionError("disabled processing must not generate suggestions")
+
+    monkeypatch.setattr(
+        process_document_uc,
+        "generate_suggestions_execute",
+        fail_generate_suggestions_execute,
+    )
+    result = await process_document_uc.execute(
+        supabase=_FakeSupabase(),
+        llm=_FakeLLM(payload={"products": [{"title": "Demo Product"}]}),
+        tracing=_FakeTracing(),
+        ctx=SimpleNamespace(),
+        file_bytes=_valid_xlsx_bytes(),
+        input_name="catalog.xlsx",
+        input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        shop_domain="store.myshopify.com",
+        enable_ai_enhancements=False,
+    )
+
+    assert result["result"]["products"][0]["title"] == "Demo Product"
+    assert "vendor" not in result["result"]["products"][0]
+    assert result["result"]["products"][0]["value_origins"]["title"] == "source"
+    assert result["result"]["enrichment_attempted"] is False
 
 
 @pytest.mark.asyncio
@@ -211,7 +254,7 @@ async def test_process_document_normalizes_products_list_result_shape():
         llm=llm,
         tracing=tracing,
         ctx=SimpleNamespace(),
-        file_bytes=b"sheet-bytes",
+        file_bytes=_valid_xlsx_bytes(),
         input_name="catalog.xlsx",
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-import-products-list",
@@ -238,6 +281,7 @@ async def test_process_document_refreshes_workbook_output_after_enrichment(monke
             {
                 "product_index": 0,
                 "patch_payload": {"vendor": "Enriched Vendor"},
+                "value_origin": "ai_assisted",
             }
         ]
 
@@ -270,7 +314,7 @@ async def test_process_document_refreshes_workbook_output_after_enrichment(monke
         llm=llm,
         tracing=tracing,
         ctx=SimpleNamespace(),
-        file_bytes=b"sheet-bytes",
+        file_bytes=_valid_xlsx_bytes(),
         input_name="catalog.xlsx",
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-import-refresh-output",
@@ -330,7 +374,7 @@ async def test_process_document_enrichment_failure_is_non_fatal(monkeypatch):
         llm=llm,
         tracing=tracing,
         ctx=SimpleNamespace(),
-        file_bytes=b"sheet-bytes",
+        file_bytes=_valid_xlsx_bytes(),
         input_name="catalog.xlsx",
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-import-enrich-fallback",
@@ -374,6 +418,7 @@ async def test_process_document_workbook_ai_enhancements_shows_all_enriched_fiel
                         }
                     ],
                 },
+                "value_origin": "ai_assisted",
             }
         ]
 
@@ -406,7 +451,7 @@ async def test_process_document_workbook_ai_enhancements_shows_all_enriched_fiel
         llm=llm,
         tracing=tracing,
         ctx=SimpleNamespace(),
-        file_bytes=b"sheet-bytes",
+        file_bytes=_valid_xlsx_bytes(),
         input_name="catalog.xlsx",
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-ai-enhancements-sheet",
@@ -480,7 +525,7 @@ async def test_process_document_persists_observability_ids_from_context():
             llm=llm,
             tracing=tracing,
             ctx=SimpleNamespace(),
-            file_bytes=b"sheet-bytes",
+            file_bytes=_valid_xlsx_bytes(),
             input_name="catalog.xlsx",
             input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             run_id="run-process-observability",

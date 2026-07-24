@@ -4,6 +4,8 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
+from application.domain.shopify_mutation_plan import normalize_review_plan_rows
+
 
 class SupabaseMutationPlansMixin:
     mutation_plans: dict[str, dict[str, Any]]
@@ -59,7 +61,9 @@ class SupabaseMutationPlansMixin:
         hydrated = deepcopy(session)
 
         working_plan = hydrated.get("working_plan")
-        hydrated["working_plan"] = working_plan if isinstance(working_plan, dict) else {}
+        hydrated["working_plan"] = normalize_review_plan_rows(
+            working_plan if isinstance(working_plan, dict) else {}
+        )
 
         raw_grid_state = hydrated.get("grid_state")
         grid_state = cls._default_review_grid_state()
@@ -91,7 +95,12 @@ class SupabaseMutationPlansMixin:
             if isinstance(raw_cursor, int) and not isinstance(raw_cursor, bool)
             else len(unfiltered_history)
         )
-        content_operations = {"value_edit", "value_revert", "selection"}
+        content_operations = {
+            "value_edit",
+            "value_revert",
+            "option_values_edit",
+            "selection",
+        }
         history = [
             entry for entry in unfiltered_history
             if isinstance(entry, dict) and entry.get("operation") in content_operations
@@ -148,9 +157,14 @@ class SupabaseMutationPlansMixin:
 
     @staticmethod
     def _hydrate_plan(plan: dict[str, Any]) -> dict[str, Any]:
-        if plan.get("currency_code"):
-            return plan
-        items = plan.get("items") if isinstance(plan.get("items"), list) else []
+        hydrated = normalize_review_plan_rows(plan)
+        if hydrated.get("currency_code"):
+            return hydrated
+        items = (
+            hydrated.get("items")
+            if isinstance(hydrated.get("items"), list)
+            else []
+        )
         currency_code = next(
             (
                 item.get("currency_code")
@@ -159,7 +173,10 @@ class SupabaseMutationPlansMixin:
             ),
             None,
         )
-        return {**plan, "currency_code": str(currency_code or "USD").upper()}
+        return {
+            **hydrated,
+            "currency_code": str(currency_code or "USD").upper(),
+        }
 
     def save_mutation_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
         tenant = str(plan.get("shop_domain") or "").strip().lower()

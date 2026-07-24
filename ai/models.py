@@ -84,6 +84,7 @@ class ProductSourceRef(BaseModel):
     bbox: Optional[List[float]] = None
     value: Optional[str] = None
     source_provider: Optional[str] = None
+    evidence_role: Optional[Literal["value", "label", "key"]] = None
 
 
 class ProductInput(BaseModel):

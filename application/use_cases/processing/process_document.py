@@ -45,6 +45,7 @@ async def execute(
     shop_domain: str | None = None,
     manage_lifecycle: bool = True,
     source_file_id: str | None = None,
+    enable_ai_enhancements: bool = True,
 ):
     """Extracted application use-case for processing an uploaded document.
 
@@ -312,7 +313,7 @@ async def execute(
                         origins.setdefault(str(ref.get("value_path") or ref["field"]), "source")
                 if origins:
                     product["value_origins"] = origins
-            if products:
+            if products and enable_ai_enhancements:
                 if not shop_domain:
                     enrichment_warning = "Import enrichment skipped: missing shop_domain"
                     emit_and_persist(

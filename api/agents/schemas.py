@@ -43,6 +43,7 @@ class BatchExtractSubmitRequest(BaseModel):
     extraction_mode: str = "per_sheet"
     auto_submit: bool = False
     offload: bool = True
+    enable_ai_enhancements: bool = True
 
 
 class BatchExtractSubmitAcceptedItem(BaseModel):

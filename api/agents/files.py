@@ -131,6 +131,14 @@ def _draft_products(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [item for item in raw_products if isinstance(item, dict)]
 
 
+def _draft_ai_enhancements_enabled(
+    entry: dict[str, Any] | None, fallback: bool = True
+) -> bool:
+    if isinstance(entry, dict) and isinstance(entry.get("ai_enhancements_enabled"), bool):
+        return entry["ai_enhancements_enabled"]
+    return fallback
+
+
 def _first_non_empty_str(*values: str | None) -> str | None:
     for value in values:
         if isinstance(value, str):
@@ -210,6 +218,7 @@ def _save_draft_state(
     submit_status: str | None = None,
     submit_run_id: str | None = None,
     submit_error: str | None = None,
+    ai_enhancements_enabled: bool | None = None,
 ) -> None:
     from application.use_cases.drafts.get_product_draft import execute as get_draft_execute
     from application.use_cases.drafts.save_product_draft import execute as save_draft_execute
@@ -288,6 +297,11 @@ def _save_draft_state(
         submit_run_id=submit_run_id if submit_run_id is not None else existing_submit_run_id,
         submit_error=submit_error if submit_error is not None else existing_submit_error,
         require_lifecycle_columns=True,
+        ai_enhancements_enabled=(
+            ai_enhancements_enabled
+            if isinstance(ai_enhancements_enabled, bool)
+            else _draft_ai_enhancements_enabled(existing)
+        ),
         products=products if products is not None else _draft_products(existing),
     )
 
@@ -306,6 +320,7 @@ async def _run_import_in_background(
     write_to_file: bool,
     output_path: str | None,
     shop_domain: str | None,
+    enable_ai_enhancements: bool = True,
 ) -> None:
     from application.use_cases.processing.process_document import (
         execute as process_document_execute,
@@ -322,6 +337,7 @@ async def _run_import_in_background(
         extraction_status="running",
         extraction_run_id=run_id,
         extraction_error=None,
+        ai_enhancements_enabled=enable_ai_enhancements,
     )
 
     try:
@@ -340,6 +356,7 @@ async def _run_import_in_background(
             output_path=output_path,
             shop_domain=shop_domain,
             source_file_id=file_id,
+            enable_ai_enhancements=enable_ai_enhancements,
         )
         payload = result.get("result") if isinstance(result, dict) else None
         output_file_id = None
@@ -471,6 +488,7 @@ def _queue_batch_extract_submit_for_file(
     import_mode: str,
     extraction_mode: str,
     auto_submit: bool,
+    enable_ai_enhancements: bool,
     shop_domain: str | None = None,
 ) -> BatchExtractSubmitAcceptedItem:
     from application.use_cases.files.get_file import execute as get_file_execute
@@ -557,6 +575,7 @@ def _queue_batch_extract_submit_for_file(
         submit_status=None,
         submit_run_id=submit_run_id if auto_submit else None,
         submit_error=None,
+        ai_enhancements_enabled=enable_ai_enhancements,
     )
     ctx.supabase.runs.create_or_update_run(
         extraction_run_id,
@@ -594,6 +613,7 @@ def _queue_batch_extract_submit_for_file(
                 "import_mode": import_mode,
                 "auto_submit": bool(auto_submit),
                 "submit_run_id": submit_run_id if auto_submit else None,
+                "enable_ai_enhancements": enable_ai_enhancements,
             },
         },
         require_persistent_queue=True,
@@ -946,6 +966,7 @@ async def queue_batch_extract_submit(
                 import_mode=payload.import_mode,
                 extraction_mode=payload.extraction_mode,
                 auto_submit=payload.auto_submit,
+                enable_ai_enhancements=payload.enable_ai_enhancements,
                 shop_domain=resolved_shop_domain,
             )
         except LookupError:
@@ -1016,6 +1037,7 @@ async def process_excel(
     write_to_file: bool = Form(False),
     output_path: str | None = Form(None),
     offload: bool = Form(False),
+    enable_ai_enhancements: bool = Form(True),
     shop_domain: str | None = Form(None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
@@ -1154,6 +1176,7 @@ async def process_excel(
                 submit_status=None,
                 submit_run_id=None,
                 submit_error=None,
+                ai_enhancements_enabled=enable_ai_enhancements,
             )
             ctx.supabase.runs.create_or_update_run(
                 effective_run_id,
@@ -1188,6 +1211,7 @@ async def process_excel(
                         "write_to_file": bool(write_to_file),
                         "output_path": output_path,
                         "collabora_url": collabora_url,
+                        "enable_ai_enhancements": enable_ai_enhancements,
                     },
                 },
                 require_persistent_queue=True,
@@ -1221,6 +1245,7 @@ async def process_excel(
         output_path=output_path,
         shop_domain=tenant,
         source_file_id=file_id,
+        enable_ai_enhancements=enable_ai_enhancements,
     )
 
     return result

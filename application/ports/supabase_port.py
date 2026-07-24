@@ -120,6 +120,7 @@ class SupabasePort(Protocol):
         submit_run_id: str | None = None,
         submit_error: str | None = None,
         require_lifecycle_columns: bool = False,
+        ai_enhancements_enabled: bool = True,
         revision: int | None = None,
         products: list[dict[str, Any]],
         approved_selection: list[dict[str, Any]] | None = None,
@@ -488,6 +489,7 @@ class SupabaseDraftsNamespacePort(Protocol):
         submit_run_id: str | None = None,
         submit_error: str | None = None,
         require_lifecycle_columns: bool = False,
+        ai_enhancements_enabled: bool = True,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]: ...
 

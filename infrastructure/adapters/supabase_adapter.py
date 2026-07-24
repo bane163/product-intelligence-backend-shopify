@@ -224,6 +224,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         submit_run_id: str | None = None,
         submit_error: str | None = None,
         require_lifecycle_columns: bool = False,
+        ai_enhancements_enabled: bool = True,
         revision: int | None = None,
         products: list[dict[str, Any]],
     ) -> dict[str, Any]:
@@ -244,6 +245,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             submit_run_id=submit_run_id,
             submit_error=submit_error,
             require_lifecycle_columns=require_lifecycle_columns,
+            ai_enhancements_enabled=ai_enhancements_enabled,
             revision=revision,
             products=products,
         )

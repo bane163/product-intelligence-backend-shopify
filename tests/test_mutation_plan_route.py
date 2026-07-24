@@ -530,3 +530,123 @@ async def test_structured_only_trail_tee_mug_and_daypack_updates_start_selected(
         ]
         for item in items
     )
+
+
+def test_stored_v2_plans_and_edit_sessions_hydrate_safe_row_defaults(monkeypatch):
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    stored = {
+        "plan_id": "stored-row-presentation-plan",
+        "review_contract_version": 2,
+        "items": [
+            {
+                "proposed": {"productOptions": []},
+                "review_changes": [
+                    {
+                        "scope": "option",
+                        "subject": "Title",
+                        "field": "values",
+                        "disposition": "applicable",
+                    }
+                ],
+            }
+        ],
+    }
+
+    hydrated_plan = service._hydrate_plan(stored)
+    hydrated_session = service._hydrate_review_edit_session(
+        {
+            "session_id": "stored-row-presentation-session",
+            "working_plan": stored,
+        }
+    )
+
+    plan_row = hydrated_plan["items"][0]["review_changes"][0]
+    session_row = hydrated_session["working_plan"]["items"][0]["review_changes"][0]
+    assert plan_row["presentation"] == "hidden"
+    assert plan_row["editable"] is False
+    assert session_row["presentation"] == "hidden"
+    assert session_row["editable"] is False
+
+
+@pytest.mark.asyncio
+async def test_approval_ignores_legacy_acknowledgement_and_omits_deferred_values(
+    monkeypatch,
+):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "deferred-approval-without-acknowledgement"
+    plan_id = "deferred-approval-plan"
+    shop_domain = "deferred-approval.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [{"title": "Safe product"}],
+    }
+    service.mutation_plans[plan_id] = {
+        "plan_id": plan_id,
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [
+            {
+                "item_id": "deferred-item",
+                "source_index": 0,
+                "selected": True,
+                "selectable": True,
+                "blockers": [],
+                "unapplied": [
+                    {
+                        "code": "TODO_FULFILLMENT_LOCATION",
+                        "field": "variants[0].inventory_quantity",
+                        "value": 7,
+                    }
+                ],
+                "proposed": {
+                    "title": "Safe product",
+                    "variants": [{"sku": "SAFE-SKU"}],
+                },
+                "review_changes": [
+                    {
+                        "change_id": "deferred-quantity",
+                        "scope": "inventory",
+                        "subject": "Variant 1",
+                        "field": "inventory_quantity",
+                        "proposed": 7,
+                        "disposition": "deferred",
+                        "included": False,
+                    }
+                ],
+            }
+        ],
+    }
+
+    class FakeShopifyClient:
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        assert shop == shop_domain
+        return FakeShopifyClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        response = await client.post(
+            f"/agents/product-drafts/{draft_id}/mutation-plan/approve",
+            json={"plan_id": plan_id},
+        )
+
+    assert response.status_code == 200
+    execution = response.json()["plan"]["items"][0]["execution_proposed"]
+    assert execution["variants"] == [{"sku": "SAFE-SKU"}]
+    assert "inventory_quantity" not in execution["variants"][0]

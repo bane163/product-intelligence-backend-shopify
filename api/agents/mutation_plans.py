@@ -13,11 +13,11 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Request
 import shopify_session_store
 from app_context import AppContext, get_ctx
 from application.domain.shopify_mutation_plan import (
-    applicable_changes,
+    build_review_plan_item,
     materialize_execution_proposed,
     merge_structured_product,
+    normalize_review_plan_rows,
     preserve_blank_fields,
-    review_changes,
     validate_product,
 )
 from shopify import SHOPIFY_REAUTH_REQUIRED, ShopifyClient
@@ -96,18 +96,12 @@ async def _repair_legacy_review_evidence(
     """Re-verify retained source evidence without advancing the value revision."""
     if not previous or previous.get("status") != "review":
         return draft
-    refs_need_repair = any(
-        isinstance(ref, dict) and (not ref.get("source_file_id") or not ref.get("value_path"))
-        for product in _products(draft)
-        for ref in (product.get("source_refs") if isinstance(product.get("source_refs"), list) else [])
-    )
-    if previous.get("review_contract_version") == 2 and not refs_need_repair:
-        return draft
     file_id = str(draft.get("input_file_id") or "")
     source = ctx.supabase.file.get_file(file_id) if file_id else None
     if not isinstance(source, dict) or not isinstance(source.get("content"), (bytes, bytearray)):
         return draft
-    products = deepcopy(_products(draft))
+    original_products = _products(draft)
+    products = deepcopy(original_products)
     filename = str(draft.get("input_filename") or source.get("name") or file_id)
     lower_name = filename.casefold()
     if lower_name.endswith((".xlsx", ".xlsm", ".csv")):
@@ -128,6 +122,8 @@ async def _repair_legacy_review_evidence(
                 origins.setdefault(str(ref["value_path"]), "source")
         if origins:
             product["value_origins"] = origins
+    if products == original_products:
+        return draft
     saved = ctx.supabase.drafts.save_product_draft(
         draft_id=str(draft["draft_id"]), run_id=draft.get("run_id"),
         import_mode=str(draft.get("import_mode") or "auto"), draft_name=draft.get("draft_name"),
@@ -314,49 +310,20 @@ async def create_mutation_plan(
             )
             blockers.extend(structured_blockers)
             unapplied.extend(structured_unapplied)
-            changes = applicable_changes(live, proposed)
-            exact_review = review_changes(
-                live, product, proposed, blockers=blockers, unapplied=unapplied
-            )
             prior_item = previous_by_source_index.get(index)
-            prior_inclusion = {
-                str(row.get("change_id")): bool(row.get("included"))
-                for row in (prior_item or {}).get("review_changes", [])
-                if isinstance(row, dict) and row.get("change_id")
-            }
-            for row in exact_review:
-                if row.get("required"):
-                    row["included"] = row.get("disposition") == "applicable"
-                elif row.get("change_id") in prior_inclusion:
-                    row["included"] = prior_inclusion[str(row["change_id"])]
-            if blockers:
-                operation = "blocked"
-            elif live and not changes:
-                operation = "unchanged"
-            selectable = operation in {"create", "update"} and bool(changes)
-            item_id = str(uuid.uuid4())
             items.append(
-                {
-                    "item_id": item_id,
-                    "currency_code": currency_code,
-                    "source_index": index,
-                    "source_evidence": product.get("source_refs") or [],
-                    "live_snapshot": live,
-                    "proposed": proposed,
-                    "operation": operation,
-                    "resolved_product_id": live.get("id") if live else None,
-                    "blockers": blockers,
-                    "unapplied": unapplied,
-                    "applicable_changes": changes,
-                    "review_changes": exact_review,
-                    "selectable": selectable,
-                    "selected": bool(
-                        selectable
-                        and ((prior_item or {}).get("selected", True))
-                    ),
-                    "remedy": None,
-                    "execution": None,
-                }
+                build_review_plan_item(
+                    item_id=str(uuid.uuid4()),
+                    currency_code=currency_code,
+                    source_index=index,
+                    source_product=product,
+                    live_snapshot=live,
+                    proposed=proposed,
+                    operation=operation,
+                    blockers=blockers,
+                    unapplied=unapplied,
+                    prior_item=prior_item,
+                )
             )
     finally:
         await client.close()
@@ -374,6 +341,7 @@ async def create_mutation_plan(
         "created_at": _now(),
         "updated_at": _now(),
     }
+    plan = normalize_review_plan_rows(plan)
     review_rows = [row for item in items for row in item.get("review_changes", []) if isinstance(row, dict)]
     unknown_count = sum(row.get("origin") == "unknown" for row in review_rows)
     LOG.info(
@@ -506,10 +474,6 @@ async def approve_mutation_plan(
         raise _review_error("Select at least one valid change")
     if any(x.get("blockers") for x in selected):
         raise _review_error("Selected changes contain blockers")
-    if any(x.get("unapplied") for x in selected) and not payload.get(
-        "acknowledge_unapplied"
-    ):
-        raise _review_error("Deferred fields must be acknowledged")
     plan_status = str(plan.get("status") or "").strip().lower()
     if plan_status in {"approved", "executing"}:
         return {"plan": plan}

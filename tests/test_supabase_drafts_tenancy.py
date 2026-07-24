@@ -81,6 +81,48 @@ def test_tenant_filtered_reads_exclude_null_shop_domain(monkeypatch):
         service.get_product_draft("draft-null", shop_domain="shop-a.myshopify.com")
         is None
     )
+    assert service.get_product_draft(
+        "draft-tenant", shop_domain="shop-a.myshopify.com"
+    )["ai_enhancements_enabled"] is True
+
+
+def test_draft_ai_enhancement_setting_round_trips_exact_false(monkeypatch):
+    service = SupabaseService()
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+
+    service.save_product_draft(
+        draft_id="draft-ai-off",
+        run_id=None,
+        import_mode="auto",
+        draft_name="AI Off",
+        shop_domain="shop-a.myshopify.com",
+        ai_enhancements_enabled=False,
+        products=[{"title": "Source Product"}],
+    )
+
+    draft = service.get_product_draft(
+        "draft-ai-off", shop_domain="shop-a.myshopify.com"
+    )
+    assert draft is not None
+    assert draft["ai_enhancements_enabled"] is False
+
+
+def test_pre_migration_memory_draft_defaults_ai_enhancements_to_true(monkeypatch):
+    service = SupabaseService()
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts["legacy-draft"] = {
+        "draft_id": "legacy-draft",
+        "shop_domain": "shop-a.myshopify.com",
+        "products": [],
+    }
+
+    draft = service.get_product_draft(
+        "legacy-draft", shop_domain="shop-a.myshopify.com"
+    )
+    assert draft is not None
+    assert draft["ai_enhancements_enabled"] is True
+    listed = service.list_product_drafts(shop_domain="shop-a.myshopify.com")
+    assert listed[0]["ai_enhancements_enabled"] is True
 
 
 def test_tenant_filtered_list_queries_include_shop_domain_predicate(monkeypatch):

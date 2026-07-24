@@ -46,6 +46,7 @@ async def save_product_draft(
     input_filename: str | None = Form(None),
     output_file_id: str | None = Form(None),
     output_filename: str | None = Form(None),
+    enable_ai_enhancements: bool = Form(True),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     products = parse_products_json(products_json)
@@ -55,7 +56,7 @@ async def save_product_draft(
     draft_id = str(uuid.uuid4())
     from application.use_cases.drafts.save_product_draft import execute as save_product_draft_execute
 
-    saved = save_product_draft_execute(supabase=ctx.supabase, draft_id=draft_id, run_id=run_id, import_mode=import_mode, draft_name=draft_name, shop_domain=tenant, input_file_id=input_file_id, input_filename=input_filename, output_file_id=output_file_id, output_filename=output_filename, products=products)
+    saved = save_product_draft_execute(supabase=ctx.supabase, draft_id=draft_id, run_id=run_id, import_mode=import_mode, draft_name=draft_name, shop_domain=tenant, input_file_id=input_file_id, input_filename=input_filename, output_file_id=output_file_id, output_filename=output_filename, ai_enhancements_enabled=enable_ai_enhancements, products=products)
     return {
         "draft_id": saved["draft_id"],
         "run_id": saved.get("run_id"),
@@ -69,6 +70,7 @@ async def save_product_draft(
         "first_product_title": saved.get("first_product_title"),
         "created_at": saved.get("created_at"),
         "revision": saved.get("revision", 1),
+        "ai_enhancements_enabled": saved.get("ai_enhancements_enabled", True),
     }
 
 

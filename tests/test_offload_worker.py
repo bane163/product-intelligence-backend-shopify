@@ -186,6 +186,7 @@ async def test_run_once_processes_document_import_job_success(monkeypatch):
                 "input_filename": "queued.xlsx",
                 "input_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "extraction_mode": "per_sheet",
+                "enable_ai_enhancements": False,
             },
         },
     )
@@ -193,6 +194,7 @@ async def test_run_once_processes_document_import_job_success(monkeypatch):
     async def fake_process_document_execute(**kwargs):
         assert kwargs["run_id"] == run_id
         assert kwargs["file_bytes"] == b"queued"
+        assert kwargs["enable_ai_enhancements"] is False
         return {
             "run_id": run_id,
             "result": {
@@ -223,6 +225,7 @@ async def test_run_once_processes_document_import_job_success(monkeypatch):
 
     draft = ctx.supabase.drafts.get_product_draft(draft_id)
     assert draft is not None
+    assert draft["ai_enhancements_enabled"] is False
     assert draft["extraction_status"] == "succeeded"
     assert draft["extraction_run_id"] == run_id
     assert draft["output_file_id"] == "output-file"
@@ -671,6 +674,7 @@ async def test_run_once_processes_shopify_submit_job_success(monkeypatch):
         submit_status="queued",
         submit_run_id=run_id,
         submit_error=None,
+        ai_enhancements_enabled=False,
         products=[{"title": "Queued Product"}],
         shop_domain="worker-test.myshopify.com",
     )
@@ -702,6 +706,7 @@ async def test_run_once_processes_shopify_submit_job_success(monkeypatch):
     async def fake_submit_execute(**kwargs):
         assert kwargs["run_id"] == run_id
         assert kwargs["draft_id"] == draft_id
+        assert kwargs["ai_enhancements_enabled"] is False
         return {
             "submitted_id": "submitted-123",
             "success_count": 1,

@@ -48,6 +48,14 @@ def _draft_products(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [item for item in raw_products if isinstance(item, dict)]
 
 
+def _draft_ai_enhancements_enabled(
+    entry: dict[str, Any] | None, fallback: bool = True
+) -> bool:
+    if isinstance(entry, dict) and isinstance(entry.get("ai_enhancements_enabled"), bool):
+        return entry["ai_enhancements_enabled"]
+    return fallback
+
+
 def _parse_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -175,6 +183,7 @@ def _save_draft_state(
     submit_status: str | None = None,
     submit_run_id: str | None = None,
     submit_error: str | None = None,
+    ai_enhancements_enabled: bool | None = None,
 ) -> None:
     existing = (
         get_draft_execute(
@@ -237,6 +246,11 @@ def _save_draft_state(
             else _optional_str_field(existing, "submit_error")
         ),
         require_lifecycle_columns=True,
+        ai_enhancements_enabled=(
+            ai_enhancements_enabled
+            if isinstance(ai_enhancements_enabled, bool)
+            else _draft_ai_enhancements_enabled(existing)
+        ),
         revision=int(existing.get("revision") or 1),
         products=products if products is not None else _draft_products(existing),
     )
@@ -285,6 +299,11 @@ class OffloadWorker:
         import_mode = _optional_str(payload.get("import_mode")) or "auto"
         auto_submit = _parse_bool(payload.get("auto_submit"))
         requested_submit_run_id = _optional_str(payload.get("submit_run_id"))
+        enable_ai_enhancements = (
+            _parse_bool(payload.get("enable_ai_enhancements"))
+            if "enable_ai_enhancements" in payload
+            else True
+        )
 
         if not file_id:
             raise RuntimeError("Document import offload job missing file_id")
@@ -313,6 +332,7 @@ class OffloadWorker:
                 extraction_status="running",
                 extraction_run_id=run_id,
                 extraction_error=None,
+                ai_enhancements_enabled=enable_ai_enhancements,
             )
         if run_id:
             self.ctx.supabase.runs.create_or_update_run(
@@ -340,6 +360,7 @@ class OffloadWorker:
             shop_domain=shop_domain,
             manage_lifecycle=False,
             source_file_id=file_id,
+            enable_ai_enhancements=enable_ai_enhancements,
         )
         result_payload = result.get("result") if isinstance(result, dict) else None
 
@@ -435,6 +456,7 @@ class OffloadWorker:
                                 "products_json": None,
                                 "shop_access_token": None,
                                 "has_shop_access_token": False,
+                                "enable_ai_enhancements": enable_ai_enhancements,
                             },
                         },
                         require_persistent_queue=True,
@@ -494,6 +516,14 @@ class OffloadWorker:
             revision
         ):
             raise RuntimeError("REVIEW_REQUIRED: draft changed after approval")
+        payload_ai_enhancements_enabled = (
+            _parse_bool(payload.get("enable_ai_enhancements"))
+            if "enable_ai_enhancements" in payload
+            else True
+        )
+        ai_enhancements_enabled = _draft_ai_enhancements_enabled(
+            current_draft, payload_ai_enhancements_enabled
+        )
         is_v2_approval = isinstance(plan.get("approved_selection"), list)
         selected = [
             item.get("execution_proposed") if is_v2_approval else item.get("proposed")
@@ -558,6 +588,7 @@ class OffloadWorker:
             document_name=document_name,
             shop_domain=shop_domain,
             shop_access_token=shop_access_token,
+            ai_enhancements_enabled=ai_enhancements_enabled,
         )
         submitted_result_id = result.get("submitted_id") if isinstance(result, dict) else None
         if isinstance(submitted_result_id, str) and submitted_result_id:

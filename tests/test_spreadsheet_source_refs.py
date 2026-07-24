@@ -1,4 +1,5 @@
 import io
+from pathlib import Path
 
 from openpyxl import Workbook
 
@@ -68,6 +69,67 @@ def test_unique_sku_selects_correct_row_when_title_is_duplicated():
     assert {(ref["field"], ref["cell"]) for ref in products[0]["source_refs"]} == {
         ("title", "A3"), ("vendor", "B3"), ("sku", "C3"), ("price", "D3")
     }
+
+
+def test_keyboard_template_resolves_every_variant_continuation_cell_and_option_roles():
+    workbook = (
+        Path(__file__).resolve().parents[2]
+        / "generated_shopify_samples/shopify_sample_products_keyboard.xlsx"
+    ).read_bytes()
+    products = [{
+        "handle": "orbit-mechanical-keyboard",
+        "title": "Orbit Mechanical Keyboard",
+        "body_html": "<p>Compact 75% mechanical keyboard with hot-swappable switches.</p>",
+        "vendor": "Orbit Works",
+        "product_category": "Electronics > Computers > Computer Peripherals > Keyboards",
+        "product_type": "Keyboards",
+        "tags": ["mechanical", "usb-c", "desktop"],
+        "published": True,
+        "image_src": "https://cdn.example.com/orbit-mechanical-keyboard.jpg",
+        "image_position": 1,
+        "image_alt_text": "Orbit compact mechanical keyboard",
+        "seo_title": "Orbit Mechanical Keyboard",
+        "seo_description": "Orbit Mechanical Keyboard for Shopify extraction testing.",
+        "google_shopping_mpn": "ORBIT75-TAC",
+        "options": [
+            {"name": "Switch", "values": ["Tactile", "Linear"]},
+            {"name": "Layout", "values": ["US"]},
+        ],
+        "variants": [
+            {
+                "option1": "Tactile", "option2": "US", "sku": "ORBIT-KB-TAC-US",
+                "grams": 890, "inventory_tracker": "shopify", "inventory_quantity": 13,
+                "inventory_policy": "deny", "fulfillment_service": "manual", "price": 119,
+                "requires_shipping": True, "taxable": True, "cost_per_item": 58,
+                "variant_weight_unit": "g",
+            },
+            {
+                "option1": "Linear", "option2": "US", "sku": "ORBIT-KB-LIN-US",
+                "grams": 890, "inventory_tracker": "shopify", "inventory_quantity": 8,
+                "inventory_policy": "deny", "fulfillment_service": "manual", "price": 119,
+                "requires_shipping": True, "taxable": True, "cost_per_item": 58,
+                "variant_weight_unit": "g",
+            },
+        ],
+    }]
+
+    enrich_spreadsheet_source_refs(products, workbook, "keyboard.xlsx", "keyboard-file")
+    refs = products[0]["source_refs"]
+    cells_by_path = {(ref["value_path"], ref.get("cell")) for ref in refs}
+    linear = "variant[switch-linear-layout-us]"
+    assert {
+        (f"{linear}.sku", "O3"),
+        (f"{linear}.price", "U3"),
+        (f"{linear}.inventoryItem.cost", "AV3"),
+        (f"{linear}.inventory_quantity", "R3"),
+        (f"{linear}.fulfillment_service", "T3"),
+    } <= cells_by_path
+    assert {
+        ("option[switch].values", "I2", "label"),
+        ("option[switch].values", "J2", "value"),
+        ("option[switch].values", "I3", "label"),
+        ("option[switch].values", "J3", "value"),
+    } <= {(ref["value_path"], ref.get("cell"), ref.get("evidence_role")) for ref in refs}
 
 
 def test_variants_range_emits_exact_refs_for_every_variant():

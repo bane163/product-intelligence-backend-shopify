@@ -20,11 +20,16 @@ from ai.models import ProductsList
 from app_context import AppContext, get_ctx
 from application.use_cases.files.save_file import execute as save_file
 from application.domain.shopify_mutation_plan import (
+    OptionValueEditError,
     _normalized_path_part,
     _review_row as _domain_review_row,
     _schema_from_product,
+    _unique_variant_target,
     _variant_subject,
     _variants,
+    apply_option_value_operation,
+    build_review_plan_item,
+    normalize_review_plan_rows,
 )
 from .mutation_plans import REVIEW_REQUIRED, UNSUPPORTED_REVIEW_CONTRACT, create_mutation_plan
 from .utils import require_authenticated_shop_domain
@@ -32,7 +37,12 @@ from .utils import require_authenticated_shop_domain
 router = APIRouter()
 LOG = logging.getLogger(__name__)
 REVIEW_FIELD_VALIDATION_FAILED = "REVIEW_FIELD_VALIDATION_FAILED"
-CONTENT_HISTORY_OPERATIONS = {"value_edit", "value_revert", "selection"}
+CONTENT_HISTORY_OPERATIONS = {
+    "value_edit",
+    "value_revert",
+    "option_values_edit",
+    "selection",
+}
 HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -365,13 +375,12 @@ def _set_product_value(
             raise HTTPException(status_code=422, detail=f"Grid editing is not supported for {path}")
         product[resolved] = value
     elif scope in {"variant", "inventory"}:
-        option_names = _schema_from_product(product)
-        target = next(
-            (variant for variant in _variants(product) if _variant_subject(variant, option_names) == subject),
-            None,
-        )
+        target = _unique_variant_target(product, row)
         if target is None:
-            raise HTTPException(status_code=422, detail=f"Variant is unavailable for {path}")
+            raise HTTPException(
+                status_code=422,
+                detail=f"Variant target is unavailable or ambiguous for {path}",
+            )
         aliases = {
             "compareAtPrice": "compare_at_price",
             "inventoryPolicy": "inventory_policy",
@@ -412,12 +421,88 @@ def _set_product_value(
         origins[path] = origin
 
 
-def _snapshot_working_plan(plan: dict[str, Any]) -> dict[str, Any]:
+def _set_item_proposed_value(
+    item: dict[str, Any], row: dict[str, Any], value: Any
+) -> None:
+    proposed = item.get("proposed")
+    if not isinstance(proposed, dict):
+        return
+    scope = str(row.get("scope") or "product")
+    field = str(row.get("field") or "")
+    subject = str(row.get("subject") or "")
+
+    def set_path(target: dict[str, Any], path: str, next_value: Any) -> None:
+        parts = path.split(".")
+        container = target
+        for part in parts[:-1]:
+            child = container.get(part)
+            if not isinstance(child, dict):
+                child = {}
+                container[part] = child
+            container = child
+        container[parts[-1]] = deepcopy(next_value)
+
+    if scope == "product":
+        set_path(proposed, str(row.get("value_path") or field), value)
+        return
+    if scope in {"variant", "inventory"}:
+        target = _unique_variant_target(proposed, row)
+        if isinstance(target, dict):
+            set_path(target, field, value)
+        return
+    if scope == "metafield":
+        namespace, _, key = subject.partition(".")
+        metafields = (
+            proposed.get("metafields")
+            if isinstance(proposed.get("metafields"), list)
+            else []
+        )
+        target = next(
+            (
+                metafield
+                for metafield in metafields
+                if isinstance(metafield, dict)
+                and metafield.get("namespace") == namespace
+                and metafield.get("key") == key
+            ),
+            None,
+        )
+        if isinstance(target, dict):
+            set_path(target, field, value)
+
+
+def _snapshot_working_plan(
+    plan: dict[str, Any], products: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Freeze the proposal and provenance that per-value revert must restore."""
     working_plan = deepcopy(plan)
     for item in working_plan.get("items", []):
         if not isinstance(item, dict):
             continue
+        source_index = item.get("source_index")
+        if (
+            not isinstance(item.get("proposed"), dict)
+            and isinstance(source_index, int)
+            and isinstance(products, list)
+            and 0 <= source_index < len(products)
+        ):
+            proposed = deepcopy(products[source_index])
+            raw_options = proposed.get("options")
+            if isinstance(raw_options, list):
+                proposed["productOptions"] = [
+                    {
+                        **deepcopy(option),
+                        "values": [
+                            deepcopy(value)
+                            if isinstance(value, dict)
+                            else {"name": value}
+                            for value in option.get("values", [])
+                        ],
+                    }
+                    for option in raw_options
+                    if isinstance(option, dict)
+                ]
+            item["proposed"] = proposed
         for row in item.get("review_changes", []):
             if not isinstance(row, dict):
                 continue
@@ -441,7 +526,13 @@ def _snapshot_working_plan(plan: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(row.get("source_ref"), dict)
                 else None,
             )
-    return working_plan
+            row.setdefault(
+                "original_source_refs",
+                deepcopy(row.get("source_refs"))
+                if isinstance(row.get("source_refs"), list)
+                else [],
+            )
+    return normalize_review_plan_rows(working_plan)
 
 
 def _working_rows(
@@ -455,6 +546,111 @@ def _working_rows(
             if isinstance(row, dict) and row.get("change_id"):
                 rows[str(row["change_id"])] = (int(item["source_index"]), row)
     return rows
+
+
+def _working_row_match(
+    plan: dict[str, Any], change_id: str
+) -> tuple[int, dict[str, Any], dict[str, Any]]:
+    matches: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for item in plan.get("items", []):
+        if not isinstance(item, dict) or not isinstance(item.get("source_index"), int):
+            continue
+        for row in item.get("review_changes", []):
+            if (
+                isinstance(row, dict)
+                and str(row.get("change_id") or "") == change_id
+            ):
+                matches.append((int(item["source_index"]), item, row))
+    if not matches:
+        raise _validation_failure(
+            [
+                {
+                    "change_id": change_id,
+                    "value_path": "",
+                    "code": "REVIEW_TARGET_MISSING",
+                    "message": "This review field is no longer available. Refresh and try again.",
+                }
+            ]
+        )
+    if len(matches) != 1:
+        raise _validation_failure(
+            [
+                {
+                    "change_id": change_id,
+                    "value_path": "",
+                    "code": "AMBIGUOUS_REVIEW_TARGET",
+                    "message": "This review field is ambiguous. Refresh before editing it.",
+                }
+            ]
+        )
+    return matches[0]
+
+
+def _require_editable_row(
+    row: dict[str, Any], *, option_values: bool = False
+) -> None:
+    if row.get("editable") is not True:
+        raise _validation_failure(
+            [
+                _field_error(
+                    row,
+                    "REVIEW_FIELD_READ_ONLY",
+                    "This review field is read-only or no longer available.",
+                )
+            ]
+        )
+    if option_values and not (
+        row.get("scope") == "option" and row.get("field") == "values"
+    ):
+        raise _validation_failure(
+            [
+                _field_error(
+                    row,
+                    "INVALID_OPTION_TARGET",
+                    "This operation can only edit option values.",
+                )
+            ]
+        )
+
+
+def _replace_working_item(
+    working_plan: dict[str, Any], item_id: str, replacement: dict[str, Any]
+) -> None:
+    for index, item in enumerate(working_plan.get("items", [])):
+        if isinstance(item, dict) and str(item.get("item_id") or "") == item_id:
+            working_plan["items"][index] = deepcopy(replacement)
+            return
+    raise HTTPException(status_code=409, detail="History item is unavailable")
+
+
+def _structural_state(
+    product: dict[str, Any], item: dict[str, Any]
+) -> dict[str, Any]:
+    return {"product": deepcopy(product), "item": deepcopy(item)}
+
+
+def _restore_structural_state(
+    products: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    entry: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    product_index = entry.get("product_index")
+    product = state.get("product")
+    item = state.get("item")
+    if (
+        not isinstance(product_index, int)
+        or isinstance(product_index, bool)
+        or product_index < 0
+        or product_index >= len(products)
+        or not isinstance(product, dict)
+        or not isinstance(item, dict)
+    ):
+        raise HTTPException(status_code=409, detail="Option history is invalid")
+    products[product_index] = deepcopy(product)
+    _replace_working_item(
+        working_plan, str(entry.get("item_id") or ""), deepcopy(item)
+    )
 
 
 def _working_items(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -583,22 +779,45 @@ def _apply_value_operations(
     history: list[dict[str, Any]],
     history_cursor: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    rows = _working_rows(working_plan)
     appended: list[dict[str, Any]] = []
     for operation in operations:
         operation_type = operation.get("operation") or operation.get("type")
         if operation_type not in {"value_edit", "value_revert"}:
             raise HTTPException(status_code=400, detail="operation must be value_edit or value_revert")
         change_id = str(operation.get("change_id") or "")
-        match = rows.get(change_id)
-        if not match:
-            raise HTTPException(status_code=422, detail=f"Unknown change_id: {change_id}")
-        product_index, row = match
+        product_index, _item, row = _working_row_match(working_plan, change_id)
         path = str(operation.get("value_path") or "")
         if path != row.get("value_path"):
-            raise HTTPException(status_code=422, detail=f"value_path does not match {change_id}")
+            raise _validation_failure(
+                [
+                    _field_error(
+                        row,
+                        "STALE_VALUE_PATH",
+                        "This review field changed. Refresh before editing it.",
+                    )
+                ]
+            )
         if product_index >= len(products):
-            raise HTTPException(status_code=422, detail="Change targets a missing product")
+            raise _validation_failure(
+                [
+                    _field_error(
+                        row,
+                        "REVIEW_TARGET_MISSING",
+                        "This product is no longer available.",
+                    )
+                ]
+            )
+        _require_editable_row(row)
+        if row.get("scope") == "option" and row.get("field") == "values":
+            raise _validation_failure(
+                [
+                    _field_error(
+                        row,
+                        "OPTION_VALUES_OPERATION_REQUIRED",
+                        "Use an option-value action to edit this field.",
+                    )
+                ]
+            )
 
         before = {
             "proposed": deepcopy(row.get("proposed")),
@@ -606,6 +825,9 @@ def _apply_value_operations(
             "source_ref": deepcopy(row.get("source_ref"))
             if isinstance(row.get("source_ref"), dict)
             else None,
+            "source_refs": deepcopy(row.get("source_refs"))
+            if isinstance(row.get("source_refs"), list)
+            else [],
         }
         option_renames: dict[str, str] = {}
         if operation_type == "value_revert":
@@ -614,6 +836,7 @@ def _apply_value_operations(
                 option_renames = _option_rename_map(row, value)
             origin = str(row.get("original_origin") or "unknown")
             source_ref = row.get("original_source_ref")
+            source_refs = row.get("original_source_refs")
         else:
             try:
                 value = _canonical_review_value(row, operation.get("value"))
@@ -625,6 +848,12 @@ def _apply_value_operations(
                 ]) from None
             origin = "merchant_edited"
             source_ref = None
+            source_refs = [
+                deepcopy(ref)
+                for ref in row.get("source_refs", [])
+                if isinstance(ref, dict)
+                and ref.get("evidence_role", "value") in {"label", "key"}
+            ]
 
         try:
             _set_product_value(products[product_index], row, value, origin=origin)
@@ -632,6 +861,29 @@ def _apply_value_operations(
             raise _validation_failure([
                 _field_error(row, "INVALID_OPTION_VALUES", str(exc))
             ]) from None
+        except HTTPException as exc:
+            if exc.status_code != 422:
+                raise
+            raise _validation_failure(
+                [
+                    _field_error(
+                        row,
+                        "REVIEW_TARGET_MISSING",
+                        "This review field is no longer available. Refresh and try again.",
+                    )
+                ]
+            ) from None
+        item = next(
+            (
+                candidate
+                for candidate in working_plan.get("items", [])
+                if isinstance(candidate, dict)
+                and candidate.get("source_index") == product_index
+            ),
+            None,
+        )
+        if isinstance(item, dict):
+            _set_item_proposed_value(item, row, value)
         if option_renames:
             _cascade_plan_variant_subjects(
                 working_plan, product_index, str(row.get("subject") or ""), option_renames
@@ -642,12 +894,19 @@ def _apply_value_operations(
             row["source_ref"] = deepcopy(source_ref)
         else:
             row.pop("source_ref", None)
+        if isinstance(source_refs, list) and source_refs:
+            row["source_refs"] = deepcopy(source_refs)
+        else:
+            row.pop("source_refs", None)
         after = {
             "proposed": deepcopy(row.get("proposed")),
             "origin": row["origin"],
             "source_ref": deepcopy(row.get("source_ref"))
             if isinstance(row.get("source_ref"), dict)
             else None,
+            "source_refs": deepcopy(row.get("source_refs"))
+            if isinstance(row.get("source_refs"), list)
+            else [],
         }
         appended.append(_history_entry(
             str(operation_type),
@@ -660,6 +919,296 @@ def _apply_value_operations(
     # A fresh operation after undo replaces the abandoned redo branch.
     durable_history = deepcopy(history[:history_cursor])
     durable_history.extend(appended)
+    return products, durable_history, len(durable_history)
+
+
+def _transform_option_state(
+    product: dict[str, Any],
+    item: dict[str, Any],
+    row: dict[str, Any],
+    operation: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    action = str(operation.get("action") or "")
+    edited_product = apply_option_value_operation(
+        product,
+        option_name=str(row.get("subject") or ""),
+        action=action,
+        from_value=operation.get("from"),
+        to_value=operation.get("to"),
+        value=operation.get("value"),
+        values=operation.get("values"),
+    )
+    edited_proposed = apply_option_value_operation(
+        item.get("proposed") if isinstance(item.get("proposed"), dict) else {},
+        option_name=str(row.get("subject") or ""),
+        action=action,
+        from_value=operation.get("from"),
+        to_value=operation.get("to"),
+        value=operation.get("value"),
+        values=operation.get("values"),
+    )
+    origin_maps = [
+        candidate
+        for candidate in (
+            edited_product.get("value_origins"),
+            edited_product.get("_value_origins"),
+        )
+        if isinstance(candidate, dict)
+    ]
+    if not origin_maps:
+        edited_product["value_origins"] = {}
+        origin_maps = [edited_product["value_origins"]]
+    option_path = (
+        f"option[{_normalized_path_part(row.get('subject'))}].values"
+    )
+    for origins in origin_maps:
+        origins[option_path] = "merchant_edited"
+    variant_identity_rename: tuple[int, str, str] | None = None
+    if action == "rename":
+        old_value = str(operation.get("from") or "")
+        new_value = str(operation.get("to") or "")
+        option_name = str(row.get("subject") or "")
+        option_names = _schema_from_product(
+            item.get("proposed")
+            if isinstance(item.get("proposed"), dict)
+            else {}
+        )
+        option_index = next(
+            (
+                index
+                for index, name in enumerate(option_names)
+                if name.casefold() == option_name.casefold()
+            ),
+            None,
+        )
+        if option_index is not None:
+            variant_identity_rename = (
+                option_index,
+                new_value.casefold(),
+                old_value.casefold(),
+            )
+    rebuilt = build_review_plan_item(
+        item_id=str(item.get("item_id") or ""),
+        currency_code=str(item.get("currency_code") or "USD"),
+        source_index=int(item.get("source_index") or 0),
+        source_product=edited_product,
+        live_snapshot=item.get("live_snapshot")
+        if isinstance(item.get("live_snapshot"), dict)
+        else None,
+        proposed=edited_proposed,
+        operation=str(item.get("operation") or "update"),
+        blockers=item.get("blockers")
+        if isinstance(item.get("blockers"), list)
+        else [],
+        unapplied=item.get("unapplied")
+        if isinstance(item.get("unapplied"), list)
+        else [],
+        prior_item=item,
+        variant_identity_rename=variant_identity_rename,
+    )
+    return edited_product, rebuilt
+
+
+def _apply_option_value_operation(
+    products: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    operation: dict[str, Any],
+    history: list[dict[str, Any]],
+    history_cursor: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    change_id = str(operation.get("change_id") or "")
+    product_index, item, row = _working_row_match(working_plan, change_id)
+    path = str(operation.get("value_path") or "")
+    if path != str(row.get("value_path") or ""):
+        raise _validation_failure(
+            [
+                _field_error(
+                    row,
+                    "STALE_VALUE_PATH",
+                    "This review field changed. Refresh before editing it.",
+                )
+            ]
+        )
+    _require_editable_row(row, option_values=True)
+    if product_index >= len(products):
+        raise _validation_failure(
+            [
+                _field_error(
+                    row,
+                    "REVIEW_TARGET_MISSING",
+                    "This product is no longer available.",
+                )
+            ]
+        )
+    action = str(operation.get("action") or "")
+    before = _structural_state(products[product_index], item)
+    option_bases = working_plan.setdefault("_option_edit_bases", {})
+    if isinstance(option_bases, dict) and change_id not in option_bases:
+        option_bases[change_id] = deepcopy(before)
+    option_initials = working_plan.setdefault("_option_edit_initials", {})
+    item_id = str(item.get("item_id") or "")
+    if isinstance(option_initials, dict) and item_id not in option_initials:
+        option_initials[item_id] = deepcopy(before)
+    try:
+        edited_product, rebuilt = _transform_option_state(
+            products[product_index], item, row, operation
+        )
+    except OptionValueEditError as exc:
+        raise _validation_failure(
+            [_field_error(row, exc.code, str(exc))]
+        ) from None
+    products[product_index] = edited_product
+    _replace_working_item(
+        working_plan, str(item.get("item_id") or ""), rebuilt
+    )
+    after = _structural_state(edited_product, rebuilt)
+    entry = _history_entry(
+        "option_values_edit",
+        before,
+        after,
+        change_id=change_id,
+        value_path=path,
+        item_id=str(item.get("item_id") or ""),
+        product_index=product_index,
+        action=action,
+        option_subject=str(row.get("subject") or ""),
+        payload=deepcopy(operation),
+    )
+    durable_history = deepcopy(history[:history_cursor])
+    durable_history.append(entry)
+    return products, durable_history, len(durable_history)
+
+
+def _apply_option_value_revert(
+    products: list[dict[str, Any]],
+    working_plan: dict[str, Any],
+    operation: dict[str, Any],
+    history: list[dict[str, Any]],
+    history_cursor: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    change_id = str(operation.get("change_id") or "")
+    product_index, item, row = _working_row_match(working_plan, change_id)
+    path = str(operation.get("value_path") or "")
+    if path != str(row.get("value_path") or ""):
+        raise _validation_failure(
+            [_field_error(row, "STALE_VALUE_PATH", "Refresh before reverting this field.")]
+        )
+    _require_editable_row(row, option_values=True)
+    bases = working_plan.get("_option_edit_bases")
+    base = bases.get(change_id) if isinstance(bases, dict) else None
+    if not isinstance(base, dict):
+        return products, deepcopy(history), history_cursor
+    before = _structural_state(products[product_index], item)
+    current_selection = _selection_state(item)
+    item_id = str(item.get("item_id") or "")
+    initials = working_plan.get("_option_edit_initials")
+    initial = initials.get(item_id) if isinstance(initials, dict) else None
+    if not isinstance(initial, dict):
+        initial = base
+    synthetic = {
+        "product_index": product_index,
+        "item_id": item_id,
+    }
+    _restore_structural_state(products, working_plan, synthetic, initial)
+    target_subject = str(row.get("subject") or "")
+    active_option_edits: list[dict[str, Any]] = []
+    for entry in history[:history_cursor]:
+        if (
+            not isinstance(entry, dict)
+            or str(entry.get("item_id") or "") != item_id
+        ):
+            continue
+        entry_subject = str(entry.get("option_subject") or "")
+        if entry.get("operation") == "option_values_edit":
+            active_option_edits.append(entry)
+        elif (
+            entry.get("operation") == "value_revert"
+            and entry.get("structural")
+            and entry_subject
+        ):
+            active_option_edits = [
+                candidate
+                for candidate in active_option_edits
+                if str(candidate.get("option_subject") or "").casefold()
+                != entry_subject.casefold()
+            ]
+    active_option_edits = [
+        entry
+        for entry in active_option_edits
+        if str(entry.get("option_subject") or "").casefold()
+        != target_subject.casefold()
+    ]
+    for option_entry in active_option_edits:
+        payload = option_entry.get("payload")
+        restored_item = _working_items(working_plan).get(item_id)
+        if not isinstance(payload, dict) or not isinstance(restored_item, dict):
+            continue
+        other_subject = str(option_entry.get("option_subject") or "")
+        other_row = next(
+            (
+                candidate
+                for candidate in restored_item.get("review_changes", [])
+                if isinstance(candidate, dict)
+                and candidate.get("scope") == "option"
+                and candidate.get("field") == "values"
+                and str(candidate.get("subject") or "").casefold()
+                == other_subject.casefold()
+            ),
+            None,
+        )
+        if not isinstance(other_row, dict):
+            continue
+        try:
+            replayed_product, replayed_item = _transform_option_state(
+                products[product_index],
+                restored_item,
+                other_row,
+                payload,
+            )
+        except OptionValueEditError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Option history cannot be replayed: {exc}",
+            ) from None
+        products[product_index] = replayed_product
+        _replace_working_item(working_plan, item_id, replayed_item)
+    for later in history[:history_cursor]:
+        if not isinstance(later, dict) or later.get("operation") not in {
+            "value_edit",
+            "value_revert",
+        }:
+            continue
+        if later.get("structural"):
+            continue
+        try:
+            _replay_history_entry(
+                products,
+                working_plan,
+                {},
+                later,
+                direction="after",
+            )
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            # A scalar row belonging only to a reverted option no longer exists.
+            continue
+    restored_item = _working_items(working_plan)[item_id]
+    _set_selection_state(restored_item, current_selection)
+    after = _structural_state(products[product_index], restored_item)
+    entry = _history_entry(
+        "value_revert",
+        before,
+        after,
+        change_id=change_id,
+        value_path=path,
+        item_id=item_id,
+        product_index=product_index,
+        structural=True,
+        option_subject=target_subject,
+    )
+    durable_history = deepcopy(history[:history_cursor])
+    durable_history.append(entry)
     return products, durable_history, len(durable_history)
 
 
@@ -698,6 +1247,28 @@ def _apply_ui_operation(
             )
         if selected and item.get("selectable") is False:
             raise HTTPException(status_code=422, detail=f"Item is not selectable: {item_id}")
+        rows = [row for row in item.get("review_changes", []) if isinstance(row, dict)]
+        requested_ids = set(included_ids)
+        required_ids = {
+            str(row.get("change_id"))
+            for row in rows
+            if row.get("required") and row.get("disposition") in {None, "applicable"}
+        }
+        disallowed_ids = {
+            str(row.get("change_id"))
+            for row in rows
+            if row.get("disposition") in {"blocked", "deferred"}
+        }
+        if selected and not required_ids.issubset(requested_ids):
+            raise HTTPException(
+                status_code=422,
+                detail="Required or structurally dependent changes cannot be excluded",
+            )
+        if requested_ids & disallowed_ids:
+            raise HTTPException(
+                status_code=422,
+                detail="Blocked or deferred changes cannot be included",
+            )
         before = _selection_state(item)
         after = {"selected": selected, "included_change_ids": included_ids}
         _set_selection_state(item, after)
@@ -760,6 +1331,17 @@ def _set_row_history_state(
     if row.get("scope") == "option" and row.get("field") == "values" and isinstance(proposed, list):
         option_renames = _option_rename_map(row, proposed)
     _set_product_value(products[product_index], row, proposed, origin=origin)
+    item = next(
+        (
+            candidate
+            for candidate in working_plan.get("items", [])
+            if isinstance(candidate, dict)
+            and candidate.get("source_index") == product_index
+        ),
+        None,
+    )
+    if isinstance(item, dict):
+        _set_item_proposed_value(item, row, proposed)
     if option_renames:
         _cascade_plan_variant_subjects(
             working_plan, product_index, str(row.get("subject") or ""), option_renames
@@ -771,6 +1353,11 @@ def _set_row_history_state(
         row["source_ref"] = deepcopy(source_ref)
     else:
         row.pop("source_ref", None)
+    source_refs = state.get("source_refs")
+    if isinstance(source_refs, list) and source_refs:
+        row["source_refs"] = deepcopy(source_refs)
+    else:
+        row.pop("source_refs", None)
 
 
 def _replay_history_entry(
@@ -785,7 +1372,13 @@ def _replay_history_entry(
     if not isinstance(state, (dict, list, str)):
         raise HTTPException(status_code=409, detail="History entry is not replayable")
     operation = entry.get("operation")
-    if operation in {"value_edit", "value_revert"}:
+    if operation == "option_values_edit" or (
+        operation == "value_revert" and entry.get("structural")
+    ):
+        if not isinstance(state, dict):
+            raise HTTPException(status_code=409, detail="Option history is invalid")
+        _restore_structural_state(products, working_plan, entry, state)
+    elif operation in {"value_edit", "value_revert"}:
         if not isinstance(state, dict):
             raise HTTPException(status_code=409, detail="Value history is invalid")
         _set_row_history_state(products, working_plan, entry, state)
@@ -809,7 +1402,40 @@ def _apply_operations(
     durable_history = deepcopy(history)
     for operation in operations:
         operation_type = operation.get("operation") or operation.get("type")
-        if operation_type in {"value_edit", "value_revert"}:
+        if operation_type == "option_values_edit":
+            products, durable_history, history_cursor = (
+                _apply_option_value_operation(
+                    products,
+                    working_plan,
+                    operation,
+                    durable_history,
+                    history_cursor,
+                )
+            )
+        elif operation_type == "value_revert":
+            change_id = str(operation.get("change_id") or "")
+            _product_index, _item, row = _working_row_match(
+                working_plan, change_id
+            )
+            if row.get("scope") == "option" and row.get("field") == "values":
+                products, durable_history, history_cursor = (
+                    _apply_option_value_revert(
+                        products,
+                        working_plan,
+                        operation,
+                        durable_history,
+                        history_cursor,
+                    )
+                )
+            else:
+                products, durable_history, history_cursor = _apply_value_operations(
+                    products,
+                    working_plan,
+                    [operation],
+                    durable_history,
+                    history_cursor,
+                )
+        elif operation_type == "value_edit":
             products, durable_history, history_cursor = _apply_value_operations(
                 products,
                 working_plan,
@@ -910,7 +1536,9 @@ async def create_review_edit_session(
         "base_draft_revision": current_revision,
         "edit_revision": 1,
         "pending_products": products,
-        "working_plan": _snapshot_working_plan(plan) if isinstance(plan, dict) else {},
+        "working_plan": _snapshot_working_plan(plan, products)
+        if isinstance(plan, dict)
+        else {},
         "base_plan_id": plan.get("plan_id") if isinstance(plan, dict) else None,
         "grid_state": {
             "filterValues": {"changes": "hide_deferred"},
@@ -945,18 +1573,56 @@ async def patch_review_edit_session(
     expected = payload.get("expected_edit_revision")
     current = int(session.get("edit_revision") or 1)
     if not isinstance(expected, int) or expected != current:
+        raw_operations: list[Any] = []
+        if isinstance(payload.get("operation"), dict):
+            raw_operations = [payload["operation"]]
+        elif isinstance(payload.get("operations"), list):
+            raw_operations = payload["operations"]
+        structural = next(
+            (
+                operation
+                for operation in raw_operations
+                if isinstance(operation, dict)
+                and (operation.get("type") or operation.get("operation"))
+                == "option_values_edit"
+            ),
+            None,
+        )
+        if isinstance(structural, dict):
+            change_id = str(structural.get("change_id") or "")
+            plan = (
+                session.get("working_plan")
+                if isinstance(session.get("working_plan"), dict)
+                else {}
+            )
+            try:
+                _product_index, _item, row = _working_row_match(plan, change_id)
+            except HTTPException:
+                row = {
+                    "change_id": change_id,
+                    "value_path": str(structural.get("value_path") or ""),
+                }
+            raise _validation_failure(
+                [
+                    _field_error(
+                        row,
+                        "STALE_EDIT_REVISION",
+                        "This review changed. Refresh before editing option values.",
+                    )
+                ]
+            )
         raise _conflict("Edit revision is stale")
     latest_plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
     if not isinstance(latest_plan, dict):
         raise _conflict("Mutation plan is missing")
     if latest_plan.get("review_contract_version") != 2:
         raise HTTPException(status_code=409, detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before editing"})
+    pending = _products({"products": session.get("pending_products")})
     working_plan = session.get("working_plan")
     if not isinstance(working_plan, dict) or not working_plan.get("items"):
-        working_plan = _snapshot_working_plan(latest_plan)
+        working_plan = _snapshot_working_plan(latest_plan, pending)
     else:
-        working_plan = _snapshot_working_plan(working_plan)
-    pending = _products({"products": session.get("pending_products")})
+        working_plan = _snapshot_working_plan(working_plan, pending)
     operations = _operation_payloads(payload)
     history = session.get("history") if isinstance(session.get("history"), list) else []
     history_cursor = session.get("history_cursor")
@@ -1151,6 +1817,8 @@ async def reset_review_edit_session(
         _replay_history_entry(
             pending, working_plan, grid_state, entry, direction="before"
         )
+    working_plan.pop("_option_edit_bases", None)
+    working_plan.pop("_option_edit_initials", None)
     saved = _save_history_action(
         session,
         current,
@@ -1265,6 +1933,56 @@ async def apply_review_edit_session(
     plan_response = await create_mutation_plan(draft_id=draft_id, request=request, ctx=ctx)
     rebuilt_plan = plan_response["plan"]
     if session.get("surface") == "grid" and isinstance(session.get("working_plan"), dict):
+        working_plan = session["working_plan"]
+        bases = working_plan.get("_option_edit_bases")
+        affected_item_ids = {
+            str(state.get("item", {}).get("item_id") or "")
+            for state in bases.values()
+            if isinstance(bases, dict)
+            and isinstance(state, dict)
+            and isinstance(state.get("item"), dict)
+        } if isinstance(bases, dict) else set()
+        working_by_source = {
+            int(item["source_index"]): item
+            for item in working_plan.get("items", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("source_index"), int)
+            and str(item.get("item_id") or "") in affected_item_ids
+        }
+        for index, fresh_item in enumerate(rebuilt_plan.get("items", [])):
+            if (
+                not isinstance(fresh_item, dict)
+                or not isinstance(fresh_item.get("source_index"), int)
+            ):
+                continue
+            source_index = int(fresh_item["source_index"])
+            structural_item = working_by_source.get(source_index)
+            if not isinstance(structural_item, dict) or source_index >= len(products):
+                continue
+            rebuilt_plan["items"][index] = build_review_plan_item(
+                item_id=str(fresh_item.get("item_id") or ""),
+                currency_code=str(
+                    fresh_item.get("currency_code")
+                    or rebuilt_plan.get("currency_code")
+                    or "USD"
+                ),
+                source_index=source_index,
+                source_product=products[source_index],
+                live_snapshot=fresh_item.get("live_snapshot")
+                if isinstance(fresh_item.get("live_snapshot"), dict)
+                else None,
+                proposed=structural_item.get("proposed")
+                if isinstance(structural_item.get("proposed"), dict)
+                else {},
+                operation=str(fresh_item.get("operation") or "update"),
+                blockers=structural_item.get("blockers")
+                if isinstance(structural_item.get("blockers"), list)
+                else [],
+                unapplied=structural_item.get("unapplied")
+                if isinstance(structural_item.get("unapplied"), list)
+                else [],
+                prior_item=structural_item,
+            )
         rebuilt_plan = _preserve_working_selection(rebuilt_plan, session["working_plan"])
         _service(ctx).save_mutation_plan(rebuilt_plan)
     applied = _service(ctx).save_review_edit_session({**session, "status": "applied", "updated_at": _now()})

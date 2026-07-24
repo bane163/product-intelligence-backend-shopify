@@ -1,9 +1,11 @@
 from application.domain.shopify_mutation_plan import (
     applicable_changes,
+    build_review_plan_item,
     canonical_product,
     merge_tags,
     merge_structured_product,
     materialize_execution_proposed,
+    normalize_review_plan_rows,
     preserve_blank_fields,
     review_changes,
     validate_product,
@@ -736,4 +738,174 @@ def test_review_matches_variant_id_before_options_omits_unchanged_and_reports_re
         and row["proposed"] is None
         and row["change_kind"] == "removed"
         for row in rows
+    )
+
+
+def test_review_row_presentation_hides_only_applicable_targetless_rows():
+    plan = normalize_review_plan_rows(
+        {
+            "review_contract_version": 2,
+            "items": [
+                {
+                    "proposed": {
+                        "title": "Planter",
+                        "productOptions": [
+                            {"name": "Size", "values": [{"name": "Small"}]}
+                        ],
+                        "variants": [],
+                    },
+                    "review_changes": [
+                        {
+                            "scope": "option",
+                            "subject": "Title",
+                            "field": "values",
+                            "disposition": "applicable",
+                            "required": True,
+                            "included": True,
+                        },
+                        {
+                            "scope": "variant",
+                            "subject": "Size: Rejected",
+                            "field": "price",
+                            "disposition": "blocked",
+                        },
+                        {
+                            "scope": "inventory",
+                            "subject": "Size: Small",
+                            "field": "inventory_quantity",
+                            "disposition": "deferred",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    hidden, blocked, deferred = plan["items"][0]["review_changes"]
+    assert hidden["presentation"] == "hidden"
+    assert hidden["editable"] is False
+    assert hidden["required"] is True
+    assert hidden["included"] is True
+    assert blocked["presentation"] == "merchant"
+    assert blocked["editable"] is False
+    assert deferred["presentation"] == "merchant"
+    assert deferred["editable"] is False
+
+
+def test_review_row_presentation_protects_technical_metafields_and_allows_merchant_values():
+    plan = normalize_review_plan_rows(
+        {
+            "review_contract_version": 2,
+            "items": [
+                {
+                    "proposed": {
+                        "metafields": [
+                            {
+                                "namespace": "extractor",
+                                "key": "inferred_option_candidates",
+                                "value": '{"confidence":0.92}',
+                                "type": "json",
+                            },
+                            {
+                                "namespace": "custom",
+                                "key": "details",
+                                "value": '{"material":"ceramic"}',
+                                "type": "json",
+                            },
+                        ]
+                    },
+                    "review_changes": [
+                        {
+                            "scope": "metafield",
+                            "subject": "extractor.inferred_option_candidates",
+                            "field": "value",
+                            "disposition": "applicable",
+                            "editable": True,
+                        },
+                        {
+                            "scope": "metafield",
+                            "subject": "extractor.inferred_option_candidates",
+                            "field": "type",
+                            "disposition": "applicable",
+                        },
+                        {
+                            "scope": "metafield",
+                            "subject": "custom.details",
+                            "field": "value",
+                            "disposition": "applicable",
+                        },
+                        {
+                            "scope": "metafield",
+                            "subject": "custom.details",
+                            "field": "type",
+                            "disposition": "applicable",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    extractor_value, extractor_type, merchant_value, merchant_type = (
+        plan["items"][0]["review_changes"]
+    )
+    assert (extractor_value["presentation"], extractor_value["editable"]) == (
+        "technical",
+        False,
+    )
+    assert (extractor_type["presentation"], extractor_type["editable"]) == (
+        "technical",
+        False,
+    )
+    assert (merchant_value["presentation"], merchant_value["editable"]) == (
+        "merchant",
+        True,
+    )
+    assert (merchant_type["presentation"], merchant_type["editable"]) == (
+        "technical",
+        False,
+    )
+
+
+def test_build_review_plan_item_is_pure_and_preserves_prior_optional_inclusion():
+    source = {"title": "New title", "vendor": "Optional vendor"}
+    live = {"id": "gid://shopify/Product/1", "title": "Old title", "vendor": "Old"}
+    proposed = {"id": "gid://shopify/Product/1", **source}
+    first = build_review_plan_item(
+        item_id="item-1",
+        currency_code="CAD",
+        source_index=3,
+        source_product=source,
+        live_snapshot=live,
+        proposed=proposed,
+        operation="update",
+    )
+    vendor = next(
+        row for row in first["review_changes"] if row["field"] == "vendor"
+    )
+    vendor["included"] = False
+
+    rebuilt = build_review_plan_item(
+        item_id="item-2",
+        currency_code="CAD",
+        source_index=3,
+        source_product=source,
+        live_snapshot=live,
+        proposed=proposed,
+        operation="update",
+        prior_item=first,
+    )
+
+    assert source == {"title": "New title", "vendor": "Optional vendor"}
+    assert live["title"] == "Old title"
+    assert proposed["title"] == "New title"
+    assert rebuilt["item_id"] == "item-2"
+    assert rebuilt["operation"] == "update"
+    assert rebuilt["selected"] is True
+    assert next(
+        row for row in rebuilt["review_changes"] if row["field"] == "vendor"
+    )["included"] is False
+    assert all(
+        row["presentation"] == "merchant" and row["editable"] is True
+        for row in rebuilt["review_changes"]
     )

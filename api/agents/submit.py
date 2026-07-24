@@ -51,6 +51,12 @@ def _draft_products(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
     return [item for item in raw_products if isinstance(item, dict)]
 
 
+def _draft_ai_enhancements_enabled(entry: dict[str, Any] | None) -> bool:
+    if isinstance(entry, dict) and isinstance(entry.get("ai_enhancements_enabled"), bool):
+        return entry["ai_enhancements_enabled"]
+    return True
+
+
 def _save_submit_draft_state(
     *,
     ctx: AppContext,
@@ -94,6 +100,7 @@ def _save_submit_draft_state(
         submit_run_id=submit_run_id,
         submit_error=submit_error,
         require_lifecycle_columns=True,
+        ai_enhancements_enabled=_draft_ai_enhancements_enabled(existing),
         revision=int(existing.get("revision") or 1),
         products=_draft_products(existing),
     )
@@ -272,6 +279,7 @@ async def submit_products_to_shopify(
                         "document_name": document_name,
                         "plan_id": plan_id,
                         "revision": revision,
+                        "enable_ai_enhancements": _draft_ai_enhancements_enabled(current_draft),
                     },
                 },
                 require_persistent_queue=True,
@@ -334,6 +342,7 @@ async def submit_products_to_shopify(
             document_name=document_name,
             shop_domain=resolved_shop_domain,
             shop_access_token=resolved_shop_access_token,
+            ai_enhancements_enabled=_draft_ai_enhancements_enabled(current_draft),
         )
         submitted_result_id = result.get("submitted_id") if isinstance(result, dict) else None
         if isinstance(submitted_result_id, str) and submitted_result_id:

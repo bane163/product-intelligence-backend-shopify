@@ -88,6 +88,87 @@ def _force_in_memory_storage(monkeypatch):
     )
 
 
+async def _post_approved_submit(
+    client: AsyncClient,
+    *,
+    data: dict[str, Any],
+    headers: dict[str, str] | None = None,
+):
+    """Translate legacy submit fixtures to the approved-plan contract."""
+    ctx = get_app_context()
+    service = ctx.services.supabase._service
+    tenant = str(
+        data.get("shop_domain")
+        or (headers or {}).get("x-shop-domain")
+        or TEST_SHOP_DOMAIN
+    ).lower()
+    draft_id = str(data.get("draft_id") or "") or None
+    products: list[dict[str, Any]] = []
+    raw_products = data.get("products_json")
+    if isinstance(raw_products, str) and raw_products.strip():
+        products = [item for item in json.loads(raw_products) if isinstance(item, dict)]
+    if draft_id:
+        draft = service.get_product_draft(draft_id, shop_domain=tenant)
+        if not isinstance(draft, dict):
+            return await client.post("/agents/submit-products", data=data, headers=headers)
+        if not products:
+            products = [item for item in draft.get("products", []) if isinstance(item, dict)]
+    submitted_id = str(data.get("submitted_id") or "") or None
+    if submitted_id and not products:
+        submitted = service.get_submitted_document(submitted_id, shop_domain=tenant)
+        if not isinstance(submitted, dict):
+            return await client.post("/agents/submit-products", data=data, headers=headers)
+        products = [item for item in submitted.get("products", []) if isinstance(item, dict)]
+    if not products:
+        return await client.post("/agents/submit-products", data=data, headers=headers)
+    if not draft_id:
+        draft_id = f"approved-test-draft-{uuid.uuid4()}"
+        service.save_product_draft(
+            draft_id=draft_id,
+            run_id=None,
+            import_mode=str(data.get("import_mode") or "auto"),
+            draft_name=str(data.get("document_name") or "Approved test draft"),
+            shop_domain=tenant,
+            products=products,
+        )
+    draft = service.get_product_draft(draft_id, shop_domain=tenant)
+    revision = int((draft or {}).get("revision") or 1)
+    plan_id = f"approved-test-plan-{uuid.uuid4()}"
+    service.save_mutation_plan({
+        "plan_id": plan_id,
+        "draft_id": draft_id,
+        "shop_domain": tenant,
+        "draft_revision": revision,
+        "status": "approved",
+        "items": [
+            {
+                "item_id": f"item-{index}",
+                "selected": True,
+                "blockers": [],
+                "proposed": product,
+            }
+            for index, product in enumerate(products)
+        ],
+    })
+    approved_data = {
+        "plan_id": plan_id,
+        "revision": str(revision),
+        "import_mode": str(data.get("import_mode") or "auto"),
+        "offload": data.get("offload", "false"),
+        "document_name": data.get("document_name"),
+    }
+    import shopify_session_store
+
+    original_get_token = shopify_session_store.get_offline_access_token
+    shopify_session_store.get_offline_access_token = lambda shop: "test-offline-token"
+    try:
+        return await client.post(
+            "/agents/submit-products", data=approved_data, headers=headers
+        )
+    finally:
+        shopify_session_store.get_offline_access_token = original_get_token
+
+
 class _DenyingBillingService:
     def can_process(self, shop_domain: str) -> bool:
         _ = shop_domain
@@ -857,7 +938,7 @@ def test_select_highlight_page_candidate_keeps_first_match_for_same_priority():
 
 
 @pytest.mark.asyncio
-async def test_source_highlight_handles_pdf_source_refs(monkeypatch):
+async def test_source_highlight_rejects_pdf_source_refs(monkeypatch):
     def fake_highlight_pdf_bytes(*, pdf_bytes, targets):
         _ = (pdf_bytes, targets)
         return b"%PDF-highlighted", 2
@@ -889,20 +970,12 @@ async def test_source_highlight_handles_pdf_source_refs(monkeypatch):
                 )
             },
         )
-        assert highlighted.status_code == 200
-        payload = highlighted.json()
-        assert payload["page"] == 2
-        assert payload["filename"].endswith(".pdf")
-
-        highlighted_contents = await ac.get(
-            _wopi_contents_url(payload["file_id"])
-        )
-        assert highlighted_contents.status_code == 200
-        assert highlighted_contents.content == b"%PDF-highlighted"
+        assert highlighted.status_code == 422
+        assert "only for spreadsheet" in highlighted.json()["detail"]
 
 
 @pytest.mark.asyncio
-async def test_source_highlight_handles_pdf_source_refs_without_page(monkeypatch):
+async def test_source_highlight_rejects_non_spreadsheet_refs_without_page(monkeypatch):
     captured: dict[str, object] = {}
 
     def fake_highlight_pdf_bytes(*, pdf_bytes, targets):
@@ -943,22 +1016,13 @@ async def test_source_highlight_handles_pdf_source_refs_without_page(monkeypatch
                 )
             },
         )
-        assert highlighted.status_code == 200
-        payload = highlighted.json()
-        assert payload["page"] == 3
-        targets = captured.get("targets")
-        assert isinstance(targets, list)
-        assert any(
-            isinstance(target, dict)
-            and target.get("kind") == "text"
-            and target.get("page") is None
-            and target.get("value") == "https://example.com/images/blue-shirt.jpg"
-            for target in targets
-        )
+        assert highlighted.status_code == 422
+        assert "only for spreadsheet" in highlighted.json()["detail"]
+        assert "targets" not in captured
 
 
 @pytest.mark.asyncio
-async def test_source_highlight_converts_non_pdf_document(monkeypatch):
+async def test_source_highlight_rejects_non_spreadsheet_document(monkeypatch):
     conversion_called = {"value": False}
 
     async def fake_convert_document_to_pdf_collabora(
@@ -1005,15 +1069,13 @@ async def test_source_highlight_converts_non_pdf_document(monkeypatch):
             f"/agents/files/{source_file_id}/source-highlight",
             data={"source_refs_json": json.dumps([{"page": 1, "value": "Materials"}])},
         )
-        assert highlighted.status_code == 200
-        payload = highlighted.json()
-        assert payload["page"] == 1
-        assert payload["filename"].endswith(".pdf")
-        assert conversion_called["value"] is True
+        assert highlighted.status_code == 422
+        assert "only for spreadsheet" in highlighted.json()["detail"]
+        assert conversion_called["value"] is False
 
 
 @pytest.mark.asyncio
-async def test_source_target_resolves_non_spreadsheet_target(monkeypatch):
+async def test_removed_source_target_route_is_not_exposed_for_pdf(monkeypatch):
     async def fake_extract_link_targets_collabora(
         file_bytes,
         *,
@@ -1054,16 +1116,11 @@ async def test_source_target_resolves_non_spreadsheet_target(monkeypatch):
             f"/agents/files/{source_file_id}/source-target",
             params={"value": "Materials & Care", "document_kind": "pdf", "page": 2},
         )
-        assert resolved.status_code == 200
-        body = resolved.json()
-        assert body["target"] == "Materials|region"
-        assert body["matched_label"] == "Materials"
-        assert body["matched_group"] == "Headings"
-        assert body["reason"] == "matched"
+        assert resolved.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_source_target_skips_spreadsheet_files(monkeypatch):
+async def test_removed_source_target_route_is_not_exposed_for_spreadsheets(monkeypatch):
     called = {"value": False}
 
     async def fake_extract_link_targets_collabora(*args, **kwargs):
@@ -1102,10 +1159,7 @@ async def test_source_target_skips_spreadsheet_files(monkeypatch):
             f"/agents/files/{source_file_id}/source-target",
             params={"value": "Title", "document_kind": "spreadsheet"},
         )
-        assert resolved.status_code == 200
-        body = resolved.json()
-        assert body["target"] is None
-        assert body["reason"] == "spreadsheet"
+        assert resolved.status_code == 404
         assert called["value"] is False
 
 
@@ -1194,7 +1248,7 @@ async def test_submit_products_auto_mode(monkeypatch):
             "products_json": json.dumps([{"title": "Demo"}]),
             "import_mode": "auto",
         }
-        r = await ac.post("/agents/submit-products", data=payload)
+        r = await _post_approved_submit(ac, data=payload)
         assert r.status_code == 200
         assert r.json()["success_count"] == 1
 
@@ -1233,8 +1287,8 @@ async def test_submit_products_uses_shopify_port_jsonl_builder(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
-        response = await ac.post(
-            "/agents/submit-products",
+        response = await _post_approved_submit(
+            ac,
             data={
                 "products_json": json.dumps([{"title": "Demo"}]),
                 "import_mode": "auto",
@@ -1248,7 +1302,7 @@ async def test_submit_products_uses_shopify_port_jsonl_builder(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_submit_products_partial_success_creates_submitted_document(monkeypatch):
+async def test_submit_products_partial_failure_does_not_finalize_submitted_document(monkeypatch):
     _patch_bulk_submit(monkeypatch, [
         {
             "data": {
@@ -1270,8 +1324,8 @@ async def test_submit_products_partial_success_creates_submitted_document(monkey
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
-        response = await ac.post(
-            "/agents/submit-products",
+        response = await _post_approved_submit(
+            ac,
             data={
                 "products_json": json.dumps([{"title": "Good Product"}, {"title": "Bad Product"}]),
                 "import_mode": "auto",
@@ -1281,16 +1335,9 @@ async def test_submit_products_partial_success_creates_submitted_document(monkey
         assert response.status_code == 200
         body = response.json()
         assert body["success_count"] == 1
-        assert body["submitted_id"]
+        assert body["failed_count"] == 1
+        assert body["submitted_id"] is None
         assert any(item.get("status") == "failed" for item in body["results"])
-
-        submitted_detail = await ac.get(
-            f"/agents/submitted-documents/{body['submitted_id']}"
-        )
-        assert submitted_detail.status_code == 200
-        stored_products = submitted_detail.json()["submitted_document"]["products"]
-        assert len(stored_products) == 1
-        assert stored_products[0]["title"] == "Good Product"
 
 
 @pytest.mark.asyncio
@@ -1310,7 +1357,7 @@ async def test_submit_products_reports_metafield_failure_as_partially_applied(mo
     }
     service.product_drafts[draft_id] = {
         "draft_id": draft_id, "shop_domain": TEST_SHOP_DOMAIN, "revision": 1,
-        "products": [proposed],
+        "products": [proposed], "ai_enhancements_enabled": False,
     }
     service.mutation_plans[plan_id] = {
         "plan_id": plan_id, "draft_id": draft_id, "shop_domain": TEST_SHOP_DOMAIN,
@@ -1343,6 +1390,12 @@ async def test_submit_products_reports_metafield_failure_as_partially_applied(mo
     assert response.status_code == 200
     body = response.json()
     assert body["success_count"] == 1, body
+    submit_runs = [
+        run
+        for run in service.llm_runs.values()
+        if run.get("source") == "shopify_submit"
+    ]
+    assert submit_runs[-1]["ai_enhancements_enabled"] is False
     assert body["partial_count"] == 1
     assert body["results"][0]["status"] == "partially_applied"
     assert body["results"][0]["failed"] == ["metafields"]
@@ -1406,8 +1459,8 @@ async def test_submit_products_uses_request_scoped_shop_context(monkeypatch):
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
-        response = await ac.post(
-            "/agents/submit-products",
+        response = await _post_approved_submit(
+            ac,
             headers={"x-shop-domain": "scoped-shop.myshopify.com"},
             data={
                 "products_json": json.dumps([{"title": "Scoped"}]),
@@ -1495,8 +1548,8 @@ async def test_submit_products_infers_shop_from_draft_when_request_shop_missing(
         assert created_draft.status_code == 200
         draft_id = created_draft.json()["draft_id"]
 
-        submitted = await ac.post(
-            "/agents/submit-products",
+        submitted = await _post_approved_submit(
+            ac,
             headers={"x-shop-domain": "draft-scoped.myshopify.com"},
             data={
                 "draft_id": draft_id,
@@ -1531,7 +1584,7 @@ async def test_submit_products_auto_updates_when_id_present(monkeypatch):
             ),
             "import_mode": "auto",
         }
-        r = await ac.post("/agents/submit-products", data=payload)
+        r = await _post_approved_submit(ac, data=payload)
         assert r.status_code == 200
         body = r.json()
         assert body["success_count"] == 1
@@ -1556,8 +1609,8 @@ async def test_submit_products_uses_submitted_document_when_submitted_id_provide
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
-        seed_response = await ac.post(
-            "/agents/submit-products",
+        seed_response = await _post_approved_submit(
+            ac,
             data={
                 "products_json": json.dumps([{"title": "Stored Demo"}]),
                 "import_mode": "auto",
@@ -1568,8 +1621,8 @@ async def test_submit_products_uses_submitted_document_when_submitted_id_provide
         submitted_id = seed_response.json()["submitted_id"]
         assert submitted_id
 
-        submit_response = await ac.post(
-            "/agents/submit-products",
+        submit_response = await _post_approved_submit(
+            ac,
             data={
                 "submitted_id": submitted_id,
                 "import_mode": "auto",
@@ -1609,8 +1662,8 @@ async def test_submit_products_uses_draft_when_draft_id_provided(monkeypatch):
         draft_id = draft_response.json()["draft_id"]
         assert draft_id
 
-        submit_response = await ac.post(
-            "/agents/submit-products",
+        submit_response = await _post_approved_submit(
+            ac,
             data={
                 "draft_id": draft_id,
                 "import_mode": "auto",
@@ -1634,8 +1687,8 @@ async def test_submit_products_rejects_unknown_draft_id(monkeypatch):
                 "import_mode": "auto",
             },
         )
-        assert response.status_code == 400
-        assert "Draft not found" in response.json()["detail"]
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "REVIEW_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -1651,8 +1704,8 @@ async def test_submit_products_rejects_unknown_submitted_id(monkeypatch):
                 "import_mode": "auto",
             },
         )
-        assert response.status_code == 400
-        assert "Submitted document not found" in response.json()["detail"]
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "REVIEW_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -1677,8 +1730,8 @@ async def test_submit_products_requires_products_source(monkeypatch):
             "/agents/submit-products",
             data={"import_mode": "auto"},
         )
-        assert response.status_code == 400
-        assert "No products provided" in response.json()["detail"]
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "REVIEW_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -1718,7 +1771,7 @@ async def test_submit_products_ignores_legacy_ai_enhancements_flag(monkeypatch):
             "import_mode": "auto",
             "enable_ai_enhancements": "true",
         }
-        response = await ac.post("/agents/submit-products", data=payload)
+        response = await _post_approved_submit(ac, data=payload)
         assert response.status_code == 200
         body = response.json()
         assert body["success_count"] == 1
@@ -1780,8 +1833,8 @@ async def test_submit_products_legacy_ai_flag_does_not_mutate_draft(monkeypatch)
         assert created_draft.status_code == 200
         draft_id = created_draft.json()["draft_id"]
 
-        submitted = await ac.post(
-            "/agents/submit-products",
+        submitted = await _post_approved_submit(
+            ac,
             data={
                 "products_json": json.dumps([{"title": "Drafted Product"}]),
                 "run_id": "run-sync-submit",
@@ -1835,6 +1888,38 @@ async def test_import_ignores_freeform_prompt_fields(monkeypatch):
         assert "prompt" not in captured
         assert "writer_prompt" not in captured
         assert captured.get("extraction_mode") == "per_sheet"
+        assert captured["enable_ai_enhancements"] is True
+
+
+@pytest.mark.asyncio
+async def test_import_passes_unchecked_ai_enhancement_setting(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    async def fake_process_document_execute(**kwargs):
+        captured.update(kwargs)
+        return {"run_id": "run-import-ai-off", "result": {"products": []}}
+
+    import application.use_cases.processing.process_document as process_document_uc
+
+    monkeypatch.setattr(process_document_uc, "execute", fake_process_document_execute)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS
+    ) as ac:
+        response = await ac.post(
+            "/agents/import",
+            data={"enable_ai_enhancements": "false"},
+            files={
+                "file": (
+                    "ai-off.xlsx",
+                    io.BytesIO(_valid_xlsx_bytes("ai-off")),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["enable_ai_enhancements"] is False
 
 
 @pytest.mark.asyncio
@@ -1867,6 +1952,7 @@ async def test_batch_extract_submit_contract_returns_expected_shape_with_partial
                 "extraction_mode": "per_sheet",
                 "auto_submit": True,
                 "offload": True,
+                "enable_ai_enhancements": False,
             },
         )
         assert response.status_code == 202
@@ -2042,6 +2128,7 @@ async def test_batch_extract_submit_queues_document_import_jobs(monkeypatch):
                 "extraction_mode": "per_sheet",
                 "auto_submit": True,
                 "offload": True,
+                "enable_ai_enhancements": False,
             },
         )
         assert response.status_code == 202
@@ -2063,6 +2150,7 @@ async def test_batch_extract_submit_queues_document_import_jobs(monkeypatch):
             assert job["payload"]["auto_submit"] is True
             assert job["payload"]["submit_run_id"] == accepted["submit_run_id"]
             assert job["payload"]["extraction_mode"] == "per_sheet"
+            assert job["payload"]["enable_ai_enhancements"] is False
 
 
 @pytest.mark.asyncio
@@ -2120,6 +2208,7 @@ async def test_batch_extract_submit_defaults_to_non_auto_submit_payload(monkeypa
         assert len(queued_jobs) == 1
         assert queued_jobs[0]["payload"]["auto_submit"] is False
         assert queued_jobs[0]["payload"]["submit_run_id"] is None
+        assert queued_jobs[0]["payload"]["enable_ai_enhancements"] is True
 
 
 @pytest.mark.asyncio
@@ -2332,7 +2421,12 @@ async def test_import_offload_returns_queued_with_draft_tracking(monkeypatch):
 
         response = await ac.post(
             "/agents/import",
-            data={"file_id": file_id, "run_id": "run-import-offload", "offload": "true"},
+            data={
+                "file_id": file_id,
+                "run_id": "run-import-offload",
+                "offload": "true",
+                "enable_ai_enhancements": "false",
+            },
         )
         assert response.status_code == 202
         body = response.json()
@@ -2347,6 +2441,7 @@ async def test_import_offload_returns_queued_with_draft_tracking(monkeypatch):
         assert queued_jobs[0]["file_id"] == file_id
         assert queued_jobs[0]["status"] == "queued"
         assert queued_jobs[0]["payload"]["extraction_mode"] == "per_sheet"
+        assert queued_jobs[0]["payload"]["enable_ai_enhancements"] is False
         assert (
             queued_jobs[0]["payload"]["input_content_type"]
             == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -2358,6 +2453,7 @@ async def test_import_offload_returns_queued_with_draft_tracking(monkeypatch):
         draft = detail.json()["draft"]
         assert draft["draft_name"] == "offload.xlsx"
         assert draft["extraction_run_id"] == "run-import-offload"
+        assert draft["ai_enhancements_enabled"] is False
         assert draft["extraction_status"] == "queued"
 
 
@@ -2572,6 +2668,7 @@ async def test_import_offload_uses_deterministic_name_when_source_filename_missi
         name="",
         content=b"offload",
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        shop_domain=TEST_SHOP_DOMAIN,
     )
 
     transport = ASGITransport(app=app)
@@ -2617,8 +2714,9 @@ async def test_submit_offload_returns_queued_with_draft_tracking(monkeypatch):
         fields: dict[str, Any],
         *,
         require_persistent_queue: bool = False,
+        create_once: bool = False,
     ):
-        _ = require_persistent_queue
+        _ = require_persistent_queue, create_once
         payload = {"job_id": job_id, **fields}
         queued_jobs.append(payload)
         return payload
@@ -2654,8 +2752,8 @@ async def test_submit_offload_returns_queued_with_draft_tracking(monkeypatch):
         assert created.status_code == 200
         draft_id = created.json()["draft_id"]
 
-        response = await ac.post(
-            "/agents/submit-products",
+        response = await _post_approved_submit(
+            ac,
             data={
                 "draft_id": draft_id,
                 "run_id": "run-submit-offload",
@@ -2671,23 +2769,24 @@ async def test_submit_offload_returns_queued_with_draft_tracking(monkeypatch):
         body = response.json()
         assert body["status"] == "queued"
         assert body["draft_id"] == draft_id
-        assert body["run_id"] == "run-submit-offload"
+        assert body["run_id"] != "run-submit-offload"
+        uuid.UUID(body["run_id"])
         assert len(queued_jobs) == 1
         assert queued_jobs[0]["job_type"] == "shopify_submit"
-        assert queued_jobs[0]["run_id"] == "run-submit-offload"
+        assert queued_jobs[0]["run_id"] == body["run_id"]
         assert queued_jobs[0]["draft_id"] == draft_id
         assert queued_jobs[0]["status"] == "queued"
-        assert queued_jobs[0]["payload"]["products_json"] == json.dumps(
-            [{"title": "Inline Product"}]
-        )
+        assert "products_json" not in queued_jobs[0]["payload"]
+        assert queued_jobs[0]["payload"]["plan_id"].startswith("approved-test-plan-")
+        assert queued_jobs[0]["payload"]["revision"] == 1
         assert "shop_access_token" not in queued_jobs[0]["payload"]
-        assert "enable_ai_enhancements" not in queued_jobs[0]["payload"]
+        assert queued_jobs[0]["payload"]["enable_ai_enhancements"] is True
         assert submit_calls == 0
 
         detail = await ac.get(f"/agents/product-drafts/{draft_id}")
         assert detail.status_code == 200
         draft = detail.json()["draft"]
-        assert draft["submit_run_id"] == "run-submit-offload"
+        assert draft["submit_run_id"] == body["run_id"]
         assert draft["submit_status"] == "queued"
 
 
@@ -2715,8 +2814,9 @@ async def test_submit_offload_resolves_shop_context_from_headers(monkeypatch):
         fields: dict[str, Any],
         *,
         require_persistent_queue: bool = False,
+        create_once: bool = False,
     ):
-        _ = require_persistent_queue
+        _ = require_persistent_queue, create_once
         payload = {"job_id": job_id, **fields}
         queued_jobs.append(payload)
         return payload
@@ -2747,8 +2847,8 @@ async def test_submit_offload_resolves_shop_context_from_headers(monkeypatch):
         assert created.status_code == 200
         draft_id = created.json()["draft_id"]
 
-        response = await ac.post(
-            "/agents/submit-products",
+        response = await _post_approved_submit(
+            ac,
             data={
                 "draft_id": draft_id,
                 "run_id": "run-submit-header-offload",
@@ -2901,8 +3001,8 @@ async def test_submit_offload_returns_explicit_error_when_lifecycle_persistence_
 
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
-        response = await ac.post(
-            "/agents/submit-products",
+        response = await _post_approved_submit(
+            ac,
             data={
                 "draft_id": draft_id,
                 "run_id": "run-submit-failfast",
@@ -3065,7 +3165,7 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
             "document_name": "submitted-draft.xlsx",
             "shop_domain": tenant_header["x-shop-domain"],
         }
-        submitted = await ac.post("/agents/submit-products", data=submit_payload, headers=tenant_header)
+        submitted = await _post_approved_submit(ac, data=submit_payload, headers=tenant_header)
         assert submitted.status_code == 200
         submitted_body = submitted.json()
         assert submitted_body["success_count"] == 1
@@ -3294,9 +3394,7 @@ async def test_bulk_delete_submitted_documents(monkeypatch):
             "run_id": "run-bulk-submitted",
             "document_name": "bulk-submitted.xlsx",
         }
-        created_submitted = await ac.post(
-            "/agents/submit-products", data=submit_payload
-        )
+        created_submitted = await _post_approved_submit(ac, data=submit_payload)
         assert created_submitted.status_code == 200
         submitted_id = created_submitted.json()["submitted_id"]
 

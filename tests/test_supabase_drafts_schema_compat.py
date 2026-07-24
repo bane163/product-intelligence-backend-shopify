@@ -168,3 +168,26 @@ def test_save_product_draft_with_required_lifecycle_columns_still_fails_for_miss
         )
 
     assert len(client.upsert_calls) == 1
+
+
+def test_save_product_draft_retries_without_pre_migration_ai_setting_column():
+    client = _FakeSupabaseClient(missing_column="ai_enhancements_enabled")
+    service = _build_service_with_client(client)
+
+    result = service.save_product_draft(
+        draft_id="draft-pre-migration",
+        run_id="run-pre-migration",
+        import_mode="auto",
+        draft_name="Pre-migration Draft",
+        ai_enhancements_enabled=False,
+        extraction_status="running",
+        extraction_run_id="run-pre-migration",
+        require_lifecycle_columns=True,
+        products=[],
+    )
+
+    assert result["ai_enhancements_enabled"] is False
+    assert len(client.upsert_calls) == 2
+    assert client.upsert_calls[0]["payload"]["ai_enhancements_enabled"] is False
+    assert "ai_enhancements_enabled" not in client.upsert_calls[1]["payload"]
+    assert client.upsert_calls[1]["payload"]["extraction_status"] == "running"

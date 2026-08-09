@@ -22,6 +22,7 @@ def _seed_source(service):
         "severity": "medium",
         "message": "Improve product copy",
         "details": {},
+        "value_origin": "ai_assisted",
         "patch_payload": {
             "seo_title": "Original title proposal",
             "seo_description": "Keep this description",
@@ -38,7 +39,7 @@ async def test_regeneration_through_adapter_supersedes_source_and_keeps_children
     _seed_source(service)
 
     async def fake_generate(**_kwargs):
-        return [{"patch_payload": {"seo_title": "Regenerated title"}}]
+        return [{"patch_payload": {"seo_title": "Regenerated title"}, "value_origin": "derived"}]
 
     monkeypatch.setattr(regeneration_uc, "generate", fake_generate)
 
@@ -53,10 +54,12 @@ async def test_regeneration_through_adapter_supersedes_source_and_keeps_children
     assert result["source_suggestion"]["status"] == "superseded"
     assert result["suggestion"]["status"] == "pending"
     assert result["suggestion"]["patch_payload"] == {"seo_title": "Regenerated title"}
+    assert result["suggestion"]["value_origin"] == "derived"
     assert result["carry_forward_suggestion"]["status"] == "pending"
     assert result["carry_forward_suggestion"]["patch_payload"] == {
         "seo_description": "Keep this description"
     }
+    assert result["carry_forward_suggestion"]["value_origin"] == "ai_assisted"
 
 
 @pytest.mark.asyncio

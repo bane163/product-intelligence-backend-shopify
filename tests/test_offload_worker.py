@@ -18,6 +18,13 @@ def test_corrupt_document_failures_are_not_retryable():
     )
 
 
+def test_source_evidence_validation_failures_are_not_retryable():
+    assert not _is_retryable_job_failure(
+        job_type="document_import",
+        error_message="SOURCE_EVIDENCE_VALIDATION_FAILED: title needs an evidence_index",
+    )
+
+
 class _DummyLLM:
     pass
 
@@ -554,7 +561,7 @@ async def test_run_once_marks_document_import_job_dead_letter_after_max_attempts
 
 
 @pytest.mark.asyncio
-async def test_run_once_document_import_auto_submit_enqueues_shopify_submit_job(
+async def test_run_once_document_import_auto_submit_stops_for_merchant_review(
     monkeypatch,
 ):
     import application.services.offload_worker as offload_worker
@@ -638,17 +645,15 @@ async def test_run_once_document_import_auto_submit_enqueues_shopify_submit_job(
         for item in offload_jobs.values()
         if item.get("job_type") == "shopify_submit" and item.get("draft_id") == draft_id
     ]
-    assert len(submit_jobs) == 1
-    assert submit_jobs[0]["status"] == "queued"
-    assert submit_jobs[0]["run_id"] == submit_run_id
-    assert submit_jobs[0]["payload"]["import_mode"] == "auto"
+    assert submit_jobs == []
 
     submit_run = ctx.supabase.runs.get_run(submit_run_id)
-    assert submit_run is None or submit_run["status"] == "queued"
+    assert submit_run is None
 
     draft = ctx.supabase.drafts.get_product_draft(draft_id)
     assert draft is not None
-    assert draft["submit_status"] == "queued"
+    assert draft["quality_gate_status"] == "live_validation_pending"
+    assert draft["submit_status"] is None
     assert draft["submit_run_id"] == submit_run_id
 
 

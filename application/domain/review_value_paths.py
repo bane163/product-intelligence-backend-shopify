@@ -254,8 +254,9 @@ def iter_review_values(product: dict[str, Any]) -> Iterable[ReviewValue]:
             "inventoryItem.requiresShipping": ("requiresShipping", "requires_shipping"),
         }.items():
             for alias in aliases:
-                if alias in variant or alias in inventory:
-                    fields[target] = variant.get(alias) if alias in variant else inventory.get(alias)
+                value = variant.get(alias) if alias in variant else inventory.get(alias)
+                if value is not None:
+                    fields[target] = value
                     break
         for target, aliases in {
             "inventoryItem.weight.value": ("weight",),

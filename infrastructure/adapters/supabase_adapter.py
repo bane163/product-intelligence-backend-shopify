@@ -220,6 +220,9 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         extraction_status: str | None = None,
         extraction_run_id: str | None = None,
         extraction_error: str | None = None,
+        quality_gate_status: str | None = None,
+        quality_report: dict[str, Any] | None = None,
+        quality_checked_at: str | None = None,
         submit_status: str | None = None,
         submit_run_id: str | None = None,
         submit_error: str | None = None,
@@ -241,6 +244,9 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             extraction_status=extraction_status,
             extraction_run_id=extraction_run_id,
             extraction_error=extraction_error,
+            quality_gate_status=quality_gate_status,
+            quality_report=quality_report,
+            quality_checked_at=quality_checked_at,
             submit_status=submit_status,
             submit_run_id=submit_run_id,
             submit_error=submit_error,
@@ -353,6 +359,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         totals: dict[str, Any],
         shop_domain: str | None = None,
         scoring_version: str = "legacy-catalog-v1",
+        require_persistence: bool = False,
     ) -> dict[str, Any]:
         return self._service.save_product_intelligence_audit(
             audit_id=audit_id,
@@ -366,14 +373,26 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             totals=totals,
             shop_domain=shop_domain,
             scoring_version=scoring_version,
+            require_persistence=require_persistence,
+        )
+
+    def update_product_intelligence_audit_status(
+        self, *, audit_id: str, status: str, shop_domain: str | None = None,
+        require_persistence: bool = False,
+    ) -> dict[str, Any] | None:
+        return self._service.update_product_intelligence_audit_status(
+            audit_id=audit_id, status=status, shop_domain=shop_domain,
+            require_persistence=require_persistence,
         )
 
     def save_product_intelligence_product_results(
         self, *, audit_id: str, results: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         return self._service.save_product_intelligence_product_results(
             audit_id=audit_id, results=results, shop_domain=shop_domain,
+            require_persistence=require_persistence,
         )
 
     def list_product_intelligence_product_results(
@@ -389,11 +408,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         audit_id: str,
         findings: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         return self._service.save_product_intelligence_findings(
             audit_id=audit_id,
             findings=findings,
             shop_domain=shop_domain,
+            require_persistence=require_persistence,
         )
 
     def list_product_intelligence_audits(
@@ -437,11 +458,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         audit_id: str,
         suggestions: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         return self._service.save_product_intelligence_suggestions(
             audit_id=audit_id,
             suggestions=suggestions,
             shop_domain=shop_domain,
+            require_persistence=require_persistence,
         )
 
     def list_product_intelligence_suggestions(
@@ -520,11 +543,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def supersede_pending_product_intelligence_suggestions(
         self, *, product_ids: list[str], superseded_by_audit_id: str,
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         return self._service.supersede_pending_product_intelligence_suggestions(
             product_ids=product_ids,
             superseded_by_audit_id=superseded_by_audit_id,
             shop_domain=shop_domain,
+            require_persistence=require_persistence,
         )
 
     def get_product_intelligence_normalization_settings(

@@ -227,6 +227,7 @@ async def execute(
                 **{key: suggestion.get(key) for key in (
                     "audit_id", "finding_id", "product_index", "product_title",
                     "product_id", "category", "severity", "message", "details",
+                    "value_origin",
                 )},
                 "suggestion_id": pending_id,
                 "patch_payload": patch_payload,

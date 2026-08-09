@@ -206,7 +206,7 @@ async def readiness_check():
             )
     return {
         "status": "ready",
-        "review_contract_version": 2,
+        "review_contract_version": 3,
         "review_schema_ready": True,
         "services": ["supabase", "llm", "collabora", "tracing", "shopify"],
         "collabora": {key: value for key, value in collabora.items() if key != "discovery"},

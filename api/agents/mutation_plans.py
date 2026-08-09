@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 import logging
+import hashlib
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -19,6 +21,12 @@ from application.domain.shopify_mutation_plan import (
     normalize_review_plan_rows,
     preserve_blank_fields,
     validate_product,
+)
+from application.domain.extraction_quality import (
+    QUALITY_STATUS_LIVE_PENDING,
+    QUALITY_STATUS_READY,
+    build_quality_report,
+    issues_for_product,
 )
 from shopify import SHOPIFY_REAUTH_REQUIRED, ShopifyClient
 from .utils import require_authenticated_shop_domain
@@ -51,6 +59,9 @@ PRODUCT_VARIANTS_PAGE_QUERY = """query MutationPlanProductVariants($id: ID!, $af
     selectedOptions { name value }
     inventoryItem { id sku unitCost { amount } tracked requiresShipping measurement { weight { value unit } } }
   } pageInfo { hasNextPage endCursor } } }
+}"""
+VARIANTS_BY_SKU_QUERY = """query MutationPlanVariantsBySku($query: String!) {
+  productVariants(first: 10, query: $query) { nodes { id sku product { id handle } } }
 }"""
 
 
@@ -88,6 +99,38 @@ async def _offline_client(shop: str) -> ShopifyClient:
 def _products(draft: dict[str, Any]) -> list[dict[str, Any]]:
     raw = draft.get("products")
     return [x for x in raw if isinstance(x, dict)] if isinstance(raw, list) else []
+
+
+def _save_quality_state(
+    ctx: AppContext,
+    draft: dict[str, Any],
+    *,
+    status: str,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    return ctx.supabase.drafts.save_product_draft(
+        draft_id=str(draft["draft_id"]),
+        run_id=draft.get("run_id"),
+        import_mode=str(draft.get("import_mode") or "auto"),
+        draft_name=draft.get("draft_name"),
+        shop_domain=draft.get("shop_domain"),
+        input_file_id=draft.get("input_file_id"),
+        input_filename=draft.get("input_filename"),
+        output_file_id=draft.get("output_file_id"),
+        output_filename=draft.get("output_filename"),
+        extraction_status=draft.get("extraction_status"),
+        extraction_run_id=draft.get("extraction_run_id"),
+        extraction_error=draft.get("extraction_error"),
+        quality_gate_status=status,
+        quality_report={**report, "status": status},
+        quality_checked_at=report.get("generated_at"),
+        submit_status=draft.get("submit_status"),
+        submit_run_id=draft.get("submit_run_id"),
+        submit_error=draft.get("submit_error"),
+        ai_enhancements_enabled=bool(draft.get("ai_enhancements_enabled", True)),
+        revision=int(draft.get("revision") or 1),
+        products=_products(draft),
+    )
 
 
 async def _repair_legacy_review_evidence(
@@ -157,6 +200,7 @@ async def update_product_draft(
         raise HTTPException(
             status_code=400, detail="products must be an array of objects"
         )
+    quality_report = build_quality_report(products)
     saved = ctx.supabase.drafts.save_product_draft(
         draft_id=draft_id,
         run_id=existing.get("run_id"),
@@ -170,6 +214,9 @@ async def update_product_draft(
         extraction_status=existing.get("extraction_status"),
         extraction_run_id=existing.get("extraction_run_id"),
         extraction_error=existing.get("extraction_error"),
+        quality_gate_status=QUALITY_STATUS_LIVE_PENDING,
+        quality_report={**quality_report, "status": QUALITY_STATUS_LIVE_PENDING},
+        quality_checked_at=quality_report.get("generated_at"),
         products=products,
         revision=current_revision + 1,
     )
@@ -185,6 +232,10 @@ async def update_product_draft(
     "/product-drafts/{draft_id}/mutation-plan",
     summary="Generate Shopify mutation preflight",
 )
+@router.post(
+    "/product-drafts/{draft_id}/quality-gate",
+    summary="Run post-extraction quality gate",
+)
 async def create_mutation_plan(
     draft_id: str, request: Request, ctx: AppContext = Depends(get_ctx)
 ) -> dict[str, Any]:
@@ -199,6 +250,10 @@ async def create_mutation_plan(
         for item in (previous or {}).get("items", [])
         if isinstance(item, dict) and isinstance(item.get("source_index"), int)
     }
+    quality_report = build_quality_report(_products(draft), status=QUALITY_STATUS_LIVE_PENDING)
+    _save_quality_state(
+        ctx, draft, status=QUALITY_STATUS_LIVE_PENDING, report=quality_report
+    )
     client = await _offline_client(tenant)
     try:
         scopes_result = await client.graphql(ACCESS_SCOPES_QUERY)
@@ -218,6 +273,7 @@ async def create_mutation_plan(
                 status_code=403,
             )
         items: list[dict[str, Any]] = []
+        sku_lookup_cache: dict[str, list[dict[str, Any]]] = {}
         for index, product in enumerate(_products(draft)):
             handle = str(product.get("handle") or "").strip().lower()
             nodes: list[dict[str, Any]] = []
@@ -275,6 +331,71 @@ async def create_mutation_plan(
             blockers, unapplied = validate_product(
                 product, creating=operation == "create"
             )
+            imported_variants = product.get("variants")
+            if isinstance(imported_variants, dict):
+                imported_variants = imported_variants.get("nodes")
+            for variant_index, variant in enumerate(
+                imported_variants if isinstance(imported_variants, list) else []
+            ):
+                if not isinstance(variant, dict):
+                    continue
+                sku = str(variant.get("sku") or "").strip()
+                if not sku:
+                    continue
+                cache_key = sku.casefold()
+                if cache_key not in sku_lookup_cache:
+                    sku_result = await client.graphql(
+                        VARIANTS_BY_SKU_QUERY, {"query": f'sku:"{sku}"'}
+                    )
+                    raw_sku_nodes = (
+                        sku_result.get("data", {})
+                        .get("productVariants", {})
+                        .get("nodes", [])
+                    )
+                    sku_lookup_cache[cache_key] = [
+                        node for node in raw_sku_nodes if isinstance(node, dict)
+                    ]
+                collisions = [
+                    node for node in sku_lookup_cache[cache_key]
+                    if str(node.get("sku") or "").casefold() == cache_key
+                    and (
+                        not live
+                        or not isinstance(node.get("product"), dict)
+                        or node["product"].get("id") != live.get("id")
+                    )
+                ]
+                if collisions:
+                    live_issue = {
+                        "issue_id": f"live_sku_collision:product-{index}-variants[{variant_index}].sku",
+                        "severity": "blocker",
+                        "code": "LIVE_SKU_COLLISION",
+                        "product_index": index,
+                        "value_path": f"variants[{variant_index}].sku",
+                        "message": "This SKU is already used by another Shopify product.",
+                        "remedy": "edit",
+                    }
+                    quality_report["issues"].append(live_issue)
+                    blockers.append({
+                        "code": live_issue["code"],
+                        "field": live_issue["value_path"],
+                        "message": live_issue["message"],
+                        "remedies": ["edit", "skip"],
+                    })
+            product_quality_issues = issues_for_product(quality_report, index)
+            existing_blocker_codes = {
+                str(item.get("code")) for item in blockers if isinstance(item, dict)
+            }
+            blockers.extend(
+                {
+                    "code": str(issue.get("code")),
+                    "field": issue.get("value_path"),
+                    "message": issue.get("message"),
+                    "remedies": [issue.get("remedy")],
+                }
+                for issue in product_quality_issues
+                if issue.get("severity") == "blocker"
+                and str(issue.get("code")) not in existing_blocker_codes
+            )
             intent = (
                 str(product.get("operation") or product.get("intent") or "")
                 .strip()
@@ -310,9 +431,22 @@ async def create_mutation_plan(
             )
             blockers.extend(structured_blockers)
             unapplied.extend(structured_unapplied)
+            for deferred_index, deferred in enumerate(unapplied):
+                if not isinstance(deferred, dict):
+                    continue
+                deferred_issue = {
+                    "issue_id": f"deferred:product-{index}-{deferred_index}-{deferred.get('field') or 'field'}",
+                    "severity": "warning",
+                    "code": str(deferred.get("code") or "FIELD_DEFERRED"),
+                    "product_index": index,
+                    "value_path": deferred.get("field"),
+                    "message": "This extracted value is not supported by the current Shopify submission and will be deferred.",
+                    "remedy": "review",
+                }
+                product_quality_issues.append(deferred_issue)
+                quality_report["issues"].append(deferred_issue)
             prior_item = previous_by_source_index.get(index)
-            items.append(
-                build_review_plan_item(
+            plan_item = build_review_plan_item(
                     item_id=str(uuid.uuid4()),
                     currency_code=currency_code,
                     source_index=index,
@@ -324,9 +458,25 @@ async def create_mutation_plan(
                     unapplied=unapplied,
                     prior_item=prior_item,
                 )
-            )
+            plan_item["quality_issues"] = product_quality_issues
+            items.append(plan_item)
     finally:
         await client.close()
+    blocked_product_count = sum(bool(item.get("blockers")) for item in items)
+    blocker_count = sum(len(item.get("blockers") or []) for item in items)
+    warning_count = sum(
+        issue.get("severity") == "warning"
+        for item in items
+        for issue in item.get("quality_issues", [])
+        if isinstance(issue, dict)
+    )
+    quality_report["summary"] = {
+        "product_count": len(items),
+        "valid_product_count": len(items) - blocked_product_count,
+        "blocked_product_count": blocked_product_count,
+        "blocker_count": blocker_count,
+        "warning_count": warning_count,
+    }
     plan = {
         "plan_id": str(uuid.uuid4()),
         "draft_id": draft_id,
@@ -335,11 +485,12 @@ async def create_mutation_plan(
         "version": int((previous or {}).get("version") or 0) + 1,
         "status": "review",
         "currency_code": currency_code,
-        "review_contract_version": 2,
+        "review_contract_version": 3,
         "items": items,
         "approved_at": None,
         "created_at": _now(),
         "updated_at": _now(),
+        "quality_summary": quality_report.get("summary"),
     }
     plan = normalize_review_plan_rows(plan)
     review_rows = [row for item in items for row in item.get("review_changes", []) if isinstance(row, dict)]
@@ -351,7 +502,9 @@ async def create_mutation_plan(
         len(review_rows),
         unknown_count,
     )
+    ready_report = {**quality_report, "status": QUALITY_STATUS_READY}
     _service(ctx).save_mutation_plan(plan)
+    _save_quality_state(ctx, draft, status=QUALITY_STATUS_READY, report=ready_report)
     return {"plan": plan}
 
 
@@ -385,7 +538,7 @@ async def patch_mutation_plan_selection(
     items = list(plan.get("items") or [])
     item_selections = payload.get("item_selections")
     if item_selections is not None:
-        if plan.get("review_contract_version") != 2:
+        if plan.get("review_contract_version") not in {2, 3}:
             raise HTTPException(
                 status_code=409,
                 detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before selecting fields"},
@@ -474,6 +627,21 @@ async def approve_mutation_plan(
         raise _review_error("Select at least one valid change")
     if any(x.get("blockers") for x in selected):
         raise _review_error("Selected changes contain blockers")
+    selected_warnings = sorted(
+        str(issue.get("issue_id") or issue.get("code") or "")
+        for item in selected
+        for issue in item.get("quality_issues", [])
+        if isinstance(issue, dict) and issue.get("severity") == "warning"
+    )
+    if selected_warnings and payload.get("warnings_acknowledged") is not True:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED",
+                "message": "Review and acknowledge the remaining warnings before applying changes.",
+                "warning_count": len(selected_warnings),
+            },
+        )
     plan_status = str(plan.get("status") or "").strip().lower()
     if plan_status in {"approved", "executing"}:
         return {"plan": plan}
@@ -508,6 +676,11 @@ async def approve_mutation_plan(
         ],
         "status": "approved",
         "approved_at": _now(),
+        "warnings_acknowledged_at": _now() if selected_warnings else None,
+        "warnings_acknowledgment_hash": (
+            hashlib.sha256(json.dumps(selected_warnings).encode("utf-8")).hexdigest()
+            if selected_warnings else None
+        ),
         "updated_at": _now(),
     }
     _service(ctx).save_mutation_plan(approved)

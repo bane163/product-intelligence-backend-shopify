@@ -28,7 +28,7 @@ class DocumentLayout:
         return matches[0] if len(matches) == 1 else None
 
     def to_prompt_text(self) -> str:
-        """Render evidence without asking the model to invent coordinates."""
+        """Render the legacy anchor contract used when reopening older workflows."""
         lines: list[str] = []
         active_page: int | None = None
         for anchor in sorted(self.anchors, key=lambda item: (item.page, item.bbox[1], item.bbox[0])):

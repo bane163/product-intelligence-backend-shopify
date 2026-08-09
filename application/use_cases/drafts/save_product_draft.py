@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from application.ports.supabase_port import SupabaseNamespacedPort
 
@@ -18,6 +18,9 @@ def execute(
     extraction_status: str | None = None,
     extraction_run_id: str | None = None,
     extraction_error: str | None = None,
+    quality_gate_status: str | None = None,
+    quality_report: dict[str, Any] | None = None,
+    quality_checked_at: str | None = None,
     submit_status: str | None = None,
     submit_run_id: str | None = None,
     submit_error: str | None = None,
@@ -52,6 +55,9 @@ def execute(
         extraction_status=extraction_status,
         extraction_run_id=extraction_run_id,
         extraction_error=extraction_error,
+        quality_gate_status=quality_gate_status,
+        quality_report=quality_report,
+        quality_checked_at=quality_checked_at,
         submit_status=submit_status,
         submit_run_id=submit_run_id,
         submit_error=submit_error,

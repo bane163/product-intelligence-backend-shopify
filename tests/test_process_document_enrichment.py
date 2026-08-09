@@ -7,6 +7,8 @@ import pytest
 from openpyxl import Workbook, load_workbook
 from ai.models import ProductsList
 from shared.observability import bind_observability_context
+from application.ports.document_layout_port import DocumentAnchor, DocumentLayout
+from application.services.pdf_evidence_index import SourceEvidenceValidationFailed
 
 import application.use_cases.processing.process_document as process_document_uc
 
@@ -156,6 +158,67 @@ class _FakeLLMProductsList:
     async def run_excel_agent_workflow(self, *args, **kwargs):
         _ = args, kwargs
         return ProductsList(products=[{"title": "Demo Product"}])
+
+
+class _SequenceLLM:
+    def __init__(self, payloads: list[dict]) -> None:
+        self.payloads = list(payloads)
+        self.calls: list[dict] = []
+
+    async def run_excel_agent_workflow(self, *args, **kwargs):
+        _ = args
+        self.calls.append(dict(kwargs))
+        return self.payloads.pop(0)
+
+
+class _PdfLayoutService:
+    def __init__(self) -> None:
+        self.layout = DocumentLayout(
+            1,
+            (
+                DocumentAnchor(
+                    "azure-title",
+                    "canonical.pdf",
+                    1,
+                    (0.1, 0.2, 0.8, 0.3),
+                    "lassic Cotton T-Shirt",
+                    "line",
+                    "azure",
+                ),
+            ),
+            "azure",
+            (1,),
+            (1,),
+        )
+
+    async def analyze_pdf(self, content: bytes, source_file_id: str) -> DocumentLayout:
+        _ = content, source_file_id
+        return self.layout
+
+
+def _minimal_pdf_bytes() -> bytes:
+    import fitz
+
+    document = fitz.open()
+    document.new_page()
+    try:
+        return document.tobytes()
+    finally:
+        document.close()
+
+
+def _patch_canonical_pdf(monkeypatch, content: bytes) -> None:
+    async def fake_ensure_canonical_pdf(**kwargs):
+        _ = kwargs
+        return SimpleNamespace(
+            file_id="canonical-file",
+            content=content,
+            filename="canonical.pdf",
+            content_type="application/pdf",
+            cache_hit=False,
+        )
+
+    monkeypatch.setattr(process_document_uc, "ensure_canonical_pdf", fake_ensure_canonical_pdf)
 
 
 @pytest.mark.asyncio
@@ -535,3 +598,78 @@ async def test_process_document_persists_observability_ids_from_context():
     first_run_update = supabase.runs.created_updates[0][1]
     assert first_run_update["request_id"] == "req-process-document-1"
     assert first_run_update["correlation_id"] == "corr-process-document-1"
+
+
+@pytest.mark.asyncio
+async def test_pdf_evidence_feedback_retries_with_complete_payload_and_resolves_index(monkeypatch):
+    pdf = _minimal_pdf_bytes()
+    _patch_canonical_pdf(monkeypatch, pdf)
+    llm = _SequenceLLM([
+        {"products": [{"title": "Classic Cotton T-Shirt"}]},
+        {"products": [{
+            "title": "Classic Cotton T-Shirt",
+            "source_refs": [{"value_path": "title", "evidence_index": 1}],
+        }]},
+    ])
+    tracing = _FakeTracing()
+
+    result = await process_document_uc.execute(
+        supabase=_FakeSupabase(),
+        llm=llm,
+        tracing=tracing,
+        ctx=SimpleNamespace(services=SimpleNamespace(document_layout=_PdfLayoutService(), collabora=None)),
+        file_bytes=pdf,
+        input_name="source.pdf",
+        input_content_type="application/pdf",
+        source_file_id="uploaded-file",
+        shop_domain="store.myshopify.com",
+        enable_ai_enhancements=False,
+    )
+
+    assert len(llm.calls) == 2
+    assert "title" in llm.calls[1]["agent_prompt"]
+    assert "complete products payload" in llm.calls[1]["agent_prompt"]
+    assert llm.calls[0]["extracted_text_override"] == "1. lassic Cotton T-Shirt"
+    product = result["result"]["products"][0]
+    assert product["value_origins"]["title"] == "source"
+    assert product["source_refs"][0]["anchor_id"] == "azure-title"
+    assert product["source_refs"][0]["source_file_id"] == "canonical-file"
+    assert "evidence_index" not in product["source_refs"][0]
+    phases = [event["phase"] for event in tracing.events]
+    assert phases.count("pdf_evidence_correction_attempt") == 1
+    assert phases.count("pdf_evidence_validation_success") == 1
+
+
+@pytest.mark.asyncio
+async def test_pdf_evidence_gets_exactly_two_corrections_then_fails_without_output(monkeypatch):
+    pdf = _minimal_pdf_bytes()
+    _patch_canonical_pdf(monkeypatch, pdf)
+    llm = _SequenceLLM([
+        {"products": [{"title": "Unlinked"}]},
+        {"products": [{"title": "Still unlinked"}]},
+        {"products": [{"title": "Never linked"}]},
+    ])
+    supabase = _FakeSupabase()
+    tracing = _FakeTracing()
+
+    with pytest.raises(SourceEvidenceValidationFailed, match="SOURCE_EVIDENCE_VALIDATION_FAILED"):
+        await process_document_uc.execute(
+            supabase=supabase,
+            llm=llm,
+            tracing=tracing,
+            ctx=SimpleNamespace(services=SimpleNamespace(document_layout=_PdfLayoutService(), collabora=None)),
+            file_bytes=pdf,
+            input_name="source.pdf",
+            input_content_type="application/pdf",
+            source_file_id="uploaded-file",
+            shop_domain="store.myshopify.com",
+            write_to_file=True,
+            enable_ai_enhancements=False,
+        )
+
+    assert len(llm.calls) == 3
+    assert all(call["write_to_file"] is False for call in llm.calls)
+    assert supabase.file.saved_files == []
+    phases = [event["phase"] for event in tracing.events]
+    assert phases.count("pdf_evidence_correction_attempt") == 2
+    assert phases.count("pdf_evidence_validation_failed") == 1

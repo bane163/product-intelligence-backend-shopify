@@ -65,7 +65,7 @@ def _products(draft: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _require_review_v2(ctx: AppContext, draft_id: str, tenant: str) -> dict[str, Any] | None:
     plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
-    if isinstance(plan, dict) and plan.get("review_contract_version") != 2:
+    if isinstance(plan, dict) and plan.get("review_contract_version") not in {2, 3}:
         raise HTTPException(
             status_code=409,
             detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before editing"},
@@ -1296,18 +1296,19 @@ def _apply_ui_operation(
         grid_state["pagesByItem"] = after
         return None
 
-    # Older browser tabs may still flush this operation. Layout is local now,
-    # so accept it as a no-op without persisting it or adding history.
     if operation_type == "workspace_view":
-        if operation.get("workspaceView") not in {"split", "changes", "spreadsheet"}:
+        after = operation.get("workspaceView")
+        if after not in {"split", "changes", "spreadsheet"}:
             raise HTTPException(status_code=400, detail="workspaceView is invalid")
+        # Legacy tabs may still send this ephemeral UI preference. Accept it,
+        # but intentionally do not persist it or add it to review history.
         return None
 
     raise HTTPException(
         status_code=400,
         detail=(
             "operation must be value_edit, value_revert, selection, filters, "
-            "expansion, pagination, or legacy workspace_view"
+            "expansion, pagination, or workspace_view"
         ),
     )
 
@@ -1540,11 +1541,9 @@ async def create_review_edit_session(
         if isinstance(plan, dict)
         else {},
         "base_plan_id": plan.get("plan_id") if isinstance(plan, dict) else None,
-        "grid_state": {
-            "filterValues": {"changes": "hide_deferred"},
-            "expandedItemIds": [],
-            "pagesByItem": {},
-        },
+        "grid_state": deepcopy(payload.get("grid_state"))
+        if isinstance(payload.get("grid_state"), dict)
+        else _service(ctx)._default_review_grid_state(),
         "history": [],
         "history_cursor": 0,
         "working_file_id": working_file_id,
@@ -1568,8 +1567,8 @@ async def patch_review_edit_session(
     session = _service(ctx).get_review_edit_session(session_id, shop_domain=tenant)
     if not session or session.get("draft_id") != draft_id:
         raise HTTPException(status_code=404, detail="Edit session not found")
-    if session.get("status") != "active" or session.get("surface") != "grid":
-        raise _conflict("Grid edit session is not active")
+    if session.get("status") != "active" or session.get("surface") not in {"grid", "workbook"}:
+        raise _conflict("Review edit session is not active")
     expected = payload.get("expected_edit_revision")
     current = int(session.get("edit_revision") or 1)
     if not isinstance(expected, int) or expected != current:
@@ -1615,7 +1614,7 @@ async def patch_review_edit_session(
     latest_plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
     if not isinstance(latest_plan, dict):
         raise _conflict("Mutation plan is missing")
-    if latest_plan.get("review_contract_version") != 2:
+    if latest_plan.get("review_contract_version") not in {2, 3}:
         raise HTTPException(status_code=409, detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before editing"})
     pending = _products({"products": session.get("pending_products")})
     working_plan = session.get("working_plan")
@@ -1648,6 +1647,18 @@ async def patch_review_edit_session(
         ]
     if any(not isinstance(operation, dict) for operation in operations):
         raise HTTPException(status_code=400, detail="changes must contain objects")
+    if session.get("surface") == "workbook":
+        ui_operations = {"filters", "expansion", "pagination", "workspace_view"}
+        invalid = next(
+            (
+                operation
+                for operation in operations
+                if (operation.get("type") or operation.get("operation")) not in ui_operations
+            ),
+            None,
+        )
+        if invalid is not None:
+            raise _conflict("Workbook edit sessions accept UI-state operations only")
     try:
         pending, history, history_cursor = _apply_operations(
             pending,

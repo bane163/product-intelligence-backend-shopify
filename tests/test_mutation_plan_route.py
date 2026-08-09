@@ -20,6 +20,72 @@ def test_mutation_plan_queries_use_inventory_item_unit_cost_output():
 
 
 @pytest.mark.asyncio
+async def test_approval_requires_acknowledgment_for_selected_quality_warnings(monkeypatch):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "quality-warning-approval"
+    plan_id = "quality-warning-plan"
+    shop_domain = "quality-warning.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [{"title": "Warning product"}],
+    }
+    service.mutation_plans[plan_id] = {
+        "plan_id": plan_id,
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 3,
+        "items": [{
+            "item_id": "warning-item",
+            "selected": True,
+            "selectable": True,
+            "blockers": [],
+            "proposed": {"title": "Warning product"},
+            "review_changes": [],
+            "quality_issues": [{
+                "issue_id": "vendor_missing:product-0-vendor",
+                "severity": "warning",
+                "code": "VENDOR_MISSING",
+                "message": "No vendor was extracted.",
+            }],
+        }],
+    }
+
+    class FakeApprovalClient:
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        assert shop == shop_domain
+        return FakeApprovalClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    url = f"/agents/product-drafts/{draft_id}/mutation-plan/approve"
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        rejected = await client.post(url, json={"plan_id": plan_id})
+        approved = await client.post(
+            url, json={"plan_id": plan_id, "warnings_acknowledged": True}
+        )
+
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED"
+    assert approved.status_code == 200
+    assert approved.json()["plan"]["warnings_acknowledged_at"]
+    assert approved.json()["plan"]["warnings_acknowledgment_hash"]
+
+
+@pytest.mark.asyncio
 async def test_preflight_fetches_paginated_variants_with_unit_cost_query(monkeypatch):
     import api.agents.mutation_plans as mutation_plans_api
 
@@ -123,7 +189,13 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
         "draft_id": draft_id,
         "shop_domain": shop_domain,
         "revision": 1,
-        "products": [{"title": "Reviewable product"}],
+        "products": [{
+            "title": "Reviewable product",
+            "vendor": "Acme",
+            "image_src": "https://example.com/product.jpg",
+            "variants": [{"sku": "REVIEW-1", "price": 10}],
+            "source_refs": [{"value_path": "title", "cell": "A2"}],
+        }],
     }
 
     class FakeShopifyClient:
@@ -131,6 +203,8 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
             self.closed = False
 
         async def graphql(self, query, variables=None):
+            if query == mutation_plans_api.VARIANTS_BY_SKU_QUERY:
+                return {"data": {"productVariants": {"nodes": []}}}
             assert query == mutation_plans_api.ACCESS_SCOPES_QUERY
             assert variables is None
             return {
@@ -185,7 +259,7 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
         )
         rejected = await client.post(
             f"/agents/product-drafts/{draft_id}/mutation-plan/approve",
-            json={"plan_id": plan_id, "acknowledge_unapplied": True},
+            json={"plan_id": plan_id, "acknowledge_unapplied": True, "warnings_acknowledged": True},
         )
     assert deselected.status_code == 200
     assert deselected.json()["plan"]["items"][0]["selected"] is False
@@ -209,7 +283,7 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
         )
         approved = await client.post(
             f"/agents/product-drafts/{draft_id}/mutation-plan/approve",
-            json={"plan_id": plan_id, "acknowledge_unapplied": True},
+            json={"plan_id": plan_id, "acknowledge_unapplied": True, "warnings_acknowledged": True},
         )
     assert reselected.status_code == 200
     assert approved.status_code == 200
@@ -302,7 +376,7 @@ async def test_preflight_keeps_aliased_core_updates_selectable_and_serializable(
                 "product_category": "Accessories",
                 "seo_title": "New SEO title",
                 "seo_description": "New SEO description",
-                "variants": [{"sku": "deferred"}],
+                "variants": [{"sku": "deferred", "price": 10}],
             }
         ],
     }
@@ -317,6 +391,8 @@ async def test_preflight_keeps_aliased_core_updates_selectable_and_serializable(
                         }
                     }
                 }
+            if query == mutation_plans_api.VARIANTS_BY_SKU_QUERY:
+                return {"data": {"productVariants": {"nodes": []}}}
             assert query == mutation_plans_api.PRODUCT_BY_HANDLE_QUERY
             return {
                 "data": {
@@ -443,6 +519,8 @@ async def test_structured_only_trail_tee_mug_and_daypack_updates_start_selected(
                         }
                     }
                 }
+            if query == mutation_plans_api.VARIANTS_BY_SKU_QUERY:
+                return {"data": {"productVariants": {"nodes": []}}}
             assert query == mutation_plans_api.PRODUCT_BY_HANDLE_QUERY
             handle = str(variables["query"]).split(":", 1)[1]
             title = next(

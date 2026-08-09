@@ -231,3 +231,80 @@ def test_wrong_sku_ref_is_not_repaired_from_another_sheet():
     }]
     enrich_spreadsheet_source_refs(products, data, "p.xlsx")
     assert not any(ref.get("field") == "sku" for ref in products[0]["source_refs"])
+
+
+def test_legacy_default_variant_cells_recover_canonical_sku_and_numeric_price_refs():
+    products = [{
+        "title": "Studio Mixer",
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [{
+            "option1": "Default Title", "sku": "SMX-100", "price": "89.99",
+        }],
+        "source_refs": [
+            {"field": "title", "value_path": "title", "sheet": "Products", "cell": "A2"},
+            {"field": "sku", "value_path": "variant[Default Title].sku", "sheet": "Products", "cell": "B2"},
+            {"field": "price", "value_path": "variant[Default Title].price", "sheet": "Products", "cell": "C2"},
+        ],
+    }]
+    data = workbook_bytes([
+        ["Title", "Code", "Amount"],
+        ["Studio Mixer", "SMX-100", 89.99],
+    ])
+
+    enrich_spreadsheet_source_refs(products, data, "products.xlsx", "source-file")
+    by_field = {ref["field"]: ref for ref in products[0]["source_refs"]}
+
+    assert by_field["sku"]["value_path"] == "variant[title-default-title].sku"
+    assert by_field["sku"]["cell"] == "B2"
+    assert by_field["price"]["value_path"] == "variant[title-default-title].price"
+    assert by_field["price"]["cell"] == "C2"
+    assert by_field["price"]["source_file_id"] == "source-file"
+
+
+def test_duplicate_or_wrong_legacy_spreadsheet_variant_claims_stay_unlinked():
+    products = [{
+        "title": "Studio Mixer",
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [{"option1": "Default Title", "sku": "SMX-100", "price": "89.99"}],
+        "source_refs": [
+            {"field": "title", "value_path": "title", "sheet": "Products", "cell": "A2"},
+            {"field": "sku", "value_path": "variant[Default Title].sku", "sheet": "Products", "cell": "B2"},
+            {"field": "sku", "value_path": "variant[Default Title].sku", "sheet": "Products", "cell": "B2"},
+            {"field": "price", "value_path": "variant[Default Title].price", "sheet": "Products", "cell": "D2"},
+        ],
+    }]
+    data = workbook_bytes([
+        ["Title", "Code", "Amount", "Wrong"],
+        ["Studio Mixer", "SMX-100", 89.99, 10],
+    ])
+
+    enrich_spreadsheet_source_refs(products, data, "products.xlsx")
+
+    assert not any(ref["field"] in {"sku", "price"} for ref in products[0]["source_refs"])
+    assert "sku" not in products[0]["variants"][0]
+    assert "price" not in products[0]["variants"][0]
+
+
+def test_spreadsheet_protected_values_require_verified_cells_even_with_model_origin():
+    products = [{
+        "title": "Lamp",
+        "variants": [{"sku": "L-1", "price": 12, "cost_per_item": 5}],
+        "value_origins": {
+            "variant[l-1].sku": "ai_assisted",
+            "variant[l-1].price": "defaulted",
+            "variant[l-1].inventoryItem.cost": "derived",
+        },
+    }]
+    data = workbook_bytes([
+        ["Title", "SKU", "Price"],
+        ["Lamp", "L-1", 12],
+    ])
+
+    enrich_spreadsheet_source_refs(products, data, "products.xlsx")
+
+    variant = products[0]["variants"][0]
+    assert variant["sku"] == "L-1"
+    assert variant["price"] == 12
+    assert "cost_per_item" not in variant
+    assert products[0]["value_origins"]["variant[l-1].sku"] == "source"
+    assert products[0]["value_origins"]["variant[l-1].price"] == "source"

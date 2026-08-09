@@ -75,7 +75,7 @@ def _extract_products_from_result_payload(
     else:
         model_dump = getattr(payload, "model_dump", None)
         if callable(model_dump):
-            dumped = model_dump(mode="json")
+            dumped = model_dump(mode="json", exclude_none=True)
             if isinstance(dumped, dict):
                 raw_products = dumped.get("products")
     if not isinstance(raw_products, list):
@@ -124,6 +124,7 @@ def _is_retryable_job_failure(*, job_type: str, error_message: str) -> bool:
         "collabora_storage_low",
         "out of storage",
         "low disk",
+        "source_evidence_validation_failed",
     )
     return not any(marker in lowered for marker in non_retryable_markers)
 
@@ -134,6 +135,8 @@ def _exception_message(exc: Exception) -> str:
 
 def _failure_code(error_message: str) -> str:
     lowered = error_message.lower()
+    if "source_evidence_validation_failed" in lowered:
+        return "SOURCE_EVIDENCE_VALIDATION_FAILED"
     if "storage" in lowered or "low disk" in lowered:
         return "collabora_storage_low"
     if "timeout" in lowered or "readtimeout" in lowered:
@@ -180,6 +183,9 @@ def _save_draft_state(
     extraction_status: str | None = None,
     extraction_run_id: str | None = None,
     extraction_error: str | None = None,
+    quality_gate_status: str | None = None,
+    quality_report: dict[str, Any] | None = None,
+    quality_checked_at: str | None = None,
     submit_status: str | None = None,
     submit_run_id: str | None = None,
     submit_error: str | None = None,
@@ -229,6 +235,19 @@ def _save_draft_state(
             extraction_error
             if extraction_error is not None
             else _optional_str_field(existing, "extraction_error")
+        ),
+        quality_gate_status=(
+            quality_gate_status
+            if quality_gate_status is not None
+            else _optional_str_field(existing, "quality_gate_status")
+        ),
+        quality_report=(
+            quality_report if quality_report is not None else existing.get("quality_report")
+        ),
+        quality_checked_at=(
+            quality_checked_at
+            if quality_checked_at is not None
+            else _optional_str_field(existing, "quality_checked_at")
         ),
         submit_status=(
             submit_status
@@ -371,6 +390,12 @@ class OffloadWorker:
             output_file_id = _optional_str(result_payload.get("file_id"))
             output_filename = _optional_str(result_payload.get("filename"))
         extracted_products = _extract_products_from_result_payload(result_payload)
+        quality_report = (
+            result_payload.get("quality_report")
+            if isinstance(result_payload, dict)
+            and isinstance(result_payload.get("quality_report"), dict)
+            else None
+        )
 
         if draft_id:
             _save_draft_state(
@@ -387,6 +412,14 @@ class OffloadWorker:
                 extraction_status="succeeded",
                 extraction_run_id=run_id,
                 extraction_error=None,
+                quality_gate_status="live_validation_pending",
+                quality_report=(
+                    {**quality_report, "status": "live_validation_pending"}
+                    if quality_report else None
+                ),
+                quality_checked_at=(
+                    str(quality_report.get("generated_at")) if quality_report else None
+                ),
             )
 
             draft_state = get_draft_execute(
@@ -404,7 +437,10 @@ class OffloadWorker:
                 if isinstance(draft_state, dict)
                 else None
             )
-            should_queue_submit = auto_submit or bool(draft_submit_run_id)
+            # Merchant approval is mandatory after the post-extraction gate.
+            # Preserve a requested submit run for review, but never queue an
+            # unapproved Shopify mutation from the extraction worker.
+            should_queue_submit = False
             if should_queue_submit and draft_submit_status not in {
                 "queued",
                 "running",

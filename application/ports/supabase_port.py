@@ -116,6 +116,9 @@ class SupabasePort(Protocol):
         extraction_status: str | None = None,
         extraction_run_id: str | None = None,
         extraction_error: str | None = None,
+        quality_gate_status: str | None = None,
+        quality_report: dict[str, Any] | None = None,
+        quality_checked_at: str | None = None,
         submit_status: str | None = None,
         submit_run_id: str | None = None,
         submit_error: str | None = None,
@@ -192,7 +195,13 @@ class SupabasePort(Protocol):
         totals: dict[str, Any],
         shop_domain: str | None = None,
         scoring_version: str = "legacy-catalog-v1",
+        require_persistence: bool = False,
     ) -> dict[str, Any]: ...
+
+    def update_product_intelligence_audit_status(
+        self, *, audit_id: str, status: str, shop_domain: str | None = None,
+        require_persistence: bool = False,
+    ) -> dict[str, Any] | None: ...
 
     def save_product_intelligence_findings(
         self,
@@ -200,11 +209,13 @@ class SupabasePort(Protocol):
         audit_id: str,
         findings: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def save_product_intelligence_product_results(
         self, *, audit_id: str, results: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def list_product_intelligence_product_results(
@@ -239,6 +250,7 @@ class SupabasePort(Protocol):
         audit_id: str,
         suggestions: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def list_product_intelligence_suggestions(
@@ -274,6 +286,7 @@ class SupabasePort(Protocol):
     def supersede_pending_product_intelligence_suggestions(
         self, *, product_ids: list[str], superseded_by_audit_id: str,
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def mark_product_intelligence_suggestion_pending(
@@ -485,6 +498,9 @@ class SupabaseDraftsNamespacePort(Protocol):
         extraction_status: str | None = None,
         extraction_run_id: str | None = None,
         extraction_error: str | None = None,
+        quality_gate_status: str | None = None,
+        quality_report: dict[str, Any] | None = None,
+        quality_checked_at: str | None = None,
         submit_status: str | None = None,
         submit_run_id: str | None = None,
         submit_error: str | None = None,
@@ -560,7 +576,13 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         totals: dict[str, Any],
         shop_domain: str | None = None,
         scoring_version: str = "legacy-catalog-v1",
+        require_persistence: bool = False,
     ) -> dict[str, Any]: ...
+
+    def update_product_intelligence_audit_status(
+        self, *, audit_id: str, status: str, shop_domain: str | None = None,
+        require_persistence: bool = False,
+    ) -> dict[str, Any] | None: ...
 
     def save_product_intelligence_findings(
         self,
@@ -568,11 +590,13 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         audit_id: str,
         findings: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def save_product_intelligence_product_results(
         self, *, audit_id: str, results: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def list_product_intelligence_product_results(
@@ -607,6 +631,7 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         audit_id: str,
         suggestions: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def list_product_intelligence_suggestions(
@@ -642,6 +667,7 @@ class SupabaseIntelligenceNamespacePort(Protocol):
     def supersede_pending_product_intelligence_suggestions(
         self, *, product_ids: list[str], superseded_by_audit_id: str,
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int: ...
 
     def mark_product_intelligence_suggestion_pending(

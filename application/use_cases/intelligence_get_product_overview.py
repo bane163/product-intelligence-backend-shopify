@@ -50,9 +50,16 @@ def execute(
             len(row.get("patch_payload") or {})
             for row in pending if isinstance(row.get("patch_payload"), dict)
         )
+        health = _health(result)
+        health["requires_reaudit"] = bool(applied or reverted) if result else True
+        snapshot = result.get("audited_snapshot") if isinstance(result, dict) else None
+        product_title = (
+            result.get("product_title") if isinstance(result, dict) else None
+        ) or (snapshot.get("title") if isinstance(snapshot, dict) else None)
         item: dict[str, Any] = {
             "product_id": product_id,
-            "health": _health(result),
+            "product_title": str(product_title or ""),
+            "health": health,
             "counts": {
                 "pending_suggestions": len(pending), "pending_fields": pending_fields,
                 "applied": len(applied), "reverted": len(reverted),
@@ -76,4 +83,3 @@ def execute(
             )
         output.append(item)
     return output
-

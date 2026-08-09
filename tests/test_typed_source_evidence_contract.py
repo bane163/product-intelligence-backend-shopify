@@ -242,3 +242,40 @@ def test_typed_exact_source_refs_survive_mutation_plan_decoration():
     assert by_path["option[size].values"]["source_ref"]["cell"] == "F2"
     assert by_path["variant[size-small].taxable"]["source_ref"]["cell"] == "E2"
     assert by_path["metafield[custom-details].value"]["source_ref"]["cell"] == "G2"
+
+
+def test_recovered_default_variant_refs_decorate_sku_and_price_as_sourced():
+    imported = {
+        "title": "Studio Mixer",
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [{
+            "option1": "Default Title", "sku": "SMX-100", "price": "89.99",
+        }],
+        "value_origins": {
+            "variant[title-default-title].sku": "source",
+            "variant[title-default-title].price": "source",
+        },
+        "source_refs": [
+            {"field": "sku", "value_path": "variant[Default Title].sku", "anchor_id": "sku"},
+            {"field": "price", "value_path": "variant[Default Title].price", "anchor_id": "price"},
+        ],
+    }
+    layout = DocumentLayout(1, (
+        DocumentAnchor("title", "source.pdf", 1, (0, 0, 10, 10), "Studio Mixer", "text", "test"),
+        DocumentAnchor("sku", "source.pdf", 1, (0, 10, 10, 20), "SMX-100", "text", "test"),
+        DocumentAnchor("price", "source.pdf", 1, (0, 20, 10, 30), "$89.99", "text", "test"),
+    ), "test", (1,), (1,))
+    verify_pdf_source_refs([imported], layout, "file-1")
+
+    proposed, blockers, unapplied = merge_structured_product(
+        None, imported, {"title": "Studio Mixer", "tags": []}
+    )
+    rows = review_changes(None, imported, proposed, blockers, unapplied)
+    by_path = {row["value_path"]: row for row in rows}
+
+    for path in (
+        "variant[title-default-title].sku",
+        "variant[title-default-title].price",
+    ):
+        assert by_path[path]["origin"] == "source"
+        assert by_path[path]["source_ref"]["document_kind"] == "pdf"

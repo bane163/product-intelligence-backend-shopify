@@ -118,6 +118,7 @@ class SupabaseDomainAccessors:
             target,
             (
                 "save_product_intelligence_audit",
+                "update_product_intelligence_audit_status",
                 "save_product_intelligence_findings",
                 "save_product_intelligence_product_results",
                 "list_product_intelligence_product_results",

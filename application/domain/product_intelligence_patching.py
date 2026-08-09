@@ -3,6 +3,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from application.domain.review_value_paths import (
+    canonical_value_path,
+    is_numeric_field,
+    iter_review_values,
+    values_equal,
+)
+
 SUPPORTED_SUGGESTION_FIELDS = {
     "title",
     "handle",
@@ -49,29 +56,95 @@ def _variant_subject_path(variant: dict[str, Any]) -> str:
     return _normalized_path_part(" / ".join(parts))
 
 
-def _record_patch_origins(
+def _tag_tokens(value: Any) -> list[str] | None:
+    if isinstance(value, str):
+        raw = value.split(",")
+    elif isinstance(value, list):
+        raw = value
+    else:
+        return None
+    return sorted(
+        str(item).strip().casefold() for item in raw if str(item).strip()
+    )
+
+
+def _equivalent(field: str, existing: Any, incoming: Any) -> bool:
+    if field == "tags":
+        left, right = _tag_tokens(existing), _tag_tokens(incoming)
+        return left is not None and right is not None and left == right
+    return values_equal(
+        existing,
+        incoming,
+        numeric_strings=is_numeric_field(field),
+    )
+
+
+def _scalar_existing_value(product: dict[str, Any], field: str) -> tuple[bool, Any]:
+    aliases = {
+        "body_html": ("descriptionHtml", "body_html", "bodyHtml", "description"),
+        "product_type": ("productType", "product_type", "product_category"),
+        "product_category": ("productType", "product_category", "product_type"),
+        "seo_title": ("seo_title", "seoTitle", "meta_title"),
+        "seo_description": ("seo_description", "seoDescription", "meta_description"),
+    }.get(field, (field,))
+    for alias in aliases:
+        if alias in product:
+            return True, product.get(alias)
+    if field in {"seo_title", "seo_description"}:
+        seo = product.get("seo")
+        key = "title" if field == "seo_title" else "description"
+        if isinstance(seo, dict) and key in seo:
+            return True, seo.get(key)
+    return False, None
+
+
+def _existing_review_values(product: dict[str, Any]) -> dict[str, Any]:
+    return {
+        canonical_value_path(item.value_path): item.value
+        for item in iter_review_values(product)
+    }
+
+
+def _changed_patch_origin_paths(
     *,
-    origins: dict[str, Any],
+    product: dict[str, Any],
     patch_payload: dict[str, Any],
     variant_operations: dict[str, Any],
-    origin: str,
-) -> None:
+) -> set[str]:
+    changed: set[str] = set()
     for field in SUPPORTED_SUGGESTION_FIELDS - {"metafields"}:
-        if field in patch_payload and patch_payload.get(field) is not None:
-            origins[_SCALAR_ORIGIN_PATHS.get(field, field)] = origin
+        incoming = patch_payload.get(field)
+        if field not in patch_payload or incoming is None:
+            continue
+        found, existing = _scalar_existing_value(product, field)
+        if not found or not _equivalent(field, existing, incoming):
+            changed.add(_SCALAR_ORIGIN_PATHS.get(field, field))
 
+    existing_metafields = {
+        (item["namespace"], item["key"]): item
+        for item in _normalize_metafields_payload(product.get("metafields"))
+    }
     for metafield in _normalize_metafields_payload(patch_payload.get("metafields")):
         subject = _normalized_path_part(
             f"{metafield['namespace']}.{metafield['key']}"
         )
-        origins[f"metafield[{subject}].value"] = origin
-        if "type" in metafield:
-            origins[f"metafield[{subject}].type"] = origin
+        existing = existing_metafields.get((metafield["namespace"], metafield["key"]))
+        if existing is None or not _equivalent("value", existing.get("value"), metafield["value"]):
+            changed.add(f"metafield[{subject}].value")
+        if "type" in metafield and (
+            existing is None
+            or not _equivalent("type", existing.get("type"), metafield["type"])
+        ):
+            changed.add(f"metafield[{subject}].type")
 
+    existing_values = _existing_review_values(product)
     for option in variant_operations.get("create_options", []):
         if isinstance(option, dict):
             subject = _normalized_path_part(option.get("name"))
-            origins[f"option[{subject}].values"] = origin
+            path = f"option[{subject}].values"
+            existing = existing_values.get(canonical_value_path(path))
+            if existing is None or not _equivalent("tags", existing, option.get("values")):
+                changed.add(path)
 
     for variant in variant_operations.get("create_variants", []):
         if not isinstance(variant, dict):
@@ -79,9 +152,18 @@ def _record_patch_origins(
         subject = _variant_subject_path(variant)
         for field in ("sku", "price"):
             if field in variant:
-                origins[f"variant[{subject}].{field}"] = origin
+                path = f"variant[{subject}].{field}"
+                existing = existing_values.get(canonical_value_path(path))
+                if existing is None or not _equivalent(field, existing, variant[field]):
+                    changed.add(path)
         if "inventory_quantity" in variant:
-            origins[f"inventory[{subject}].inventory_quantity"] = origin
+            path = f"inventory[{subject}].inventory_quantity"
+            existing = existing_values.get(canonical_value_path(path))
+            if existing is None or not _equivalent(
+                "inventory_quantity", existing, variant["inventory_quantity"]
+            ):
+                changed.add(path)
+    return changed
 
 
 def _normalize_tags(value: Any) -> str | list[str] | None:
@@ -229,22 +311,24 @@ def apply_suggestions_to_products(
             continue
         if product_index < 0 or product_index >= len(enhanced_products):
             continue
+        current = enhanced_products[product_index]
         updated, variant_operations = _apply_patch_payload(
-            product=enhanced_products[product_index],
+            product=current,
             patch_payload=patch_payload,
         )
         origin = suggestion.get("value_origin")
         if origin in {"ai_assisted", "derived"}:
-            origins = updated.get("value_origins")
-            if not isinstance(origins, dict):
-                origins = {}
-                updated["value_origins"] = origins
-            _record_patch_origins(
-                origins=origins,
+            raw_origins = updated.get("value_origins") or updated.get("_value_origins")
+            origins = dict(raw_origins) if isinstance(raw_origins, dict) else {}
+            changed_paths = _changed_patch_origin_paths(
+                product=current,
                 patch_payload=patch_payload,
                 variant_operations=variant_operations,
-                origin=origin,
             )
+            if origins or changed_paths:
+                updated["value_origins"] = origins
+            for path in changed_paths:
+                origins[path] = origin
         enhanced_products[product_index] = updated
         if variant_operations.get("create_options") or variant_operations.get(
             "create_variants"

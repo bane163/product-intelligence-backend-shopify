@@ -215,6 +215,9 @@ def _save_draft_state(
     extraction_status: str | None = None,
     extraction_run_id: str | None = None,
     extraction_error: str | None = None,
+    quality_gate_status: str | None = None,
+    quality_report: dict[str, Any] | None = None,
+    quality_checked_at: str | None = None,
     submit_status: str | None = None,
     submit_run_id: str | None = None,
     submit_error: str | None = None,
@@ -241,6 +244,7 @@ def _save_draft_state(
     existing_extraction_status = _optional_str(existing, "extraction_status")
     existing_extraction_run_id = _optional_str(existing, "extraction_run_id")
     existing_extraction_error = _optional_str(existing, "extraction_error")
+    existing_quality_gate_status = _optional_str(existing, "quality_gate_status")
     existing_submit_status = _optional_str(existing, "submit_status")
     existing_submit_run_id = _optional_str(existing, "submit_run_id")
     existing_submit_error = _optional_str(existing, "submit_error")
@@ -292,6 +296,15 @@ def _save_draft_state(
         ),
         extraction_error=(
             extraction_error if extraction_error is not None else existing_extraction_error
+        ),
+        quality_gate_status=(
+            quality_gate_status if quality_gate_status is not None else existing_quality_gate_status
+        ),
+        quality_report=(
+            quality_report if quality_report is not None else existing.get("quality_report")
+        ),
+        quality_checked_at=(
+            quality_checked_at if quality_checked_at is not None else _optional_str(existing, "quality_checked_at")
         ),
         submit_status=submit_status if submit_status is not None else existing_submit_status,
         submit_run_id=submit_run_id if submit_run_id is not None else existing_submit_run_id,
@@ -362,6 +375,7 @@ async def _run_import_in_background(
         output_file_id = None
         output_filename = None
         extracted_products: list[dict[str, Any]] | None = None
+        quality_report: dict[str, Any] | None = None
         if isinstance(payload, dict):
             if isinstance(payload.get("file_id"), str):
                 output_file_id = payload["file_id"]
@@ -371,6 +385,8 @@ async def _run_import_in_background(
                 extracted_products = [
                     item for item in payload["products"] if isinstance(item, dict)
                 ]
+            if isinstance(payload.get("quality_report"), dict):
+                quality_report = payload["quality_report"]
 
         _save_draft_state(
             ctx=ctx,
@@ -386,6 +402,14 @@ async def _run_import_in_background(
             extraction_status="succeeded",
             extraction_run_id=run_id,
             extraction_error=None,
+            quality_gate_status="live_validation_pending",
+            quality_report=(
+                {**quality_report, "status": "live_validation_pending"}
+                if quality_report else None
+            ),
+            quality_checked_at=(
+                str(quality_report.get("generated_at")) if quality_report else None
+            ),
         )
     except Exception as exc:
         _save_draft_state(

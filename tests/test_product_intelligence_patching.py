@@ -195,3 +195,107 @@ def test_apply_suggestions_to_products_does_not_apply_unknown_fields():
 
     assert enhanced[0]["title"] == "Renamed Demo"
     assert "unknown_field" not in enhanced[0]
+
+
+def test_no_op_ai_patch_preserves_source_origins_and_source_refs():
+    source_refs = [
+        {"value_path": "title", "page": 1},
+        {"value_path": "descriptionHtml", "page": 1},
+        {"value_path": "variant[title-default-title].sku", "page": 1},
+    ]
+    products = [{
+        "title": "Studio Mixer",
+        "descriptionHtml": "<p>Compact mixer</p>",
+        "vendor": "Sound Co",
+        "productType": "Electronics",
+        "tags": ["Audio", "Studio"],
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [{
+            "option1": "Default Title", "sku": "SMX-100", "price": "89.99"
+        }],
+        "metafields": [{
+            "namespace": "custom", "key": "material",
+            "type": "single_line_text_field", "value": "Metal",
+        }],
+        "value_origins": {
+            "title": "source",
+            "descriptionHtml": "source",
+            "vendor": "source",
+            "productType": "source",
+            "tags": "source",
+            "metafield[custom-material].value": "source",
+            "metafield[custom-material].type": "source",
+            "option[title].values": "source",
+            "variant[title-default-title].sku": "source",
+            "variant[title-default-title].price": "source",
+        },
+        "source_refs": source_refs,
+    }]
+    suggestions = [{
+        "product_index": 0,
+        "value_origin": "ai_assisted",
+        "patch_payload": {
+            "title": "Studio Mixer",
+            "body_html": "<p>Compact mixer</p>",
+            "vendor": "Sound Co",
+            "product_type": "Electronics",
+            "tags": "studio, audio",
+            "metafields": [{
+                "namespace": "custom", "key": "material",
+                "type": "single_line_text_field", "value": "Metal",
+            }],
+            "variant_operations": {
+                "create_options": [{"name": "Title", "values": ["Default Title"]}],
+                "create_variants": [{
+                    "option_values": [{"option_name": "Title", "name": "Default Title"}],
+                    "sku": "SMX-100", "price": 89.99,
+                }],
+            },
+        },
+    }]
+
+    enhanced, _ = apply_suggestions_to_products(products=products, suggestions=suggestions)
+
+    assert set(enhanced[0]["value_origins"].values()) == {"source"}
+    assert enhanced[0]["source_refs"] is source_refs
+    assert products[0]["value_origins"] == enhanced[0]["value_origins"]
+
+
+def test_mixed_ai_patch_changes_only_meaningfully_different_origin_paths():
+    products = [{
+        "title": "Mixer",
+        "vendor": "Sound Co",
+        "tags": ["Audio", "Studio"],
+        "metafields": [{
+            "namespace": "custom", "key": "details",
+            "type": "single_line_text_field", "value": "Metal",
+        }],
+        "value_origins": {
+            "title": "source", "vendor": "source", "tags": "source",
+            "metafield[custom-details].value": "source",
+            "metafield[custom-details].type": "source",
+        },
+    }]
+    suggestions = [{
+        "product_index": 0,
+        "value_origin": "ai_assisted",
+        "patch_payload": {
+            "title": "Mixer",
+            "vendor": "New Sound Co",
+            "tags": "studio, audio",
+            "metafields": [{
+                "namespace": "custom", "key": "details",
+                "type": "multi_line_text_field", "value": "Metal",
+            }],
+        },
+    }]
+
+    enhanced, _ = apply_suggestions_to_products(products=products, suggestions=suggestions)
+
+    assert enhanced[0]["value_origins"] == {
+        "title": "source",
+        "vendor": "ai_assisted",
+        "tags": "source",
+        "metafield[custom-details].value": "source",
+        "metafield[custom-details].type": "ai_assisted",
+    }

@@ -36,6 +36,37 @@ def test_invalid_status_is_blocked_before_transport():
     assert "INVALID_STATUS" in {item["code"] for item in blockers}
 
 
+def test_missing_sku_and_price_have_required_editable_blocked_rows():
+    imported = {
+        "title": "Tee",
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [{"option1": "Default Title"}],
+    }
+    proposed, _, _ = merge_structured_product(None, imported, {"title": "Tee"})
+    plan_item = build_review_plan_item(
+        item_id="item",
+        currency_code="USD",
+        source_index=0,
+        source_product=imported,
+        live_snapshot=None,
+        proposed=proposed,
+        operation="create",
+        blockers=[
+            {"code": "SKU_REQUIRED", "field": "variants[0].sku"},
+            {"code": "PRICE_REQUIRED", "field": "variants[0].price"},
+        ],
+    )
+
+    required = {
+        row["field"]: row
+        for row in plan_item["review_changes"]
+        if row["field"] in {"sku", "price"}
+    }
+    assert set(required) == {"sku", "price"}
+    assert all(row["disposition"] == "blocked" for row in required.values())
+    assert all(row["required"] and row["editable"] for row in required.values())
+
+
 def test_review_rows_have_stable_ids_paths_and_truthful_provenance():
     imported = {
         "handle": "catalog-hat",

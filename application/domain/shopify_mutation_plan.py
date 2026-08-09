@@ -1046,6 +1046,8 @@ def _decorate_review_rows(
                 or row.get("field") == "variant"
             )
         )
+        if isinstance(row.get("edit_schema"), dict) and row["edit_schema"].get("required"):
+            required = True
         identity = "\x1f".join(
             (
                 str(product_identity).strip().casefold(),
@@ -1166,7 +1168,7 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
     and prevents a missing or stale ``editable`` value from granting access.
     """
     normalized = deepcopy(plan)
-    if normalized.get("review_contract_version") != 2:
+    if normalized.get("review_contract_version") not in {2, 3}:
         return normalized
     items = normalized.get("items")
     if not isinstance(items, list):
@@ -1240,7 +1242,7 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
             row["presentation"] = presentation
             row["editable"] = bool(
                 presentation == "merchant"
-                and disposition == "applicable"
+                and disposition in {"applicable", "blocked"}
                 and target_exists
             )
     return normalized
@@ -1474,6 +1476,40 @@ def review_changes(
                         ),
                     )
                 )
+
+    # Missing required commerce values still need concrete editable rows. They
+    # remain blockers until the merchant supplies them during review.
+    proposed_variants = _variants(proposed)
+    for blocker in blockers:
+        if not isinstance(blocker, dict) or blocker.get("code") not in {
+            "SKU_REQUIRED", "PRICE_REQUIRED"
+        }:
+            continue
+        match = re.fullmatch(
+            r"variants\[(\d+)\]\.(sku|price)", str(blocker.get("field") or "")
+        )
+        if not match:
+            continue
+        variant_index, field = int(match.group(1)), match.group(2)
+        if variant_index >= len(proposed_variants):
+            continue
+        variant = proposed_variants[variant_index]
+        subject = _variant_subject(variant, option_names)
+        identity = _variant_subject_identity(variant, option_names)
+        if any(
+            row.get("scope") == "variant"
+            and row.get("field") == field
+            and row.get("subject_identity") == identity
+            for row in rows
+        ):
+            continue
+        missing_row = _review_row(
+            scope="variant", subject=subject, field=field, current=None,
+            proposed=None, disposition="blocked", change_kind="added",
+            reason_codes=[str(blocker["code"])], subject_identity=identity,
+        )
+        missing_row["edit_schema"]["required"] = True
+        rows.append(missing_row)
 
     if "metafields" in proposed:
         old_metafields = {

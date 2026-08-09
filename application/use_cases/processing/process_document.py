@@ -11,6 +11,8 @@ from application.domain.product_intelligence_patching import (
     VARIANT_OPERATIONS_FIELD,
     apply_suggestions_to_products,
 )
+from application.domain.extraction_quality import build_quality_report
+from application.domain.field_derivation_policy import apply_server_owned_origins
 from application.ports.llm_port import LLMPort
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
@@ -20,6 +22,14 @@ from application.services.canonical_pdf import (
     ensure_canonical_pdf,
 )
 from application.services.spreadsheet_source_refs import enrich_spreadsheet_source_refs
+from application.services.pdf_evidence_index import (
+    EvidenceCatalog,
+    SourceEvidenceValidationFailed,
+    blank_unverified_optional_pdf_values,
+    build_evidence_catalog,
+    resolve_indexed_pdf_source_refs,
+    validate_indexed_pdf_evidence,
+)
 from application.use_cases.intelligence_generate_suggestions import (
     execute as generate_suggestions_execute,
 )
@@ -191,6 +201,7 @@ async def execute(
                 final_output_path = output_path
 
         pdf_layout = None
+        evidence_catalog: EvidenceCatalog | None = None
         extracted_text_override = None
         canonical_source_file_id = source_file_id
         if document_format.kind in {"pdf", "docx", "pptx", "image"}:
@@ -243,38 +254,140 @@ async def execute(
                 raise DocumentTextEvidenceUnavailable(
                     "Azure processed the image but returned no usable textual anchors"
                 )
-            extracted_text_override = pdf_layout.to_prompt_text()
+            evidence_catalog = build_evidence_catalog(pdf_layout)
+            extracted_text_override = evidence_catalog.to_prompt_text()
             emit_and_persist(
                 phase="pdf_page_coverage",
                 message="Resolved PDF layout coverage",
                 payload_preview={"provider": pdf_layout.provider, "expected": list(pdf_layout.expected_pages), "covered": list(pdf_layout.covered_pages), "anchors": len(pdf_layout.anchors)},
             )
+            emit_and_persist(
+                phase="pdf_evidence_catalog_built",
+                message="Built deterministic PDF evidence catalog",
+                payload_preview={
+                    "catalog_size": len(evidence_catalog.entries),
+                    "layout_anchors": len(pdf_layout.anchors),
+                    "provider": pdf_layout.provider,
+                },
+            )
 
-        result = await llm.run_excel_agent_workflow(
-            file_bytes,
-            collabora_base_url=collabora_url,
-            agent_prompt=DEFAULT_IMPORT_AGENT_PROMPT,
-            model_env=model_env,
-            model_provider=model_provider,
-            model_file_search_enabled=model_file_search_enabled,
-            input_name=input_name,
-            input_content_type=input_content_type,
-            extraction_mode=extraction_mode,
-            write_to_file=write_to_file,
-            output_path=final_output_path,
-            writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,
-            trace_event=trace_event,
-            extracted_text_override=extracted_text_override,
-            shop_domain=shop_domain,
-        )
-        if isinstance(result, ProductsList):
-            result = {
-                "products": [
-                    item
-                    for item in result.model_dump(mode="json").get("products", [])
-                    if isinstance(item, dict)
-                ]
-            }
+        extraction_prompt = DEFAULT_IMPORT_AGENT_PROMPT
+        if evidence_catalog is not None:
+            extraction_prompt += (
+                " The extracted PDF text is a numbered evidence catalog. For every directly "
+                "document-sourced review value, return a source_ref containing its exact canonical "
+                "value_path and numeric evidence_index. Do not return page numbers, bounding boxes, "
+                "source IDs, or anchor IDs. For values that are not directly sourced, explicitly set "
+                "value_origins for that canonical path to derived, defaulted, or ai_assisted."
+            )
+
+        max_evidence_attempts = 3 if evidence_catalog is not None else 1
+        result: ProductsList | dict[str, Any] | str | None = None
+        for evidence_attempt in range(max_evidence_attempts):
+            result = await llm.run_excel_agent_workflow(
+                file_bytes,
+                collabora_base_url=collabora_url,
+                agent_prompt=extraction_prompt,
+                model_env=model_env,
+                model_provider=model_provider,
+                model_file_search_enabled=model_file_search_enabled,
+                input_name=input_name,
+                input_content_type=input_content_type,
+                extraction_mode=extraction_mode,
+                # PDF output is written only after indexed evidence validates.
+                write_to_file=write_to_file and evidence_catalog is None,
+                output_path=final_output_path,
+                writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,
+                trace_event=trace_event,
+                extracted_text_override=extracted_text_override,
+                shop_domain=shop_domain,
+            )
+            if isinstance(result, ProductsList):
+                result = {
+                    "products": [
+                        item
+                        for item in result.model_dump(mode="json", exclude_none=True).get("products", [])
+                        if isinstance(item, dict)
+                    ]
+                }
+            if evidence_catalog is None:
+                break
+            raw_products = result.get("products") if isinstance(result, dict) else None
+            candidate_products = (
+                [item for item in raw_products if isinstance(item, dict)]
+                if isinstance(raw_products, list)
+                else []
+            )
+            for product in candidate_products:
+                apply_server_owned_origins(product)
+            cleared_optional_paths: tuple[str, ...] = ()
+            if evidence_attempt + 1 >= max_evidence_attempts:
+                cleared_optional_paths = blank_unverified_optional_pdf_values(
+                    candidate_products, evidence_catalog
+                )
+            if cleared_optional_paths:
+                emit_and_persist(
+                    phase="pdf_unverified_optional_values_cleared",
+                    message="Left optional PDF fields blank when no indexed evidence exists",
+                    payload_preview={"value_paths": list(cleared_optional_paths)},
+                )
+            validation = validate_indexed_pdf_evidence(candidate_products, evidence_catalog)
+            if validation.valid:
+                resolved = resolve_indexed_pdf_source_refs(
+                    candidate_products,
+                    evidence_catalog,
+                    canonical_source_file_id or input_name or "uploaded.pdf",
+                )
+                if isinstance(result, dict):
+                    result["products"] = candidate_products
+                emit_and_persist(
+                    phase="pdf_evidence_validation_success",
+                    message="Validated and resolved indexed PDF evidence",
+                    payload_preview={
+                        "attempt": evidence_attempt + 1,
+                        "resolved": resolved,
+                        "catalog_size": len(evidence_catalog.entries),
+                    },
+                )
+                break
+            emit_and_persist(
+                phase="pdf_evidence_missing_index_feedback",
+                message="PDF extraction requires source-evidence correction",
+                level="warning",
+                payload_preview={
+                    "attempt": evidence_attempt + 1,
+                    "affected_paths": list(validation.affected_paths),
+                    "feedback": validation.feedback,
+                },
+            )
+            if evidence_attempt + 1 >= max_evidence_attempts:
+                emit_and_persist(
+                    phase="pdf_evidence_validation_failed",
+                    message="PDF source-evidence validation failed after corrections",
+                    level="error",
+                    payload_preview={
+                        "attempts": max_evidence_attempts,
+                        "affected_paths": list(validation.affected_paths),
+                    },
+                    error=validation.feedback,
+                )
+                raise SourceEvidenceValidationFailed(
+                    validation.affected_paths, validation.feedback
+                )
+            emit_and_persist(
+                phase="pdf_evidence_correction_attempt",
+                message="Requesting a complete corrected product payload",
+                level="warning",
+                payload_preview={
+                    "correction_attempt": evidence_attempt + 1,
+                    "affected_paths": list(validation.affected_paths),
+                },
+            )
+            extraction_prompt = (
+                f"{DEFAULT_IMPORT_AGENT_PROMPT}\n\n{validation.feedback}\n"
+                "Use only the numbered evidence catalog supplied with this request and return the "
+                "complete products payload, not a patch."
+            )
         if isinstance(result, dict):
             enrichment_attempted = False
             enrichment_applied = False
@@ -293,17 +406,6 @@ async def execute(
             if products and document_format.is_spreadsheet:
                 enrich_spreadsheet_source_refs(
                     products, file_bytes, input_name, source_file_id=source_file_id
-                )
-            if products and pdf_layout is not None:
-                from application.services.pdf_source_refs import verify_pdf_source_refs
-                resolved, dropped = verify_pdf_source_refs(
-                    products, pdf_layout, canonical_source_file_id or input_name or "uploaded.pdf"
-                )
-                emit_and_persist(
-                    phase="pdf_anchor_resolution",
-                    message="Verified PDF source anchors",
-                    level="warning" if dropped else "info",
-                    payload_preview={"resolved": resolved, "dropped_ambiguous": dropped, "provider": pdf_layout.provider},
                 )
             for product in products:
                 refs = product.get("source_refs") if isinstance(product.get("source_refs"), list) else []
@@ -382,7 +484,7 @@ async def execute(
                 result["enrichment_warning"] = enrichment_warning
             if (
                 write_to_file
-                and enrichment_applied
+                and (enrichment_applied or evidence_catalog is not None)
                 and isinstance(result.get("products"), list)
             ):
                 try:
@@ -427,6 +529,13 @@ async def execute(
                         message=f"Import output refresh skipped: {exc}",
                         level="warning",
                     )
+            final_products = result.get("products")
+            result["quality_report"] = build_quality_report(
+                [item for item in final_products if isinstance(item, dict)]
+                if isinstance(final_products, list)
+                else []
+            )
+            result["quality_gate_status"] = "ready"
         emit_and_persist(phase="workflow_done", message="Document workflow completed")
     except Exception as exc:
         emit_and_persist(

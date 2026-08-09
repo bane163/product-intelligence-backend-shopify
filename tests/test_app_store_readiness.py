@@ -44,7 +44,7 @@ async def test_health_and_ready_endpoints_report_service_availability(monkeypatc
     assert ready.status_code == 200, ready.text
     payload = ready.json()
     assert payload["status"] == "ready"
-    assert payload["review_contract_version"] == 2
+    assert payload["review_contract_version"] == 3
     assert payload["review_schema_ready"] is True
     assert payload["services"] == ["supabase", "llm", "collabora", "tracing", "shopify"]
     assert payload["collabora"]["status"] == "ready"

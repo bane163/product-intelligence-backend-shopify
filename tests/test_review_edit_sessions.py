@@ -343,6 +343,74 @@ async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
 
 
 @pytest.mark.asyncio
+async def test_workbook_session_preserves_initial_grid_state_and_accepts_ui_operations_only():
+    service = get_app_context().services.supabase._service
+    shop = "workbook-ui-state.myshopify.com"
+    draft_id = "workbook-ui-state-draft"
+    _seed_durable_history_review(service, shop, draft_id)
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    initial_grid_state = {
+        "filterValues": {"changes": "all"},
+        "expandedItemIds": ["item-1"],
+        "pagesByItem": {"item-1": 2},
+        "workspaceView": "spreadsheet",
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base,
+            headers=headers,
+            json={
+                "surface": "workbook",
+                "base_revision": 1,
+                "grid_state": initial_grid_state,
+            },
+        )
+        session = created.json()["session"]
+        patched = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operations": [
+                    {"type": "expansion", "expandedItemIds": []},
+                    {"type": "workspace_view", "workspaceView": "changes"},
+                ],
+            },
+        )
+        rejected = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 2,
+                "operation": {
+                    "type": "value_edit",
+                    "change_id": "title-change",
+                    "value_path": "title",
+                    "value": "Not allowed",
+                },
+            },
+        )
+        resumed = await client.get(base, headers=headers)
+
+    assert created.status_code == 200, created.text
+    assert session["grid_state"] == {
+        "filterValues": {"changes": "all"},
+        "expandedItemIds": ["item-1"],
+        "pagesByItem": {"item-1": 2},
+    }
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["session"]["grid_state"] == {
+        "filterValues": {"changes": "all"},
+        "pagesByItem": {"item-1": 2},
+        "expandedItemIds": [],
+    }
+    assert rejected.status_code == 409
+    assert resumed.json()["session"]["grid_state"] == patched.json()["session"]["grid_state"]
+
+
+@pytest.mark.asyncio
 async def test_grid_selection_matches_mutation_plan_required_and_deferred_rules():
     service = get_app_context().services.supabase._service
     shop = "grid-selection-contract.myshopify.com"

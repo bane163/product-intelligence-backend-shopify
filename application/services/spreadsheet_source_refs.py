@@ -18,6 +18,11 @@ from application.domain.review_value_paths import (
     iter_review_values,
     values_equal,
 )
+from application.domain.field_derivation_policy import (
+    NON_SOURCE_ORIGINS,
+    is_protected_field,
+    remove_unverified_protected_values,
+)
 
 
 _HEADER_ALIASES = {
@@ -215,6 +220,57 @@ def _origin_for(product: dict[str, Any], path: str) -> str | None:
         return None
     matches = {str(origin) for key, origin in origins.items() if canonical_value_path(key) == canonical_value_path(path)}
     return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _structured_signature(path: Any) -> tuple[str, str] | None:
+    match = re.fullmatch(r"([^\[\]]+)\[.*\]\.(.+)", canonical_value_path(path))
+    return (match.group(1), match.group(2)) if match else None
+
+
+def _reconciled_structured_refs(
+    refs: list[dict[str, Any]],
+    items: list[ReviewValue],
+    sheets: dict[str, list[list[Any]]],
+    allowed_sheets: set[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Resolve one legacy structured path only when location and value are unique."""
+    exact_paths = {canonical_value_path(item.value_path) for item in items}
+    matches_by_item: dict[str, list[dict[str, Any]]] = {}
+    attempted_by_item: dict[str, list[dict[str, Any]]] = {}
+    items_by_ref: dict[int, list[str]] = {}
+    for index, ref in enumerate(refs):
+        path = canonical_value_path(ref.get("value_path"))
+        signature = _structured_signature(path)
+        if not signature or path in exact_paths:
+            continue
+        sheet, coordinate = _ref_location(ref)
+        for item in items:
+            if _structured_signature(item.value_path) != signature:
+                continue
+            if canonical_value_path(ref.get("field")) not in {
+                "", canonical_value_path(item.field)
+            }:
+                continue
+            attempted_by_item.setdefault(item.value_path, []).append(ref)
+            if (
+                sheet not in allowed_sheets
+                or sheet not in sheets
+                or not _region_match(sheets[sheet], coordinate, item)
+            ):
+                continue
+            matches_by_item.setdefault(item.value_path, []).append(ref)
+            items_by_ref.setdefault(index, []).append(item.value_path)
+
+    reconciled: dict[str, dict[str, Any]] = {}
+    for item_path, matches in matches_by_item.items():
+        if len(matches) != 1:
+            continue
+        ref_index = next(
+            index for index, candidate in enumerate(refs) if candidate is matches[0]
+        )
+        if len(items_by_ref.get(ref_index, [])) == 1:
+            reconciled[item_path] = matches[0]
+    return reconciled, attempted_by_item
 
 
 def _columns(row: list[Any], review_values: list[ReviewValue]) -> dict[str, list[int]]:
@@ -447,6 +503,9 @@ def enrich_spreadsheet_source_refs(
                 anchors.append((sheet, coordinate, _parent_scope(ref)))
         anchored_sheets = {sheet for sheet, _, _ in anchors}
         allowed_sheets = anchored_sheets if len(anchored_sheets) == 1 else (set(sheets) if not anchors else set())
+        reconciled, reconciliation_attempts = _reconciled_structured_refs(
+            incoming, items, sheets, allowed_sheets
+        )
 
         tables: list[
             tuple[
@@ -476,12 +535,20 @@ def enrich_spreadsheet_source_refs(
 
         verified: list[dict[str, Any]] = []
         for item in items:
-            if _origin_for(product, item.value_path) in {"ai_assisted", "derived", "merchant_edited", "unknown", "defaulted"}:
+            origin = _origin_for(product, item.value_path)
+            if origin in NON_SOURCE_ORIGINS and not is_protected_field(item.value_path, item.field):
+                continue
+            if origin in {"merchant_edited", "unknown"}:
                 continue
             locations: dict[tuple[str, str, str], dict[str, Any]] = {}
             relevant = [ref for ref in incoming if _ref_path(ref) == canonical_value_path(item.value_path)]
             if not relevant and item.scope == "product":
                 relevant = [ref for ref in incoming if not ref.get("value_path") and canonical_value_path(ref.get("field")) == canonical_value_path(item.field)]
+            if not relevant and item.value_path in reconciled:
+                relevant = [reconciled[item.value_path]]
+            reconciliation_failed = (
+                not relevant and item.value_path in reconciliation_attempts
+            )
             parent_refs = [ref for ref in incoming if _parent_scope(ref) == item.scope]
             # Duplicate exact claims are ambiguous even when one happens to verify.
             evidence_refs = (relevant if len(relevant) == 1 else []) + parent_refs
@@ -506,7 +573,7 @@ def enrich_spreadsheet_source_refs(
             # Reconstruct evidence only from recognized headers and product-owned
             # rows. Continuation rows may have blank Titles, so ownership is
             # established independently from the value being linked.
-            if not locations and not relevant:
+            if not locations and not relevant and not reconciliation_failed:
                 for sheet, rows, header_index, columns, option_columns, owned in tables:
                     if item.scope == "option":
                         # Header forms such as option[size].values are exact
@@ -592,3 +659,17 @@ def enrich_spreadsheet_source_refs(
             )
             deduplicated.setdefault(identity, ref)
         product["source_refs"] = list(deduplicated.values())
+        verified_paths = {
+            canonical_value_path(ref.get("value_path"))
+            for ref in product["source_refs"]
+            if isinstance(ref, dict) and ref.get("value_path")
+        }
+        origins = product.get("value_origins")
+        if not isinstance(origins, dict):
+            origins = {}
+        for path in verified_paths:
+            if is_protected_field(path):
+                origins[path] = "source"
+        if origins:
+            product["value_origins"] = origins
+        remove_unverified_protected_values(product, verified_paths)

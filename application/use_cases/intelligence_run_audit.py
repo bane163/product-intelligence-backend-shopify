@@ -379,38 +379,7 @@ async def execute(
         ],
     }
 
-    audit_id = str(uuid.uuid4())
-    audit = supabase.intelligence.save_product_intelligence_audit(
-        audit_id=audit_id,
-        run_id=run_id,
-        submitted_id=submitted_id,
-        scope="submitted_document" if submitted_id else "adhoc_products",
-        status="success",
-        overall_score=overall_score,
-        findings_count=len(findings),
-        component_scores=component_scores,
-        totals=totals,
-        shop_domain=tenant,
-        scoring_version=SCORING_VERSION,
-    )
-    if callable(trace_event):
-        trace_event(
-            phase="audit_persisted",
-            message="Persisted audit metadata",
-            payload_preview={"audit_id": audit_id, "run_id": run_id},
-        )
-    supabase.intelligence.save_product_intelligence_findings(audit_id=audit_id, findings=findings, shop_domain=tenant)
-    supabase.intelligence.save_product_intelligence_product_results(
-        audit_id=audit_id,
-        results=[{key: value for key, value in row.items() if key != "findings"} for row in product_results],
-        shop_domain=tenant,
-    )
-    if callable(trace_event):
-        trace_event(
-            phase="findings_persisted",
-            message="Persisted intelligence findings",
-            payload_preview={"findings_count": len(findings)},
-        )
+    # Generate every child in memory before creating a visible audit record.
     normalization_settings = supabase.intelligence.get_product_intelligence_normalization_settings(
         shop_domain=tenant,
     )
@@ -421,23 +390,75 @@ async def execute(
         normalization_settings=normalization_settings,
         trace_event=trace_event if callable(trace_event) else None,
     )
-    supersede_pending = getattr(
-        supabase.intelligence,
-        "supersede_pending_product_intelligence_suggestions",
-        None,
-    )
-    if callable(supersede_pending):
-        supersede_pending(
+
+    audit_id = str(uuid.uuid4())
+    audit_created = False
+    try:
+        audit = supabase.intelligence.save_product_intelligence_audit(
+            audit_id=audit_id,
+            run_id=run_id,
+            submitted_id=submitted_id,
+            scope="submitted_document" if submitted_id else "adhoc_products",
+            status="pending",
+            overall_score=overall_score,
+            findings_count=len(findings),
+            component_scores=component_scores,
+            totals=totals,
+            shop_domain=tenant,
+            scoring_version=SCORING_VERSION,
+            require_persistence=True,
+        )
+        audit_created = True
+        if callable(trace_event):
+            trace_event(
+                phase="audit_persisted",
+                message="Persisted pending audit metadata",
+                payload_preview={"audit_id": audit_id, "run_id": run_id},
+            )
+        supabase.intelligence.save_product_intelligence_findings(
+            audit_id=audit_id, findings=findings, shop_domain=tenant,
+            require_persistence=True,
+        )
+        supabase.intelligence.save_product_intelligence_product_results(
+            audit_id=audit_id,
+            results=[{key: value for key, value in row.items() if key != "findings"} for row in product_results],
+            shop_domain=tenant,
+            require_persistence=True,
+        )
+        supabase.intelligence.save_product_intelligence_suggestions(
+            audit_id=audit_id, suggestions=suggestions, shop_domain=tenant,
+            require_persistence=True,
+        )
+        if callable(trace_event):
+            trace_event(
+                phase="children_persisted",
+                message="Persisted intelligence findings, results, and suggestions",
+                payload_preview={
+                    "findings_count": len(findings),
+                    "suggestions_count": len(suggestions),
+                },
+            )
+        supabase.intelligence.supersede_pending_product_intelligence_suggestions(
             product_ids=[str(product.get("id") or "") for product in products],
             superseded_by_audit_id=audit_id,
             shop_domain=tenant,
+            require_persistence=True,
         )
-    supabase.intelligence.save_product_intelligence_suggestions(audit_id=audit_id, suggestions=suggestions, shop_domain=tenant)
-    if callable(trace_event):
-        trace_event(
-            phase="suggestions_persisted",
-            message="Persisted intelligence suggestions",
-            payload_preview={"suggestions_count": len(suggestions)},
+        completed = supabase.intelligence.update_product_intelligence_audit_status(
+            audit_id=audit_id, status="success", shop_domain=tenant,
+            require_persistence=True,
         )
+        if not completed:
+            raise RuntimeError("Failed to mark product intelligence audit successful")
+    except Exception:
+        if audit_created:
+            try:
+                supabase.intelligence.update_product_intelligence_audit_status(
+                    audit_id=audit_id, status="error", shop_domain=tenant,
+                    require_persistence=False,
+                )
+            except Exception:
+                pass
+        raise
 
-    return {**audit, "findings": findings, "suggestions": suggestions}
+    return {**audit, **completed, "status": "success", "findings": findings, "suggestions": suggestions}

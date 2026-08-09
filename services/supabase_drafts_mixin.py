@@ -136,6 +136,9 @@ class SupabaseDraftsMixin:
         extraction_status: str | None = None,
         extraction_run_id: str | None = None,
         extraction_error: str | None = None,
+        quality_gate_status: str | None = None,
+        quality_report: dict[str, Any] | None = None,
+        quality_checked_at: str | None = None,
         submit_status: str | None = None,
         submit_run_id: str | None = None,
         submit_error: str | None = None,
@@ -162,6 +165,9 @@ class SupabaseDraftsMixin:
             "extraction_status": extraction_status,
             "extraction_run_id": extraction_run_id,
             "extraction_error": extraction_error,
+            "quality_gate_status": quality_gate_status,
+            "quality_report": quality_report,
+            "quality_checked_at": quality_checked_at,
             "submit_status": submit_status,
             "submit_run_id": submit_run_id,
             "submit_error": submit_error,
@@ -177,7 +183,7 @@ class SupabaseDraftsMixin:
         if client:
             compat_payload = dict(payload)
             exc: Exception | None = None
-            for _attempt in range(3):
+            for _attempt in range(6):
                 try:
                     client.table("product_drafts").upsert(
                         compat_payload, on_conflict="draft_id"
@@ -187,7 +193,10 @@ class SupabaseDraftsMixin:
                 except Exception as attempt_exc:
                     exc = attempt_exc
                     removed_compat_column = False
-                    for column in ("ai_enhancements_enabled", "draft_name"):
+                    for column in (
+                        "quality_gate_status", "quality_report", "quality_checked_at",
+                        "ai_enhancements_enabled", "draft_name",
+                    ):
                         if column in compat_payload and _is_missing_column_error(
                             attempt_exc, table="product_drafts", column=column
                         ):
@@ -217,6 +226,9 @@ class SupabaseDraftsMixin:
                     compat_payload.pop("extraction_status", None)
                     compat_payload.pop("extraction_run_id", None)
                     compat_payload.pop("extraction_error", None)
+                    compat_payload.pop("quality_gate_status", None)
+                    compat_payload.pop("quality_report", None)
+                    compat_payload.pop("quality_checked_at", None)
                     compat_payload.pop("submit_status", None)
                     compat_payload.pop("submit_run_id", None)
                     compat_payload.pop("submit_error", None)

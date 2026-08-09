@@ -48,6 +48,7 @@ async def execute(*, supabase: SupabaseNamespacedPort, suggestion_id: str, field
         replacement = supabase.intelligence.create_product_intelligence_suggestion(
             suggestion={**common, "suggestion_id": str(uuid.uuid4()), "status": "pending",
                         "patch_payload": {field: candidate["patch_payload"][field]},
+                        "value_origin": candidate.get("value_origin") or source.get("value_origin") or "unknown",
                         "parent_suggestion_id": suggestion_id, "root_suggestion_id": root},
             shop_domain=shop_domain)
         if not replacement:
@@ -58,7 +59,9 @@ async def execute(*, supabase: SupabaseNamespacedPort, suggestion_id: str, field
         if siblings:
             carry = supabase.intelligence.create_product_intelligence_suggestion(
                 suggestion={**common, "suggestion_id": str(uuid.uuid4()), "status": "pending",
-                            "patch_payload": siblings, "parent_suggestion_id": suggestion_id,
+                            "patch_payload": siblings,
+                            "value_origin": source.get("value_origin") or "unknown",
+                            "parent_suggestion_id": suggestion_id,
                             "root_suggestion_id": root}, shop_domain=shop_domain)
             if not carry:
                 raise RuntimeError("Failed to persist sibling suggestion")

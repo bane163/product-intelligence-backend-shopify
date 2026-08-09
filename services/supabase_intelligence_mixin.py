@@ -5,6 +5,19 @@ from typing import Any, Optional
 from .supabase_constants import NORMALIZATION_CATEGORY_KEYS
 
 LOG = logging.getLogger(__name__)
+_SUCCESSFUL_AUDIT_STATUSES = {"success", "succeeded"}
+
+_SUGGESTION_PERSISTENCE_FIELDS = {
+    "suggestion_id", "audit_id", "finding_id", "product_index", "product_title",
+    "product_id", "category", "severity", "message", "patch_payload",
+    "previous_payload", "details", "status", "applied_at", "reverted_at",
+    "superseded_at", "superseded_by_audit_id", "parent_suggestion_id",
+    "root_suggestion_id", "created_at", "updated_at", "shop_domain", "value_origin",
+}
+
+
+def _suggestion_persistence_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in item.items() if key in _SUGGESTION_PERSISTENCE_FIELDS}
 
 
 class SupabaseIntelligenceMixin:
@@ -36,6 +49,7 @@ class SupabaseIntelligenceMixin:
         totals: dict[str, Any],
         shop_domain: str | None = None,
         scoring_version: str = "legacy-catalog-v1",
+        require_persistence: bool = False,
     ) -> dict[str, Any]:
         tenant = str(shop_domain or "").strip().lower()
         if not tenant:
@@ -65,8 +79,42 @@ class SupabaseIntelligenceMixin:
                 return payload
             except Exception:
                 LOG.exception("Failed saving product intelligence audit %s", audit_id)
+                if require_persistence:
+                    raise
         self.product_intelligence_audits[audit_id] = payload
         return payload
+
+    def update_product_intelligence_audit_status(
+        self, *, audit_id: str, status: str, shop_domain: str | None = None,
+        require_persistence: bool = False,
+    ) -> dict[str, Any] | None:
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            raise ValueError("Missing shop_domain for product intelligence audit status")
+        now = self._utc_now()
+        client = self._get_supabase_client()
+        if client:
+            try:
+                rows = (
+                    client.table("product_intelligence_audits")
+                    .update({"status": status, "updated_at": now})
+                    .eq("audit_id", audit_id).eq("shop_domain", tenant)
+                    .execute().data or []
+                )
+                if rows:
+                    return dict(rows[0])
+                if require_persistence:
+                    raise RuntimeError(f"Audit {audit_id} was not found while setting status={status}")
+                return None
+            except Exception:
+                LOG.exception("Failed updating product intelligence audit %s status", audit_id)
+                if require_persistence:
+                    raise
+        audit = self.product_intelligence_audits.get(audit_id)
+        if not audit or str(audit.get("shop_domain") or "").strip().lower() != tenant:
+            return None
+        audit.update({"status": status, "updated_at": now})
+        return dict(audit)
 
     def _utc_now(self) -> str:
         """Stub for typing — actual implementation provided by `SupabaseRunsMixin`."""
@@ -78,6 +126,7 @@ class SupabaseIntelligenceMixin:
         audit_id: str,
         findings: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         tenant = str(shop_domain or "").strip().lower()
         if not tenant:
@@ -101,6 +150,8 @@ class SupabaseIntelligenceMixin:
                 LOG.exception(
                     "Failed saving intelligence findings for audit=%s", audit_id
                 )
+                if require_persistence:
+                    raise
         self.product_intelligence_findings[audit_id] = [
             {**dict(item), "shop_domain": tenant} for item in findings
         ]
@@ -112,6 +163,7 @@ class SupabaseIntelligenceMixin:
         audit_id: str,
         results: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         tenant = str(shop_domain or "").strip().lower()
         if not tenant:
@@ -133,6 +185,8 @@ class SupabaseIntelligenceMixin:
                 return len(payload)
             except Exception:
                 LOG.exception("Failed saving product intelligence results for audit=%s", audit_id)
+                if require_persistence:
+                    raise
         store = getattr(self, "product_intelligence_product_results", None)
         if not isinstance(store, dict):
             store = {}
@@ -159,8 +213,20 @@ class SupabaseIntelligenceMixin:
                     .select("*").eq("shop_domain", tenant).in_("product_id", ids)
                     .order("created_at", desc=True).execute()
                 )
+                candidate_rows = [dict(row) for row in response.data or []]
+                audit_ids = list({str(row.get("audit_id") or "") for row in candidate_rows if row.get("audit_id")})
+                successful_ids: set[str] = set()
+                if audit_ids:
+                    audit_response = (
+                        client.table("product_intelligence_audits").select("audit_id")
+                        .eq("shop_domain", tenant).in_("status", list(_SUCCESSFUL_AUDIT_STATUSES))
+                        .in_("audit_id", audit_ids).execute()
+                    )
+                    successful_ids = {str(row.get("audit_id")) for row in audit_response.data or []}
                 latest: dict[str, dict[str, Any]] = {}
-                for row in response.data or []:
+                for row in candidate_rows:
+                    if str(row.get("audit_id") or "") not in successful_ids:
+                        continue
                     product_id = str(row.get("product_id") or "")
                     latest.setdefault(product_id, dict(row))
                 return [latest[product_id] for product_id in ids if product_id in latest]
@@ -168,7 +234,8 @@ class SupabaseIntelligenceMixin:
                 LOG.exception("Failed listing product intelligence product results")
         store = getattr(self, "product_intelligence_product_results", {})
         rows = [dict(row) for row in store.values()
-                if row.get("shop_domain") == tenant and row.get("product_id") in ids]
+                if row.get("shop_domain") == tenant and row.get("product_id") in ids
+                and self.product_intelligence_audits.get(str(row.get("audit_id") or ""), {}).get("status") in _SUCCESSFUL_AUDIT_STATUSES]
         rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         latest = {}
         for row in rows:
@@ -282,14 +349,15 @@ class SupabaseIntelligenceMixin:
                     audit = audits_by_id.get(audit_id)
                     if not isinstance(audit, dict):
                         continue
+                    successful = audit.get("status") in _SUCCESSFUL_AUDIT_STATUSES
                     artifacts.append(
                         {
                             "audit_id": audit_id,
                             "audit": {
                                 **audit,
-                                "findings": findings_by_id.get(audit_id, []),
+                                "findings": findings_by_id.get(audit_id, []) if successful else [],
                             },
-                            "suggestions": suggestions_by_id.get(audit_id, []),
+                            "suggestions": suggestions_by_id.get(audit_id, []) if successful else [],
                         }
                     )
                 return artifacts
@@ -368,6 +436,7 @@ class SupabaseIntelligenceMixin:
         audit_id: str,
         suggestions: list[dict[str, Any]],
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         tenant = str(shop_domain or "").strip().lower()
         if not tenant:
@@ -380,7 +449,9 @@ class SupabaseIntelligenceMixin:
                 ).eq("shop_domain", tenant).execute()
                 if suggestions:
                     payload = [
-                        {**item, "audit_id": audit_id, "shop_domain": tenant}
+                        _suggestion_persistence_payload(
+                            {**item, "audit_id": audit_id, "shop_domain": tenant}
+                        )
                         for item in suggestions
                     ]
                     client.table("product_intelligence_suggestions").insert(
@@ -391,6 +462,8 @@ class SupabaseIntelligenceMixin:
                 LOG.exception(
                     "Failed saving intelligence suggestions for audit=%s", audit_id
                 )
+                if require_persistence:
+                    raise
         for key, value in list(self.product_intelligence_suggestions.items()):
             if value.get("audit_id") != audit_id:
                 continue
@@ -409,6 +482,7 @@ class SupabaseIntelligenceMixin:
     def supersede_pending_product_intelligence_suggestions(
         self, *, product_ids: list[str], superseded_by_audit_id: str,
         shop_domain: str | None = None,
+        require_persistence: bool = False,
     ) -> int:
         tenant = str(shop_domain or "").strip().lower()
         ids = [str(value).strip() for value in product_ids if str(value).strip()]
@@ -429,6 +503,8 @@ class SupabaseIntelligenceMixin:
                 return len(rows)
             except Exception:
                 LOG.exception("Failed superseding pending intelligence suggestions")
+                if require_persistence:
+                    raise
         count = 0
         for item in self.product_intelligence_suggestions.values():
             if (str(item.get("shop_domain") or "").strip().lower() == tenant
@@ -451,6 +527,13 @@ class SupabaseIntelligenceMixin:
         client = self._get_supabase_client()
         if client:
             try:
+                audit_rows = (
+                    client.table("product_intelligence_audits").select("audit_id")
+                    .eq("audit_id", audit_id).eq("shop_domain", tenant)
+                    .in_("status", list(_SUCCESSFUL_AUDIT_STATUSES)).limit(1).execute().data or []
+                )
+                if not audit_rows:
+                    return []
                 res = (
                     client.table("product_intelligence_suggestions")
                     .select("*")
@@ -464,6 +547,9 @@ class SupabaseIntelligenceMixin:
                 LOG.exception(
                     "Failed listing intelligence suggestions for audit=%s", audit_id
                 )
+        audit = self.product_intelligence_audits.get(audit_id)
+        if not audit or audit.get("status") not in _SUCCESSFUL_AUDIT_STATUSES:
+            return []
         return [
             dict(item)
             for item in self.product_intelligence_suggestions.values()
@@ -521,7 +607,9 @@ class SupabaseIntelligenceMixin:
         if not tenant:
             raise ValueError("Missing shop_domain for product intelligence suggestion")
         suggestion_id = str(suggestion.get("suggestion_id") or uuid.uuid4())
-        payload = {**suggestion, "suggestion_id": suggestion_id, "shop_domain": tenant}
+        payload = _suggestion_persistence_payload(
+            {**suggestion, "suggestion_id": suggestion_id, "shop_domain": tenant}
+        )
         client = self._get_supabase_client()
         if client:
             try:

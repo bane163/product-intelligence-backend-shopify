@@ -355,6 +355,7 @@ def _build_pending_suggestion_from_partial_apply(
         "severity": source_suggestion.get("severity"),
         "message": source_suggestion.get("message"),
         "details": source_suggestion.get("details") or {},
+        "value_origin": source_suggestion.get("value_origin") or "unknown",
         "parent_suggestion_id": source_suggestion.get("suggestion_id"),
         "root_suggestion_id": source_suggestion.get("root_suggestion_id")
         or source_suggestion.get("suggestion_id"),

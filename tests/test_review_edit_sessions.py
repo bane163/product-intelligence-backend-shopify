@@ -706,6 +706,153 @@ async def test_workbook_apply_parses_saved_copy_and_rebuilds_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_missing_required_sku_and_price_can_be_edited_and_applied(monkeypatch):
+    import api.agents.review_edit_sessions as sessions_api
+    from application.domain.shopify_mutation_plan import (
+        build_review_plan_item,
+        merge_structured_product,
+    )
+
+    service = get_app_context().services.supabase._service
+    shop = "required-commerce-edits.myshopify.com"
+    draft_id = "required-commerce-edits-draft"
+    imported = {
+        "title": "Tee",
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [{"option1": "Default Title"}],
+    }
+    proposed, _, _ = merge_structured_product(None, imported, {"title": "Tee"})
+    proposed["value_origins"] = {}
+    blockers = [
+        {"code": "SKU_REQUIRED", "field": "variants[0].sku"},
+        {"code": "PRICE_REQUIRED", "field": "variants[0].price"},
+    ]
+    item = build_review_plan_item(
+        item_id="required-item",
+        currency_code="USD",
+        source_index=0,
+        source_product=imported,
+        live_snapshot=None,
+        proposed=proposed,
+        operation="create",
+        blockers=blockers,
+    )
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "products": [proposed],
+    }
+    service.mutation_plans["required-commerce-edits-plan"] = {
+        "plan_id": "required-commerce-edits-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "currency_code": "USD",
+        "items": [item],
+    }
+    required_rows = {
+        row["field"]: row
+        for row in item["review_changes"]
+        if row["field"] in {"sku", "price"}
+    }
+
+    async def fake_create_plan(draft_id, request, ctx):
+        saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
+        variant = saved["products"][0]["variants"][0]
+        assert variant["sku"] == "TEE-DEFAULT"
+        assert variant["price"] == 24.5
+        origins = saved["products"][0]["value_origins"]
+        assert origins[required_rows["sku"]["value_path"]] == "merchant_edited"
+        assert origins[required_rows["price"]["value_path"]] == "merchant_edited"
+        return {"plan": {
+            "plan_id": "required-commerce-resolved-plan",
+            "draft_id": draft_id,
+            "shop_domain": shop,
+            "draft_revision": 2,
+            "version": 2,
+            "status": "review",
+            "review_contract_version": 2,
+            "currency_code": "USD",
+            "items": [{
+                "item_id": "resolved-item",
+                "source_index": 0,
+                "operation": "create",
+                "blockers": [],
+                "selectable": True,
+                "selected": True,
+                "review_changes": [],
+            }],
+        }}
+
+    monkeypatch.setattr(sessions_api, "create_mutation_plan", fake_create_plan)
+    headers = {"x-shop-domain": shop}
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        assert created.status_code == 200, created.text
+        session_id = created.json()["session"]["session_id"]
+        blank_price = await client.patch(
+            f"{base}/{session_id}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operation": {
+                    "type": "value_edit",
+                    "change_id": required_rows["price"]["change_id"],
+                    "value_path": required_rows["price"]["value_path"],
+                    "value": None,
+                },
+            },
+        )
+        edited = await client.patch(
+            f"{base}/{session_id}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operations": [
+                    {
+                        "type": "value_edit",
+                        "change_id": required_rows["sku"]["change_id"],
+                        "value_path": required_rows["sku"]["value_path"],
+                        "value": "TEE-DEFAULT",
+                    },
+                    {
+                        "type": "value_edit",
+                        "change_id": required_rows["price"]["change_id"],
+                        "value_path": required_rows["price"]["value_path"],
+                        "value": 24.5,
+                    },
+                ],
+            },
+        )
+        applied = await client.post(
+            f"{base}/{session_id}/apply",
+            headers=headers,
+            json={"expected_edit_revision": edited.json()["session"]["edit_revision"]},
+        )
+
+    assert blank_price.status_code == 422
+    blank_error = blank_price.json()["detail"]["field_errors"][0]
+    assert blank_error == {
+        "change_id": required_rows["price"]["change_id"],
+        "value_path": required_rows["price"]["value_path"],
+        "code": "INVALID_REVIEW_VALUE",
+        "message": "This field is required.",
+    }
+    assert edited.status_code == 200, edited.text
+    assert applied.status_code == 200, applied.text
+    rebuilt_item = applied.json()["plan"]["items"][0]
+    assert rebuilt_item["blockers"] == []
+    assert rebuilt_item["selectable"] is True
+
+
+@pytest.mark.asyncio
 async def test_grid_apply_replaces_canonical_workbook_and_preserves_selection(monkeypatch):
     import api.agents.review_edit_sessions as sessions_api
 

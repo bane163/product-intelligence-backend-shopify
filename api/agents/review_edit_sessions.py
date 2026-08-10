@@ -156,6 +156,8 @@ def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
         return values
     if editor == "decimal":
         if value is None or (isinstance(value, str) and not value.strip()):
+            if schema.get("required"):
+                raise ValueError("This field is required.")
             return None
         if isinstance(value, bool):
             raise ValueError("Enter a non-negative number.")

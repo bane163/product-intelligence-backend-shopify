@@ -19,8 +19,34 @@ def test_mutation_plan_queries_use_inventory_item_unit_cost_output():
         assert not re.search(r"\bcost\b", query)
 
 
+def test_location_query_and_view_use_location_address_country_code():
+    import api.agents.mutation_plans as mutation_plans_api
+
+    assert "countryCode" in mutation_plans_api.LOCATIONS_QUERY
+    assert "countryCodeV2" not in mutation_plans_api.LOCATIONS_QUERY
+    assert mutation_plans_api._location_view(
+        {
+            "id": "gid://shopify/Location/1",
+            "name": "Main",
+            "address": {
+                "address1": "123 Main St",
+                "city": "New York",
+                "provinceCode": "NY",
+                "zip": "10001",
+                "countryCode": "US",
+            },
+        }
+    ) == {
+        "id": "gid://shopify/Location/1",
+        "name": "Main",
+        "address": ["123 Main St", "New York, NY, 10001", "US"],
+    }
+
+
 @pytest.mark.asyncio
-async def test_approval_requires_acknowledgment_for_selected_quality_warnings(monkeypatch):
+async def test_approval_requires_acknowledgment_for_selected_quality_warnings(
+    monkeypatch,
+):
     import api.agents.mutation_plans as mutation_plans_api
 
     draft_id = "quality-warning-approval"
@@ -42,20 +68,24 @@ async def test_approval_requires_acknowledgment_for_selected_quality_warnings(mo
         "version": 1,
         "status": "review",
         "review_contract_version": 3,
-        "items": [{
-            "item_id": "warning-item",
-            "selected": True,
-            "selectable": True,
-            "blockers": [],
-            "proposed": {"title": "Warning product"},
-            "review_changes": [],
-            "quality_issues": [{
-                "issue_id": "vendor_missing:product-0-vendor",
-                "severity": "warning",
-                "code": "VENDOR_MISSING",
-                "message": "No vendor was extracted.",
-            }],
-        }],
+        "items": [
+            {
+                "item_id": "warning-item",
+                "selected": True,
+                "selectable": True,
+                "blockers": [],
+                "proposed": {"title": "Warning product"},
+                "review_changes": [],
+                "quality_issues": [
+                    {
+                        "issue_id": "vendor_missing:product-0-vendor",
+                        "severity": "warning",
+                        "code": "VENDOR_MISSING",
+                        "message": "No vendor was extracted.",
+                    }
+                ],
+            }
+        ],
     }
 
     class FakeApprovalClient:
@@ -79,7 +109,9 @@ async def test_approval_requires_acknowledgment_for_selected_quality_warnings(mo
         )
 
     assert rejected.status_code == 422
-    assert rejected.json()["detail"]["code"] == "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED"
+    assert (
+        rejected.json()["detail"]["code"] == "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED"
+    )
     assert approved.status_code == 200
     assert approved.json()["plan"]["warnings_acknowledged_at"]
     assert approved.json()["plan"]["warnings_acknowledgment_hash"]
@@ -189,13 +221,15 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
         "draft_id": draft_id,
         "shop_domain": shop_domain,
         "revision": 1,
-        "products": [{
-            "title": "Reviewable product",
-            "vendor": "Acme",
-            "image_src": "https://example.com/product.jpg",
-            "variants": [{"sku": "REVIEW-1", "price": 10}],
-            "source_refs": [{"value_path": "title", "cell": "A2"}],
-        }],
+        "products": [
+            {
+                "title": "Reviewable product",
+                "vendor": "Acme",
+                "image_src": "https://example.com/product.jpg",
+                "variants": [{"sku": "REVIEW-1", "price": 10}],
+                "source_refs": [{"value_path": "title", "cell": "A2"}],
+            }
+        ],
     }
 
     class FakeShopifyClient:
@@ -259,7 +293,11 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
         )
         rejected = await client.post(
             f"/agents/product-drafts/{draft_id}/mutation-plan/approve",
-            json={"plan_id": plan_id, "acknowledge_unapplied": True, "warnings_acknowledged": True},
+            json={
+                "plan_id": plan_id,
+                "acknowledge_unapplied": True,
+                "warnings_acknowledged": True,
+            },
         )
     assert deselected.status_code == 200
     assert deselected.json()["plan"]["items"][0]["selected"] is False
@@ -283,13 +321,18 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
         )
         approved = await client.post(
             f"/agents/product-drafts/{draft_id}/mutation-plan/approve",
-            json={"plan_id": plan_id, "acknowledge_unapplied": True, "warnings_acknowledged": True},
+            json={
+                "plan_id": plan_id,
+                "acknowledge_unapplied": True,
+                "warnings_acknowledged": True,
+            },
         )
     assert reselected.status_code == 200
     assert approved.status_code == 200
     assert approved.json()["plan"]["items"][0]["proposed"] == original_proposed
     assert {
-        row["change_id"] for row in approved.json()["plan"]["items"][0]["review_changes"]
+        row["change_id"]
+        for row in approved.json()["plan"]["items"][0]["review_changes"]
     } == {row["change_id"] for row in original_review}
     assert all(
         row["included"] is True
@@ -299,7 +342,9 @@ async def test_create_mutation_plan_returns_review_plan_and_closes_client(monkey
 
 
 @pytest.mark.asyncio
-async def test_field_selection_enforces_required_rows_and_persists_optional_exclusion(monkeypatch):
+async def test_field_selection_enforces_required_rows_and_persists_optional_exclusion(
+    monkeypatch,
+):
     draft_id = "field-selection-contract"
     plan_id = "field-selection-plan"
     shop_domain = "field-selection.myshopify.com"
@@ -319,16 +364,30 @@ async def test_field_selection_enforces_required_rows_and_persists_optional_excl
         "version": 1,
         "status": "review",
         "review_contract_version": 2,
-        "items": [{
-            "item_id": "item-1",
-            "source_index": 0,
-            "selectable": True,
-            "selected": True,
-            "review_changes": [
-                {"change_id": "required-title", "disposition": "applicable", "required": True, "selectable": False, "included": True},
-                {"change_id": "optional-vendor", "disposition": "applicable", "required": False, "selectable": True, "included": True},
-            ],
-        }],
+        "items": [
+            {
+                "item_id": "item-1",
+                "source_index": 0,
+                "selectable": True,
+                "selected": True,
+                "review_changes": [
+                    {
+                        "change_id": "required-title",
+                        "disposition": "applicable",
+                        "required": True,
+                        "selectable": False,
+                        "included": True,
+                    },
+                    {
+                        "change_id": "optional-vendor",
+                        "disposition": "applicable",
+                        "required": False,
+                        "selectable": True,
+                        "included": True,
+                    },
+                ],
+            }
+        ],
     }
     url = f"/agents/product-drafts/{draft_id}/mutation-plan/selection"
     async with AsyncClient(
@@ -336,14 +395,32 @@ async def test_field_selection_enforces_required_rows_and_persists_optional_excl
         base_url="http://testserver",
         headers={"x-shop-domain": shop_domain},
     ) as client:
-        rejected = await client.patch(url, json={
-            "plan_id": plan_id,
-            "item_selections": [{"item_id": "item-1", "included": True, "included_change_ids": ["optional-vendor"]}],
-        })
-        accepted = await client.patch(url, json={
-            "plan_id": plan_id,
-            "item_selections": [{"item_id": "item-1", "included": True, "included_change_ids": ["required-title"]}],
-        })
+        rejected = await client.patch(
+            url,
+            json={
+                "plan_id": plan_id,
+                "item_selections": [
+                    {
+                        "item_id": "item-1",
+                        "included": True,
+                        "included_change_ids": ["optional-vendor"],
+                    }
+                ],
+            },
+        )
+        accepted = await client.patch(
+            url,
+            json={
+                "plan_id": plan_id,
+                "item_selections": [
+                    {
+                        "item_id": "item-1",
+                        "included": True,
+                        "included_change_ids": ["required-title"],
+                    }
+                ],
+            },
+        )
 
     assert rejected.status_code == 409
     assert accepted.status_code == 200
@@ -387,10 +464,33 @@ async def test_preflight_keeps_aliased_core_updates_selectable_and_serializable(
                 return {
                     "data": {
                         "currentAppInstallation": {
-                            "accessScopes": [{"handle": "write_products"}]
+                            "accessScopes": [
+                                {"handle": "write_products"},
+                                {"handle": "write_inventory"},
+                                {"handle": "read_inventory"},
+                                {"handle": "read_locations"},
+                            ]
                         }
                     }
                 }
+            if query == mutation_plans_api.LOCATIONS_QUERY:
+                return {
+                    "data": {
+                        "locations": {
+                            "nodes": [
+                                {
+                                    "id": "gid://shopify/Location/1",
+                                    "name": "Main",
+                                    "isActive": True,
+                                    "isFulfillmentService": False,
+                                    "address": {},
+                                }
+                            ]
+                        }
+                    }
+                }
+            if query == mutation_plans_api.INVENTORY_SNAPSHOT_QUERY:
+                return {"data": {"product": {"variants": {"nodes": []}}}}
             if query == mutation_plans_api.VARIANTS_BY_SKU_QUERY:
                 return {"data": {"productVariants": {"nodes": []}}}
             assert query == mutation_plans_api.PRODUCT_BY_HANDLE_QUERY
@@ -515,10 +615,33 @@ async def test_structured_only_trail_tee_mug_and_daypack_updates_start_selected(
                 return {
                     "data": {
                         "currentAppInstallation": {
-                            "accessScopes": [{"handle": "write_products"}]
+                            "accessScopes": [
+                                {"handle": "write_products"},
+                                {"handle": "write_inventory"},
+                                {"handle": "read_inventory"},
+                                {"handle": "read_locations"},
+                            ]
                         }
                     }
                 }
+            if query == mutation_plans_api.LOCATIONS_QUERY:
+                return {
+                    "data": {
+                        "locations": {
+                            "nodes": [
+                                {
+                                    "id": "gid://shopify/Location/1",
+                                    "name": "Main",
+                                    "isActive": True,
+                                    "isFulfillmentService": False,
+                                    "address": {},
+                                }
+                            ]
+                        }
+                    }
+                }
+            if query == mutation_plans_api.INVENTORY_SNAPSHOT_QUERY:
+                return {"data": {"product": {"variants": {"nodes": []}}}}
             if query == mutation_plans_api.VARIANTS_BY_SKU_QUERY:
                 return {"data": {"productVariants": {"nodes": []}}}
             assert query == mutation_plans_api.PRODUCT_BY_HANDLE_QUERY
@@ -597,15 +720,11 @@ async def test_structured_only_trail_tee_mug_and_daypack_updates_start_selected(
         <= {change["field"] for change in item["applicable_changes"]}
         for item in items
     )
+    assert response.json()["plan"]["review_contract_version"] == 4
+    assert response.json()["plan"]["inventory_context"]["status"] == "ready"
+    assert all(item["unapplied"] == [] for item in items)
     assert all(
-        item["unapplied"]
-        == [
-            {
-                "code": "TODO_FULFILLMENT_LOCATION",
-                "field": "variants[1].inventory_quantity",
-                "value": 5,
-            }
-        ]
+        any(row["field"] == "inventory_quantity" for row in item["review_changes"])
         for item in items
     )
 

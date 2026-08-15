@@ -49,7 +49,7 @@ _HEADER_ALIASES = {
     "inventoryItem.weight.value": {"weight", "variant weight", "variant grams"},
     "inventoryItem.weight.unit": {"weight unit", "variant weight unit"},
     "inventory_tracker": {"variant inventory tracker", "inventory tracker"},
-    "inventory_quantity": {"inventory quantity", "variant inventory qty", "variant inventory quantity"},
+    "inventory_quantity": {"inventory", "inventory quantity", "variant inventory qty", "variant inventory quantity"},
     "inventoryPolicy": {"inventory policy", "variant inventory policy"},
     "fulfillment_service": {"fulfillment service", "variant fulfillment service"},
     "grams": {"variant grams", "grams"},

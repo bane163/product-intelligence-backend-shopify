@@ -4,6 +4,7 @@ RUN pip install --no-cache-dir uv
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
+RUN /app/.venv/bin/python -c "from copilot.client import _get_bundled_cli_path; assert _get_bundled_cli_path(), 'Copilot CLI runtime missing'"
 
 # Pin the official binary used for development-only Collabora quick tunnels.
 FROM cloudflare/cloudflared:2026.6.0 AS cloudflared

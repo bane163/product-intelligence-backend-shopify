@@ -292,7 +292,16 @@ def iter_review_values(product: dict[str, Any]) -> Iterable[ReviewValue]:
             if alias is not None:
                 fields[target] = variant[alias]
         for field, value in fields.items():
-            yield ReviewValue(f"{prefix}.{field}", field, value, "variant", subject)
+            inventory_scoped = field == "inventory_quantity" or (
+                field == "inventoryItem.tracked" and "inventory_quantity" in fields
+            )
+            scope = "inventory" if inventory_scoped else "variant"
+            field_prefix = (
+                f"inventory[{normalized_path_part(subject)}]"
+                if inventory_scoped
+                else prefix
+            )
+            yield ReviewValue(f"{field_prefix}.{field}", field, value, scope, subject)
 
     metafields = product.get("metafields")
     if isinstance(metafields, dict):

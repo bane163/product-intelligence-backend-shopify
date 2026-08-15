@@ -5,10 +5,12 @@ from application.domain.shopify_mutation_plan import (
     merge_tags,
     merge_structured_product,
     materialize_execution_proposed,
+    materialize_inventory_operations,
     normalize_review_plan_rows,
     preserve_blank_fields,
     review_changes,
     validate_product,
+    validate_inventory_quantity,
 )
 from application.domain.shopify_product_normalization import build_product_set_input
 
@@ -34,6 +36,70 @@ def test_invalid_status_is_blocked_before_transport():
         {"title": "Hat", "status": "published"}, creating=True
     )
     assert "INVALID_STATUS" in {item["code"] for item in blockers}
+
+
+def test_inventory_quantity_contract_and_immutable_operation_materialization():
+    for value in (0, "50", 1_000_000_000, 75.0):
+        assert validate_inventory_quantity(value) == int(value)
+    for value in (-1, 1.5, "", "12.5", 1_000_000_001, True):
+        try:
+            validate_inventory_quantity(value)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid inventory quantity: {value!r}")
+
+    imported = {
+        "title": "Tea",
+        "options": [{"name": "Weight", "values": ["50g"]}],
+        "variants": [
+            {
+                "option1": "50g",
+                "sku": "TEA-50",
+                "price": "8",
+                "inventory_quantity": 50,
+            }
+        ],
+    }
+    proposed, blockers, unapplied = merge_structured_product(
+        None, imported, {"title": "Tea"}
+    )
+    assert not blockers and not unapplied
+    item = build_review_plan_item(
+        item_id="item",
+        currency_code="USD",
+        source_index=0,
+        source_product=imported,
+        live_snapshot=None,
+        proposed=proposed,
+        operation="create",
+    )
+    inventory_rows = [
+        row for row in item["review_changes"] if row["scope"] == "inventory"
+    ]
+    assert {row["field"] for row in inventory_rows} == {
+        "inventory_quantity",
+        "inventoryItem.tracked",
+    }
+    assert next(row for row in inventory_rows if row["field"] == "inventory_quantity")[
+        "edit_schema"
+    ] == {
+        "editor": "integer",
+        "required": True,
+        "minimum": 0,
+        "maximum": 1_000_000_000,
+    }
+    plan = {
+        "plan_id": "plan",
+        "inventory_context": {
+            "selected_location": {"id": "gid://shopify/Location/1", "name": "Main"}
+        },
+    }
+    operations = materialize_inventory_operations(plan, item)
+    assert operations[0]["proposed_quantity"] == 50
+    assert operations[0]["subject_identity"]["option_names"] == ["weight"]
+    execution = materialize_execution_proposed(item)
+    assert "inventory_quantity" not in execution["variants"][0]
 
 
 def test_missing_sku_and_price_have_required_editable_blocked_rows():
@@ -100,14 +166,27 @@ def test_review_rows_have_stable_ids_paths_and_truthful_provenance():
 
 def test_variant_review_rows_match_evidence_by_exact_value_path_only():
     imported = {
-        "title": "Tee", "options": [{"name": "Size", "values": ["S", "M"]}],
+        "title": "Tee",
+        "options": [{"name": "Size", "values": ["S", "M"]}],
         "variants": [
             {"option1": "S", "sku": "TEE-S", "price": 10},
             {"option1": "M", "sku": "TEE-M", "price": 12},
         ],
         "source_refs": [
-            {"field": "price", "value_path": "variant[size-s].price", "source_file_id": "f", "sheet": "Products", "cell": "C2"},
-            {"field": "price", "value_path": "variant[size-m].price", "source_file_id": "f", "sheet": "Products", "cell": "C3"},
+            {
+                "field": "price",
+                "value_path": "variant[size-s].price",
+                "source_file_id": "f",
+                "sheet": "Products",
+                "cell": "C2",
+            },
+            {
+                "field": "price",
+                "value_path": "variant[size-m].price",
+                "source_file_id": "f",
+                "sheet": "Products",
+                "cell": "C3",
+            },
             {"field": "sku", "sheet": "Products", "cell": "B2"},
         ],
     }
@@ -116,7 +195,11 @@ def test_variant_review_rows_match_evidence_by_exact_value_path_only():
     prices = {row["value_path"]: row for row in rows if row["field"] == "price"}
     assert prices["variant[size-s].price"]["source_ref"]["cell"] == "C2"
     assert prices["variant[size-m].price"]["source_ref"]["cell"] == "C3"
-    assert all(row["origin"] == "unknown" and "source_ref" not in row for row in rows if row["field"] == "sku")
+    assert all(
+        row["origin"] == "unknown" and "source_ref" not in row
+        for row in rows
+        if row["field"] == "sku"
+    )
 
 
 def test_ai_origins_resolve_for_every_proposed_value_path_category():
@@ -207,23 +290,57 @@ def test_origin_resolution_keeps_source_refs_exact_and_unknown_fallback_safe():
 
 def test_execution_payload_reverts_excluded_updates_and_omits_excluded_create_values():
     update_item = {
-        "live_snapshot": {"id": "gid://shopify/Product/1", "title": "Old", "vendor": "Keep"},
-        "proposed": {"id": "gid://shopify/Product/1", "title": "New", "vendor": "Replace"},
+        "live_snapshot": {
+            "id": "gid://shopify/Product/1",
+            "title": "Old",
+            "vendor": "Keep",
+        },
+        "proposed": {
+            "id": "gid://shopify/Product/1",
+            "title": "New",
+            "vendor": "Replace",
+        },
         "review_changes": [
-            {"scope": "product", "field": "title", "current": "Old", "included": True, "disposition": "applicable"},
-            {"scope": "product", "field": "vendor", "current": "Keep", "included": False, "disposition": "applicable"},
+            {
+                "scope": "product",
+                "field": "title",
+                "current": "Old",
+                "included": True,
+                "disposition": "applicable",
+            },
+            {
+                "scope": "product",
+                "field": "vendor",
+                "current": "Keep",
+                "included": False,
+                "disposition": "applicable",
+            },
         ],
     }
     create_item = {
         "live_snapshot": None,
         "proposed": {"title": "New", "vendor": "Optional"},
         "review_changes": [
-            {"scope": "product", "field": "title", "current": None, "included": True, "disposition": "applicable"},
-            {"scope": "product", "field": "vendor", "current": None, "included": False, "disposition": "applicable"},
+            {
+                "scope": "product",
+                "field": "title",
+                "current": None,
+                "included": True,
+                "disposition": "applicable",
+            },
+            {
+                "scope": "product",
+                "field": "vendor",
+                "current": None,
+                "included": False,
+                "disposition": "applicable",
+            },
         ],
     }
     assert materialize_execution_proposed(update_item) == {
-        "id": "gid://shopify/Product/1", "title": "New", "vendor": "Keep"
+        "id": "gid://shopify/Product/1",
+        "title": "New",
+        "vendor": "Keep",
     }
     assert materialize_execution_proposed(create_item) == {"title": "New"}
 
@@ -386,7 +503,7 @@ def test_compatible_matrix_merge_retains_live_only_matches_ids_and_adds_missing(
     assert "id" not in by_value["l"]
 
 
-def test_structured_validation_blocks_schema_duplicates_and_defers_inventory_granularly():
+def test_structured_validation_blocks_schema_duplicates_and_preserves_inventory():
     live = {
         "options": [{"name": "Color", "optionValues": [{"name": "Red"}]}],
         "variants": {
@@ -411,10 +528,7 @@ def test_structured_validation_blocks_schema_duplicates_and_defers_inventory_gra
         "INCOMPATIBLE_OPTION_SCHEMA",
         "DUPLICATE_VARIANT_COMBINATION",
     }
-    assert {item["field"] for item in unapplied} == {
-        "variants[0].inventory_quantity",
-        "variants[0].image",
-    }
+    assert {item["field"] for item in unapplied} == {"variants[0].image"}
 
 
 def test_metafields_are_upserts_and_diff_only_imported_keys():
@@ -696,7 +810,7 @@ def test_exact_review_rows_cover_options_variant_fields_cost_and_metafields():
     )
 
 
-def test_review_exposes_rejected_variant_values_and_deferred_quantities():
+def test_review_exposes_rejected_variant_values_and_blocked_quantities():
     imported = {
         "title": "Blocked planter",
         "options": [{"name": "Size", "values": ["Small"]}],
@@ -717,7 +831,7 @@ def test_review_exposes_rejected_variant_values_and_deferred_quantities():
     assert "INCOMPLETE_VARIANT_COMBINATION" in rejected_price["reason_codes"]
     quantity = next(row for row in rows if row["field"] == "inventory_quantity")
     assert quantity["proposed"] == 7
-    assert quantity["disposition"] == "deferred"
+    assert quantity["disposition"] == "blocked"
     assert quantity["scope"] == "inventory"
 
 
@@ -877,9 +991,9 @@ def test_review_row_presentation_protects_technical_metafields_and_allows_mercha
         }
     )
 
-    extractor_value, extractor_type, merchant_value, merchant_type = (
-        plan["items"][0]["review_changes"]
-    )
+    extractor_value, extractor_type, merchant_value, merchant_type = plan["items"][0][
+        "review_changes"
+    ]
     assert (extractor_value["presentation"], extractor_value["editable"]) == (
         "technical",
         False,
@@ -911,9 +1025,7 @@ def test_build_review_plan_item_is_pure_and_preserves_prior_optional_inclusion()
         proposed=proposed,
         operation="update",
     )
-    vendor = next(
-        row for row in first["review_changes"] if row["field"] == "vendor"
-    )
+    vendor = next(row for row in first["review_changes"] if row["field"] == "vendor")
     vendor["included"] = False
 
     rebuilt = build_review_plan_item(
@@ -933,9 +1045,12 @@ def test_build_review_plan_item_is_pure_and_preserves_prior_optional_inclusion()
     assert rebuilt["item_id"] == "item-2"
     assert rebuilt["operation"] == "update"
     assert rebuilt["selected"] is True
-    assert next(
-        row for row in rebuilt["review_changes"] if row["field"] == "vendor"
-    )["included"] is False
+    assert (
+        next(row for row in rebuilt["review_changes"] if row["field"] == "vendor")[
+            "included"
+        ]
+        is False
+    )
     assert all(
         row["presentation"] == "merchant" and row["editable"] is True
         for row in rebuilt["review_changes"]

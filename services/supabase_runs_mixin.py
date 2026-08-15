@@ -137,7 +137,14 @@ class SupabaseRunsMixin:
             compat_payload = self._drop_missing_columns(
                 payload,
                 exc,
-                candidates=("request_id", "correlation_id"),
+                candidates=(
+                    "request_id",
+                    "correlation_id",
+                    "enrichment_attempted",
+                    "enrichment_applied",
+                    "enrichment_suggestions_count",
+                    "enrichment_warning",
+                ),
             )
             if compat_payload is not None:
                 try:
@@ -147,7 +154,7 @@ class SupabaseRunsMixin:
                     return
                 except Exception:
                     LOG.exception(
-                        "Retry without observability columns failed for llm_runs row run_id=%s",
+                        "Retry without optional columns failed for llm_runs row run_id=%s",
                         run_id,
                     )
             LOG.exception("Failed upserting llm_runs row for run_id=%s", run_id)

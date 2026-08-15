@@ -148,15 +148,14 @@ class _FakeLLM:
         self.payload = payload
         self.last_kwargs: dict = {}
 
-    async def run_excel_agent_workflow(self, *args, **kwargs):
-        _ = args
-        self.last_kwargs = dict(kwargs)
+    async def extract(self, request):
+        self.last_kwargs = {"request": request}
         return dict(self.payload)
 
 
 class _FakeLLMProductsList:
-    async def run_excel_agent_workflow(self, *args, **kwargs):
-        _ = args, kwargs
+    async def extract(self, request):
+        _ = request
         return ProductsList(products=[{"title": "Demo Product"}])
 
 
@@ -165,9 +164,8 @@ class _SequenceLLM:
         self.payloads = list(payloads)
         self.calls: list[dict] = []
 
-    async def run_excel_agent_workflow(self, *args, **kwargs):
-        _ = args
-        self.calls.append(dict(kwargs))
+    async def extract(self, request):
+        self.calls.append(request)
         return self.payloads.pop(0)
 
 
@@ -545,7 +543,7 @@ async def test_process_document_workbook_ai_enhancements_shows_all_enriched_fiel
 
 
 @pytest.mark.asyncio
-async def test_process_document_passes_file_search_toggle_from_model_config_extra():
+async def test_process_document_ignores_stored_file_search_toggle():
     supabase = _FakeSupabase(
         model_config={
             "base_url": "https://api.openai.com/v1",
@@ -570,7 +568,9 @@ async def test_process_document_passes_file_search_toggle_from_model_config_extr
         shop_domain="store.myshopify.com",
     )
 
-    assert llm.last_kwargs["model_file_search_enabled"] is False
+    request = llm.last_kwargs["request"]
+    assert request.model.extra == {"enable_file_search": False}
+    assert not hasattr(request, "model_file_search_enabled")
 
 
 @pytest.mark.asyncio
@@ -627,9 +627,9 @@ async def test_pdf_evidence_feedback_retries_with_complete_payload_and_resolves_
     )
 
     assert len(llm.calls) == 2
-    assert "title" in llm.calls[1]["agent_prompt"]
-    assert "complete products payload" in llm.calls[1]["agent_prompt"]
-    assert llm.calls[0]["extracted_text_override"] == "1. lassic Cotton T-Shirt"
+    assert "title" in (llm.calls[1].validation_feedback or "")
+    assert llm.calls[0].validation_feedback is None
+    assert llm.calls[0].evidence_catalog is not None
     product = result["result"]["products"][0]
     assert product["value_origins"]["title"] == "source"
     assert product["source_refs"][0]["anchor_id"] == "azure-title"
@@ -668,7 +668,7 @@ async def test_pdf_evidence_gets_exactly_two_corrections_then_fails_without_outp
         )
 
     assert len(llm.calls) == 3
-    assert all(call["write_to_file"] is False for call in llm.calls)
+    assert all(not hasattr(call, "write_to_file") for call in llm.calls)
     assert supabase.file.saved_files == []
     phases = [event["phase"] for event in tracing.events]
     assert phases.count("pdf_evidence_correction_attempt") == 2

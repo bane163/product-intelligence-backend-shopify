@@ -6,10 +6,14 @@ from copy import deepcopy
 import hashlib
 import json
 import re
+import uuid
 from typing import Any
 
 from application.domain.shopify_product_normalization import normalize_core_product
-from application.domain.review_value_paths import canonical_value_path, normalized_path_part
+from application.domain.review_value_paths import (
+    canonical_value_path,
+    normalized_path_part,
+)
 
 SUPPORTED_PRODUCT_FIELDS = {
     "title",
@@ -58,6 +62,7 @@ VALUE_ORIGINS = {"source", "ai_assisted", "merchant_edited", "derived", "unknown
 HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_OPTIONS = 3
 MAX_VARIANTS = 2048
+MAX_INVENTORY_QUANTITY = 1_000_000_000
 
 _VARIANT_ALIASES = {
     "sku": ("sku",),
@@ -265,6 +270,8 @@ def _normalized_variant(
             payload[target] = value
     inventory_source = {**_inventory_item(variant), **variant}
     inventory: dict[str, Any] = {}
+    if live and _text(_inventory_item(variant).get("id")):
+        inventory["id"] = _text(_inventory_item(variant).get("id"))
     for target, aliases in _INVENTORY_ALIASES.items():
         present, value = _first_present(inventory_source, aliases)
         if present and value is not None:
@@ -314,7 +321,42 @@ def _normalized_variant(
         }
     if inventory:
         payload["inventoryItem"] = inventory
+    if live and "_inventory_stocked" in variant:
+        payload["_inventory_stocked"] = bool(variant.get("_inventory_stocked"))
+    # Inventory is deliberately retained in the review proposal, but is removed
+    # from productSet payloads and executed through inventory mutations.
+    quantity_present, quantity = _first_present(
+        variant, ("inventory_quantity", "inventoryQuantity")
+    )
+    if quantity_present:
+        try:
+            payload["inventory_quantity"] = validate_inventory_quantity(quantity)
+        except ValueError:
+            payload["inventory_quantity"] = quantity
+        payload.setdefault("inventoryItem", {})["tracked"] = True
     return payload
+
+
+def validate_inventory_quantity(value: Any) -> int:
+    """Validate Shopify's absolute available quantity contract."""
+    if isinstance(value, bool) or value is None or value == "":
+        raise ValueError("Inventory must be a whole number from 0 to 1,000,000,000.")
+    if isinstance(value, str):
+        value = value.strip()
+        if not re.fullmatch(r"\d+", value):
+            raise ValueError(
+                "Inventory must be a whole number from 0 to 1,000,000,000."
+            )
+        quantity = int(value)
+    elif isinstance(value, int):
+        quantity = value
+    elif isinstance(value, float) and value.is_integer():
+        quantity = int(value)
+    else:
+        raise ValueError("Inventory must be a whole number from 0 to 1,000,000,000.")
+    if not 0 <= quantity <= MAX_INVENTORY_QUANTITY:
+        raise ValueError("Inventory must be a whole number from 0 to 1,000,000,000.")
+    return quantity
 
 
 def _merge_variant_payload(
@@ -333,6 +375,8 @@ def _merge_variant_payload(
     ):
         if field in imported:
             merged[field] = imported[field]
+    if "inventory_quantity" in imported:
+        merged["inventory_quantity"] = imported["inventory_quantity"]
     if "inventoryItem" in imported:
         merged["inventoryItem"] = {
             **merged.get("inventoryItem", {}),
@@ -464,19 +508,18 @@ def merge_structured_product(
                             "value": variant[key],
                         }
                     )
-            for key in (
-                "inventory_quantity",
-                "inventoryQuantity",
-                "inventoryQuantities",
-            ):
-                if key in variant and variant.get(key) not in (None, "", [], {}):
-                    unapplied.append(
-                        {
-                            "code": "TODO_FULFILLMENT_LOCATION",
-                            "field": f"variants[{index}].{key}",
-                            "value": variant[key],
-                        }
-                    )
+            for key in ("inventory_quantity", "inventoryQuantity"):
+                if key in variant:
+                    try:
+                        validate_inventory_quantity(variant.get(key))
+                    except ValueError:
+                        blockers.append(
+                            {
+                                "code": "INVALID_INVENTORY_QUANTITY",
+                                "field": f"variants[{index}].inventory_quantity",
+                                "message": "Inventory must be a whole number from 0 to 1,000,000,000.",
+                            }
+                        )
             if imported_placeholder and not _variant_pairs(variant, imported_names):
                 variant = {
                     **variant,
@@ -813,6 +856,8 @@ def _flatten_variant(variant: dict[str, Any]) -> dict[str, Any]:
         )
         if field in variant
     }
+    if "inventory_quantity" in variant:
+        values["inventory_quantity"] = variant.get("inventory_quantity")
     values.update(
         {
             f"inventoryItem.{field}": inventory.get(field)
@@ -850,10 +895,14 @@ def _review_row(
                 "boolean"
                 if isinstance(current, bool) or isinstance(proposed, bool)
                 else (
-                    "json"
-                    if isinstance(current, (dict, list))
-                    or isinstance(proposed, (dict, list))
-                    else "text"
+                    "integer"
+                    if field == "inventory_quantity"
+                    else (
+                        "json"
+                        if isinstance(current, (dict, list))
+                        or isinstance(proposed, (dict, list))
+                        else "text"
+                    )
                 )
             )
         )
@@ -864,7 +913,10 @@ def _review_row(
         "inventoryItem.weight.unit": ["GRAMS", "KILOGRAMS", "OUNCES", "POUNDS"],
     }.get(field)
     editor = "text"
-    edit_schema: dict[str, Any] = {"editor": editor, "required": field in {"title", "handle"}}
+    edit_schema: dict[str, Any] = {
+        "editor": editor,
+        "required": field in {"title", "handle"},
+    }
     if field == "values" and scope == "option":
         edit_schema = {
             "editor": "option_values",
@@ -873,8 +925,18 @@ def _review_row(
         }
     elif field in {"tags", "values"}:
         edit_schema = {"editor": "list", "required": False, "item_type": "text"}
-    elif resolved_value_type in {"money", "weight"} and field != "inventoryItem.weight.unit":
+    elif (
+        resolved_value_type in {"money", "weight"}
+        and field != "inventoryItem.weight.unit"
+    ):
         edit_schema = {"editor": "decimal", "required": False, "minimum": 0}
+    elif resolved_value_type == "integer" or field == "inventory_quantity":
+        edit_schema = {
+            "editor": "integer",
+            "required": True,
+            "minimum": 0,
+            "maximum": MAX_INVENTORY_QUANTITY,
+        }
     elif resolved_value_type == "boolean":
         edit_schema = {"editor": "boolean", "required": False, "options": [True, False]}
     elif enum_values:
@@ -925,9 +987,7 @@ def _normalized_origin_path(value: Any) -> str:
     return canonical_value_path(value)
 
 
-def _matching_value_origin(
-    origins: dict[str, Any], row: dict[str, Any]
-) -> str | None:
+def _matching_value_origin(origins: dict[str, Any], row: dict[str, Any]) -> str | None:
     """Resolve one exact value origin, tolerating equivalent path spellings."""
     value_path = _value_path(row)
     requested = origins.get(value_path)
@@ -936,7 +996,8 @@ def _matching_value_origin(
 
     normalized_path = _normalized_origin_path(value_path)
     matching_items = [
-        origin for path, origin in origins.items()
+        origin
+        for path, origin in origins.items()
         if _normalized_origin_path(path) == normalized_path
     ]
     if matching_items and not any(origin in VALUE_ORIGINS for origin in matching_items):
@@ -944,8 +1005,7 @@ def _matching_value_origin(
     matches = {
         str(origin)
         for path, origin in origins.items()
-        if origin in VALUE_ORIGINS
-        and _normalized_origin_path(path) == normalized_path
+        if origin in VALUE_ORIGINS and _normalized_origin_path(path) == normalized_path
     }
     if len(matches) == 1:
         return next(iter(matches))
@@ -973,10 +1033,12 @@ def _matching_source_refs(
         return []
     value_path = _value_path(row)
     exact = [
-        deepcopy(ref) for ref in refs
+        deepcopy(ref)
+        for ref in refs
         if isinstance(ref, dict)
         and ref.get("value_path")
-        and canonical_value_path(ref.get("value_path")) == canonical_value_path(value_path)
+        and canonical_value_path(ref.get("value_path"))
+        == canonical_value_path(value_path)
     ]
     if exact:
         deduplicated: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -998,7 +1060,8 @@ def _matching_source_refs(
     if field == "inventoryItem.cost":
         aliases.update({"cost", "cost_per_item"})
     legacy = [
-        ref for ref in refs
+        ref
+        for ref in refs
         if isinstance(ref, dict)
         and not ref.get("value_path")
         and str(ref.get("field") or "") in aliases
@@ -1028,25 +1091,34 @@ def _decorate_review_rows(
         source_refs = _matching_source_refs(imported, row)
         source_ref = next(
             (
-                ref for ref in source_refs
+                ref
+                for ref in source_refs
                 if ref.get("evidence_role", "value") == "value"
             ),
             None,
         )
         requested_origin = _matching_value_origin(origins, row)
-        origin = requested_origin if requested_origin else (
-            "source" if source_ref else "unknown"
+        origin = (
+            requested_origin
+            if requested_origin
+            else ("source" if source_ref else "unknown")
         )
         disposition = str(row.get("disposition") or "applicable")
         required = bool(
             disposition == "applicable"
             and (
-                (row.get("scope") == "product" and row.get("field") == "title" and row.get("current") is None)
+                (
+                    row.get("scope") == "product"
+                    and row.get("field") == "title"
+                    and row.get("current") is None
+                )
                 or row.get("scope") == "option"
                 or row.get("field") == "variant"
             )
         )
-        if isinstance(row.get("edit_schema"), dict) and row["edit_schema"].get("required"):
+        if isinstance(row.get("edit_schema"), dict) and row["edit_schema"].get(
+            "required"
+        ):
             required = True
         identity = "\x1f".join(
             (
@@ -1094,9 +1166,7 @@ def _variant_targets_for_review_row(
             "option_names": [_fold(name) for name in identity["option_names"]],
             "values": [_fold(value) for value in identity["values"]],
         }
-        if expected_identity["option_names"] != [
-            _fold(name) for name in option_names
-        ]:
+        if expected_identity["option_names"] != [_fold(name) for name in option_names]:
             return []
     subject = str(row.get("subject") or "")
     matches: list[dict[str, Any]] = []
@@ -1128,8 +1198,7 @@ def _review_row_target_exists(item: dict[str, Any], row: dict[str, Any]) -> bool
     if scope == "option":
         options = proposed.get("productOptions")
         return isinstance(options, list) and any(
-            isinstance(option, dict)
-            and _fold(option.get("name")) == _fold(subject)
+            isinstance(option, dict) and _fold(option.get("name")) == _fold(subject)
             for option in options
         )
     if scope in {"variant", "inventory"}:
@@ -1138,9 +1207,7 @@ def _review_row_target_exists(item: dict[str, Any], row: dict[str, Any]) -> bool
         metafields = proposed.get("metafields")
         return isinstance(metafields, list) and any(
             isinstance(metafield, dict)
-            and _fold(
-                f"{metafield.get('namespace')}.{metafield.get('key')}"
-            )
+            and _fold(f"{metafield.get('namespace')}.{metafield.get('key')}")
             == _fold(subject)
             for metafield in metafields
         )
@@ -1153,11 +1220,7 @@ def _technical_review_row(row: dict[str, Any]) -> bool:
     subject = str(row.get("subject") or "").strip().casefold()
     namespace = subject.split(".", 1)[0]
     field = str(row.get("field") or "").strip().casefold()
-    return (
-        namespace == "extractor"
-        or field == "type"
-        or "confidence" in subject
-    )
+    return namespace == "extractor" or field == "type" or "confidence" in subject
 
 
 def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
@@ -1168,7 +1231,7 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
     and prevents a missing or stale ``editable`` value from granting access.
     """
     normalized = deepcopy(plan)
-    if normalized.get("review_contract_version") not in {2, 3}:
+    if normalized.get("review_contract_version") not in {2, 3, 4}:
         return normalized
     items = normalized.get("items")
     if not isinstance(items, list):
@@ -1195,23 +1258,16 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
                 identity_key = json.dumps(
                     identity, sort_keys=True, separators=(",", ":")
                 )
-                identity_candidates.setdefault(subject, {})[
-                    identity_key
-                ] = identity
+                identity_candidates.setdefault(subject, {})[identity_key] = identity
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if (
-                row.get("scope") in {"variant", "inventory"}
-                and not isinstance(row.get("subject_identity"), dict)
+            if row.get("scope") in {"variant", "inventory"} and not isinstance(
+                row.get("subject_identity"), dict
             ):
-                matches = identity_candidates.get(
-                    str(row.get("subject") or ""), {}
-                )
+                matches = identity_candidates.get(str(row.get("subject") or ""), {})
                 if len(matches) == 1:
-                    row["subject_identity"] = deepcopy(
-                        next(iter(matches.values()))
-                    )
+                    row["subject_identity"] = deepcopy(next(iter(matches.values())))
             disposition = str(row.get("disposition") or "applicable")
             target_exists = _review_row_target_exists(item, row)
             if (
@@ -1225,12 +1281,16 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
                     "item_type": "text",
                 }
                 row["option_value_impacts"] = _option_value_impacts(
-                    item.get("live_snapshot")
-                    if isinstance(item.get("live_snapshot"), dict)
-                    else None,
-                    item.get("proposed")
-                    if isinstance(item.get("proposed"), dict)
-                    else {},
+                    (
+                        item.get("live_snapshot")
+                        if isinstance(item.get("live_snapshot"), dict)
+                        else None
+                    ),
+                    (
+                        item.get("proposed")
+                        if isinstance(item.get("proposed"), dict)
+                        else {}
+                    ),
                     str(row.get("subject") or ""),
                 )
             if disposition == "applicable" and not target_exists:
@@ -1248,7 +1308,9 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _set_or_remove(container: dict[str, Any], path: str, value: Any, *, present: bool) -> None:
+def _set_or_remove(
+    container: dict[str, Any], path: str, value: Any, *, present: bool
+) -> None:
     parts = path.split(".")
     target = container
     for part in parts[:-1]:
@@ -1268,18 +1330,35 @@ def _set_or_remove(container: dict[str, Any], path: str, value: Any, *, present:
 def materialize_execution_proposed(item: dict[str, Any]) -> dict[str, Any]:
     """Build the immutable Shopify payload from only approved review rows."""
     proposed = deepcopy(item.get("proposed") or {})
-    current = item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else {}
-    rows = item.get("review_changes") if isinstance(item.get("review_changes"), list) else []
-    option_names = _schema_from_product({"options": proposed.get("productOptions", [])}) or _schema_from_product(current)
+    current = (
+        item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else {}
+    )
+    rows = (
+        item.get("review_changes")
+        if isinstance(item.get("review_changes"), list)
+        else []
+    )
+    option_names = _schema_from_product(
+        {"options": proposed.get("productOptions", [])}
+    ) or _schema_from_product(current)
 
     for row in rows:
-        if not isinstance(row, dict) or row.get("included") or row.get("disposition") != "applicable":
+        if (
+            not isinstance(row, dict)
+            or row.get("included")
+            or row.get("disposition") != "applicable"
+        ):
             continue
         scope = str(row.get("scope") or "product")
         field = str(row.get("field") or "")
         subject = str(row.get("subject") or "")
         if scope == "product":
-            _set_or_remove(proposed, field, row.get("current"), present=row.get("current") is not None)
+            _set_or_remove(
+                proposed,
+                field,
+                row.get("current"),
+                present=row.get("current") is not None,
+            )
             continue
         if scope == "option":
             # Option values are structural dependencies and should have been rejected
@@ -1288,22 +1367,112 @@ def materialize_execution_proposed(item: dict[str, Any]) -> dict[str, Any]:
         if scope in {"variant", "inventory"}:
             target = _unique_variant_target(proposed, row)
             if isinstance(target, dict):
-                _set_or_remove(target, field, row.get("current"), present=row.get("current") is not None)
+                _set_or_remove(
+                    target,
+                    field,
+                    row.get("current"),
+                    present=row.get("current") is not None,
+                )
             continue
         if scope == "metafield":
-            candidates = proposed.get("metafields") if isinstance(proposed.get("metafields"), list) else []
+            candidates = (
+                proposed.get("metafields")
+                if isinstance(proposed.get("metafields"), list)
+                else []
+            )
             target = next(
                 (
                     metafield
                     for metafield in candidates
                     if isinstance(metafield, dict)
-                    and f"{metafield.get('namespace')}.{metafield.get('key')}" == subject
+                    and f"{metafield.get('namespace')}.{metafield.get('key')}"
+                    == subject
                 ),
                 None,
             )
             if isinstance(target, dict):
-                _set_or_remove(target, field, row.get("current"), present=row.get("current") is not None)
+                _set_or_remove(
+                    target,
+                    field,
+                    row.get("current"),
+                    present=row.get("current") is not None,
+                )
+    for variant in _variants(proposed):
+        variant.pop("inventory_quantity", None)
+        variant.pop("inventoryQuantity", None)
+        variant.pop("inventoryQuantities", None)
+        variant.pop("_inventory_stocked", None)
+        if isinstance(variant.get("inventoryItem"), dict):
+            variant["inventoryItem"].pop("id", None)
     return proposed
+
+
+def materialize_inventory_operations(
+    plan: dict[str, Any], item: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Freeze approved absolute inventory writes separately from productSet."""
+    context = plan.get("inventory_context")
+    location = context.get("selected_location") if isinstance(context, dict) else None
+    if not isinstance(location, dict) or not location.get("id"):
+        return []
+    proposed = item.get("proposed") if isinstance(item.get("proposed"), dict) else {}
+    operations: list[dict[str, Any]] = []
+    for row in item.get("review_changes", []):
+        if (
+            not isinstance(row, dict)
+            or not row.get("included")
+            or row.get("scope") != "inventory"
+            or row.get("field") != "inventory_quantity"
+        ):
+            continue
+        target = _unique_variant_target(proposed, row)
+        if not isinstance(target, dict):
+            continue
+        quantity = validate_inventory_quantity(row.get("proposed"))
+        inventory_item = (
+            target.get("inventoryItem")
+            if isinstance(target.get("inventoryItem"), dict)
+            else {}
+        )
+        live = (
+            item.get("live_snapshot")
+            if isinstance(item.get("live_snapshot"), dict)
+            else {}
+        )
+        live_target = _unique_variant_target(live, row)
+        live_inventory_item = (
+            live_target.get("inventoryItem")
+            if isinstance(live_target, dict)
+            and isinstance(live_target.get("inventoryItem"), dict)
+            else {}
+        )
+        operations.append(
+            {
+                "operation_id": str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"stockpile-inventory:{plan.get('plan_id')}:{row.get('change_id')}",
+                    )
+                ),
+                "change_id": row.get("change_id"),
+                "subject": row.get("subject"),
+                "subject_identity": deepcopy(row.get("subject_identity")),
+                "location": deepcopy(location),
+                "quantity_name": "available",
+                "proposed_quantity": quantity,
+                "approved_current_quantity": (
+                    row.get("current") if isinstance(row.get("current"), int) else None
+                ),
+                "inventory_item_id": inventory_item.get("id"),
+                "prior_stocked": (
+                    bool(live_target.get("_inventory_stocked"))
+                    if isinstance(live_target, dict)
+                    else False
+                ),
+                "approved_current_tracked": bool(live_inventory_item.get("tracked")),
+            }
+        )
+    return operations
 
 
 def approved_value_provenance(plan: dict[str, Any]) -> dict[str, Any]:
@@ -1311,7 +1480,11 @@ def approved_value_provenance(plan: dict[str, Any]) -> dict[str, Any]:
         str(item.get("item_id")): {
             str(row.get("value_path")): {
                 "origin": row.get("origin", "unknown"),
-                **({"source_ref": deepcopy(row["source_ref"])} if isinstance(row.get("source_ref"), dict) else {}),
+                **(
+                    {"source_ref": deepcopy(row["source_ref"])}
+                    if isinstance(row.get("source_ref"), dict)
+                    else {}
+                ),
             }
             for row in item.get("review_changes", [])
             if isinstance(row, dict) and row.get("value_path")
@@ -1463,7 +1636,15 @@ def review_changes(
                     continue
                 rows.append(
                     _review_row(
-                        scope="variant",
+                        scope=(
+                            "inventory"
+                            if field == "inventory_quantity"
+                            or (
+                                field == "inventoryItem.tracked"
+                                and "inventory_quantity" in new_variant
+                            )
+                            else "variant"
+                        ),
                         subject=subject,
                         field=field,
                         current=old,
@@ -1482,7 +1663,8 @@ def review_changes(
     proposed_variants = _variants(proposed)
     for blocker in blockers:
         if not isinstance(blocker, dict) or blocker.get("code") not in {
-            "SKU_REQUIRED", "PRICE_REQUIRED"
+            "SKU_REQUIRED",
+            "PRICE_REQUIRED",
         }:
             continue
         match = re.fullmatch(
@@ -1504,9 +1686,15 @@ def review_changes(
         ):
             continue
         missing_row = _review_row(
-            scope="variant", subject=subject, field=field, current=None,
-            proposed=None, disposition="blocked", change_kind="added",
-            reason_codes=[str(blocker["code"])], subject_identity=identity,
+            scope="variant",
+            subject=subject,
+            field=field,
+            current=None,
+            proposed=None,
+            disposition="blocked",
+            change_kind="added",
+            reason_codes=[str(blocker["code"])],
+            subject_identity=identity,
         )
         missing_row["edit_schema"]["required"] = True
         rows.append(missing_row)
@@ -1573,7 +1761,15 @@ def review_changes(
         for field, value in _flatten_variant(normalized).items():
             rows.append(
                 _review_row(
-                    scope="variant",
+                    scope=(
+                        "inventory"
+                        if field == "inventory_quantity"
+                        or (
+                            field == "inventoryItem.tracked"
+                            and "inventory_quantity" in normalized
+                        )
+                        else "variant"
+                    ),
                     subject=_variant_subject(raw_variant, imported_names),
                     field=field,
                     current=None,
@@ -1724,9 +1920,7 @@ def _replace_option_values(
 def _variant_value_map(
     variant: dict[str, Any], option_names: list[str]
 ) -> dict[str, str]:
-    return {
-        _fold(name): value for name, value in _variant_pairs(variant, option_names)
-    }
+    return {_fold(name): value for name, value in _variant_pairs(variant, option_names)}
 
 
 def _set_variant_option_value(
@@ -1739,7 +1933,12 @@ def _set_variant_option_value(
     positional = f"option{option_index + 1}"
     if positional in variant or not any(
         isinstance(variant.get(key), list)
-        for key in ("selectedOptions", "selected_options", "optionValues", "option_values")
+        for key in (
+            "selectedOptions",
+            "selected_options",
+            "optionValues",
+            "option_values",
+        )
     ):
         variant[positional] = value
     for key in ("selectedOptions", "selected_options", "optionValues", "option_values"):
@@ -1753,7 +1952,9 @@ def _set_variant_option_value(
             pair_name = (
                 pair.get("name")
                 if "value" in pair
-                else pair.get("optionName") or pair.get("option_name") or pair.get("name")
+                else pair.get("optionName")
+                or pair.get("option_name")
+                or pair.get("name")
             )
             if _fold(pair_name) != _fold(option_name):
                 continue
@@ -1802,11 +2003,7 @@ def _commerce_clone(variant: dict[str, Any]) -> dict[str, Any]:
         "unit_cost",
         "cost_per_item",
     }
-    clone = {
-        key: deepcopy(value)
-        for key, value in variant.items()
-        if key in top_level
-    }
+    clone = {key: deepcopy(value) for key, value in variant.items() if key in top_level}
     inventory_source = variant.get("inventoryItem")
     inventory_key = "inventoryItem"
     if not isinstance(inventory_source, dict):
@@ -1877,8 +2074,7 @@ def _validate_variant_combinations(
                 "Every variant must select one value for every option.",
             )
         if any(
-            index >= len(declared_values)
-            or value not in declared_values[index]
+            index >= len(declared_values) or value not in declared_values[index]
             for index, value in enumerate(combo)
         ):
             raise OptionValueEditError(
@@ -1916,10 +2112,18 @@ def _validate_variant_representations(
                     "Variant option references must use one consistent representation.",
                 )
             if "value" in entry:
-                name = entry.get("name") or entry.get("optionName") or entry.get("option_name")
+                name = (
+                    entry.get("name")
+                    or entry.get("optionName")
+                    or entry.get("option_name")
+                )
                 value = entry.get("value")
             else:
-                name = entry.get("optionName") or entry.get("option_name") or entry.get("name")
+                name = (
+                    entry.get("optionName")
+                    or entry.get("option_name")
+                    or entry.get("name")
+                )
                 value = entry.get("name")
             folded_name = _fold(name)
             if (
@@ -1938,12 +2142,8 @@ def _validate_variant_representations(
                 "INCONSISTENT_VARIANT_OPTIONS",
                 "Variant option references must select every option exactly once.",
             )
-        representations.append(
-            tuple(pairs[_fold(name)] for name in option_names)
-        )
-    positional_present = any(
-        f"option{index}" in variant for index in range(1, 4)
-    )
+        representations.append(tuple(pairs[_fold(name)] for name in option_names))
+    positional_present = any(f"option{index}" in variant for index in range(1, 4))
     if positional_present:
         positional = tuple(
             _fold(variant.get(f"option{index + 1}"))
@@ -1988,8 +2188,7 @@ def _sort_variants_by_options(product: dict[str, Any]) -> None:
         if combo is None:
             return tuple([MAX_VARIANTS] * len(option_names))
         return tuple(
-            ranks[index].get(value, MAX_VARIANTS)
-            for index, value in enumerate(combo)
+            ranks[index].get(value, MAX_VARIANTS) for index, value in enumerate(combo)
         )
 
     variants.sort(key=sort_key)
@@ -2059,9 +2258,7 @@ def _option_value_impacts(
     live = live_snapshot or {}
     live_names = _schema_from_product(live)
     live_ids = {
-        str(variant.get("id"))
-        for variant in _variants(live)
-        if variant.get("id")
+        str(variant.get("id")) for variant in _variants(live) if variant.get("id")
     }
     live_combos = {
         combo
@@ -2077,13 +2274,12 @@ def _option_value_impacts(
         value = value_map.get(_fold(option_name))
         if value is None:
             continue
-        impact = impacts.setdefault(
-            value, {"total": 0, "live": 0, "proposed_only": 0}
-        )
+        impact = impacts.setdefault(value, {"total": 0, "live": 0, "proposed_only": 0})
         impact["total"] += 1
-        is_live = bool(
-            variant.get("id") and str(variant.get("id")) in live_ids
-        ) or combo in live_combos
+        is_live = (
+            bool(variant.get("id") and str(variant.get("id")) in live_ids)
+            or combo in live_combos
+        )
         if is_live:
             impact["live"] += 1
         else:
@@ -2140,8 +2336,7 @@ def apply_option_value_operation(
                 "Option values must be unique, ignoring capitalization.",
             )
         next_values = [
-            target if current == renamed_from else current
-            for current in current_values
+            target if current == renamed_from else current for current in current_values
         ]
         for variant in variants:
             value_map = _variant_value_map(variant, option_names_before)
@@ -2180,23 +2375,18 @@ def apply_option_value_operation(
                 "An option must keep at least one value.",
             )
         removed = matches[0]
-        next_values = [
-            current for current in current_values if current != removed
-        ]
+        next_values = [current for current in current_values if current != removed]
         variants[:] = [
             variant
             for variant in variants
             if _fold(
-                _variant_value_map(variant, option_names_before).get(
-                    _fold(option_name)
-                )
+                _variant_value_map(variant, option_names_before).get(_fold(option_name))
             )
             != _fold(removed)
         ]
     elif action == "reorder":
-        if (
-            not isinstance(values, list)
-            or any(not isinstance(entry, str) for entry in values)
+        if not isinstance(values, list) or any(
+            not isinstance(entry, str) for entry in values
         ):
             raise OptionValueEditError(
                 "INVALID_OPTION_REORDER",
@@ -2266,9 +2456,7 @@ def build_review_plan_item(
     )
     previous = prior_item if isinstance(prior_item, dict) else {}
     prior_rows = [
-        row
-        for row in previous.get("review_changes", [])
-        if isinstance(row, dict)
+        row for row in previous.get("review_changes", []) if isinstance(row, dict)
     ]
     represented_options = {
         (_fold(row.get("subject")), str(row.get("field") or ""))
@@ -2276,8 +2464,7 @@ def build_review_plan_item(
         if row.get("scope") == "option"
     }
     proposed_options = {
-        _fold(option.get("name")): option
-        for option in _raw_options(proposed_copy)
+        _fold(option.get("name")): option for option in _raw_options(proposed_copy)
     }
     live_options = {
         _fold(option.get("name")): option for option in _raw_options(live or {})
@@ -2304,10 +2491,9 @@ def build_review_plan_item(
         represented_options.add(option_key)
 
     previous_rows = {
-        str(row.get("change_id")): row
-        for row in prior_rows
-        if row.get("change_id")
+        str(row.get("change_id")): row for row in prior_rows if row.get("change_id")
     }
+
     def semantic_subject(row: dict[str, Any]) -> str:
         identity = row.get("subject_identity")
         if (
@@ -2349,10 +2535,9 @@ def build_review_plan_item(
                 option_index, renamed_value, prior_value = variant_identity_rename
                 prior_identity = deepcopy(identity)
                 identity_values = prior_identity["values"]
-                if (
-                    0 <= option_index < len(identity_values)
-                    and _fold(identity_values[option_index]) == _fold(renamed_value)
-                ):
+                if 0 <= option_index < len(identity_values) and _fold(
+                    identity_values[option_index]
+                ) == _fold(renamed_value):
                     identity_values[option_index] = _fold(prior_value)
                     prior_subject = json.dumps(
                         {
@@ -2434,6 +2619,6 @@ def build_review_plan_item(
         "remedy": None,
         "execution": None,
     }
-    return normalize_review_plan_rows(
-        {"review_contract_version": 2, "items": [item]}
-    )["items"][0]
+    return normalize_review_plan_rows({"review_contract_version": 2, "items": [item]})[
+        "items"
+    ][0]

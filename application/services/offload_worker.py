@@ -51,7 +51,9 @@ def _draft_products(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
 def _draft_ai_enhancements_enabled(
     entry: dict[str, Any] | None, fallback: bool = True
 ) -> bool:
-    if isinstance(entry, dict) and isinstance(entry.get("ai_enhancements_enabled"), bool):
+    if isinstance(entry, dict) and isinstance(
+        entry.get("ai_enhancements_enabled"), bool
+    ):
         return entry["ai_enhancements_enabled"]
     return fallback
 
@@ -113,20 +115,51 @@ def _is_retryable_job_failure(*, job_type: str, error_message: str) -> bool:
     if job_type != "document_import":
         return False
     lowered = error_message.lower()
-    non_retryable_markers = (
-        "file not found",
-        "missing file_id",
-        "content is invalid",
-        "file content is invalid",
-        "file content does not match",
-        "file is not a zip file",
-        "lifecycle columns missing",
-        "collabora_storage_low",
-        "out of storage",
-        "low disk",
+    terminal_markers = (
+        "copilot_permission",
+        "permission denied",
+        "permissiondecisionusernotavailable",
+        "user-not-available",
+        "denied by permission",
+        "unavailable tool",
+        "tool unavailable",
+        "unknown tool",
+        "tool not found",
+        "invalid payload",
+        "copilot_extraction_invalid",
+        "validation error",
         "source_evidence_validation_failed",
     )
-    return not any(marker in lowered for marker in non_retryable_markers)
+    if any(marker in lowered for marker in terminal_markers):
+        return False
+    transient_markers = (
+        "timeout",
+        "timed out",
+        "rate limit",
+        "rate-limit",
+        "too many requests",
+        "status 429",
+        "http 429",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "connection error",
+        "network error",
+        "temporarily unavailable",
+        "service unavailable",
+        "provider unavailable",
+        "external service",
+        "bad gateway",
+        "gateway timeout",
+        "status 502",
+        "status 503",
+        "status 504",
+        "http 502",
+        "http 503",
+        "http 504",
+        "collabora",
+    )
+    return any(marker in lowered for marker in transient_markers)
 
 
 def _exception_message(exc: Exception) -> str:
@@ -135,8 +168,52 @@ def _exception_message(exc: Exception) -> str:
 
 def _failure_code(error_message: str) -> str:
     lowered = error_message.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "copilot_permission",
+            "permission denied",
+            "user-not-available",
+            "denied by permission",
+        )
+    ):
+        return "COPILOT_PERMISSION_DENIED"
+    if any(
+        marker in lowered
+        for marker in (
+            "unavailable tool",
+            "tool unavailable",
+            "unknown tool",
+            "tool not found",
+        )
+    ):
+        return "COPILOT_TOOL_UNAVAILABLE"
+    if any(
+        marker in lowered
+        for marker in (
+            "invalid payload",
+            "copilot_extraction_invalid",
+            "validation error",
+        )
+    ):
+        return "COPILOT_INVALID_PAYLOAD"
     if "source_evidence_validation_failed" in lowered:
         return "SOURCE_EVIDENCE_VALIDATION_FAILED"
+    if "copilot" in lowered and ("timeout" in lowered or "timed out" in lowered):
+        return "COPILOT_PROVIDER_TIMEOUT"
+    if any(
+        marker in lowered
+        for marker in (
+            "rate limit",
+            "rate-limit",
+            "too many requests",
+            "http 429",
+            "status 429",
+        )
+    ):
+        return "COPILOT_RATE_LIMITED"
+    if "provider unavailable" in lowered:
+        return "COPILOT_PROVIDER_UNAVAILABLE"
     if "storage" in lowered or "low disk" in lowered:
         return "collabora_storage_low"
     if "timeout" in lowered or "readtimeout" in lowered:
@@ -242,7 +319,9 @@ def _save_draft_state(
             else _optional_str_field(existing, "quality_gate_status")
         ),
         quality_report=(
-            quality_report if quality_report is not None else existing.get("quality_report")
+            quality_report
+            if quality_report is not None
+            else existing.get("quality_report")
         ),
         quality_checked_at=(
             quality_checked_at
@@ -415,7 +494,8 @@ class OffloadWorker:
                 quality_gate_status="live_validation_pending",
                 quality_report=(
                     {**quality_report, "status": "live_validation_pending"}
-                    if quality_report else None
+                    if quality_report
+                    else None
                 ),
                 quality_checked_at=(
                     str(quality_report.get("generated_at")) if quality_report else None
@@ -580,6 +660,29 @@ class OffloadWorker:
             raise RuntimeError("SHOPIFY_REAUTH_REQUIRED") from exc
         if not shop_access_token:
             raise RuntimeError("SHOPIFY_REAUTH_REQUIRED")
+        inventory_operations = [
+            operation
+            for item in plan.get("items", [])
+            if isinstance(item, dict) and item.get("selected")
+            for operation in item.get("inventory_operations", [])
+            if isinstance(operation, dict)
+        ]
+        if inventory_operations:
+            from application.services.inventory_execution import (
+                assert_inventory_expectations,
+            )
+            from shopify import ShopifyClient
+
+            inventory_client = ShopifyClient(shop=shop_domain, token=shop_access_token)
+            try:
+                await assert_inventory_expectations(
+                    inventory_client, inventory_operations
+                )
+            except Exception:
+                plan_store.save_mutation_plan({**plan, "status": "stale"})
+                raise
+            finally:
+                await inventory_client.close()
         LOG.info(
             "offload_submit_start run_id=%s draft_id=%s submitted_id=%s shop_domain=%s "
             "import_mode=%s has_products_json=%s has_shop_access_token=%s",
@@ -626,23 +729,117 @@ class OffloadWorker:
             shop_access_token=shop_access_token,
             ai_enhancements_enabled=ai_enhancements_enabled,
         )
-        submitted_result_id = result.get("submitted_id") if isinstance(result, dict) else None
+        result_rows = result.get("results", []) if isinstance(result, dict) else []
+        selected_plan_items = [
+            item
+            for item in plan.get("items", [])
+            if isinstance(item, dict)
+            and item.get("selected")
+            and not item.get("blockers")
+        ]
+        if inventory_operations and isinstance(result_rows, list):
+            from application.services.inventory_execution import (
+                apply_inventory_operations,
+            )
+            from shopify import ShopifyClient
+
+            inventory_client = ShopifyClient(shop=shop_domain, token=shop_access_token)
+            try:
+                for item, result_row in zip(selected_plan_items, result_rows):
+                    operations = [
+                        op
+                        for op in item.get("inventory_operations", [])
+                        if isinstance(op, dict)
+                    ]
+                    if (
+                        not operations
+                        or not isinstance(result_row, dict)
+                        or result_row.get("status") != "success"
+                    ):
+                        continue
+                    try:
+                        applied_inventory = await apply_inventory_operations(
+                            inventory_client,
+                            plan_id=str(plan_id),
+                            product_id=str(result_row.get("shopify_product_id") or ""),
+                            operations=operations,
+                        )
+                        result_row["applied"] = [
+                            *result_row.get("applied", ["product"]),
+                            "inventory",
+                        ]
+                        result_row["inventory"] = applied_inventory
+                    except Exception as inventory_exc:
+                        result_row.update(
+                            {
+                                "status": "partially_applied",
+                                "applied": result_row.get("applied", ["product"]),
+                                "failed": [*result_row.get("failed", []), "inventory"],
+                                "inventory": {
+                                    "location": plan.get("inventory_context", {}).get(
+                                        "selected_location"
+                                    ),
+                                    "changes": [
+                                        op.get("change_id") for op in operations
+                                    ],
+                                    "refresh_required": True,
+                                },
+                                "errors": [
+                                    *result_row.get("errors", []),
+                                    {
+                                        "field": ["inventory"],
+                                        "message": str(inventory_exc),
+                                    },
+                                ],
+                            }
+                        )
+            finally:
+                await inventory_client.close()
+            success_count = sum(
+                row.get("status") in {"success", "partially_applied"}
+                for row in result_rows
+                if isinstance(row, dict)
+            )
+            partial_count = sum(
+                row.get("status") == "partially_applied"
+                for row in result_rows
+                if isinstance(row, dict)
+            )
+            result["success_count"] = success_count
+            result["partial_count"] = partial_count
+            result["failed_count"] = len(result_rows) - success_count
+        submitted_result_id = (
+            result.get("submitted_id") if isinstance(result, dict) else None
+        )
         if isinstance(submitted_result_id, str) and submitted_result_id:
             submitted = self.ctx.supabase.submitted.get_submitted_document(
                 submitted_result_id, shop_domain=shop_domain
             )
             if isinstance(submitted, dict):
-                from application.domain.shopify_mutation_plan import approved_value_provenance
+                from application.domain.shopify_mutation_plan import (
+                    approved_value_provenance,
+                )
+
                 self.ctx.supabase.submitted.save_submitted_document(
                     submitted_id=submitted_result_id,
                     run_id=submitted.get("run_id"),
                     draft_id=submitted.get("draft_id"),
-                    name=str(submitted.get("name") or document_name or "Submitted document"),
+                    name=str(
+                        submitted.get("name") or document_name or "Submitted document"
+                    ),
                     import_mode=str(submitted.get("import_mode") or "auto"),
                     shop_domain=shop_domain,
                     product_count=int(submitted.get("product_count") or len(selected)),
-                    products=submitted.get("products") if isinstance(submitted.get("products"), list) else selected,
-                    approved_selection=plan.get("approved_selection") if isinstance(plan.get("approved_selection"), list) else None,
+                    products=(
+                        submitted.get("products")
+                        if isinstance(submitted.get("products"), list)
+                        else selected
+                    ),
+                    approved_selection=(
+                        plan.get("approved_selection")
+                        if isinstance(plan.get("approved_selection"), list)
+                        else None
+                    ),
                     value_provenance=approved_value_provenance(plan),
                 )
         result_rows = result.get("results", []) if isinstance(result, dict) else []

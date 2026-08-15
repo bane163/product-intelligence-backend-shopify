@@ -50,3 +50,23 @@ def normalize_token_usage(value: Any) -> dict[str, int]:
         "completion_tokens": output_tokens,
         "total_tokens": total_tokens,
     }
+
+
+def normalize_reported_token_usage(value: Any) -> dict[str, int] | None:
+    """Normalize SDK usage only when the response actually reports it.
+
+    This differs from :func:`normalize_token_usage`, whose zero-filled result is
+    useful when accumulating persisted run fields. Provider responses with no
+    ``usage_details`` must not turn historical null run totals into zeroes.
+    """
+    if value is None:
+        return None
+    usage_details = (
+        value.get("usage_details")
+        if isinstance(value, dict)
+        else getattr(value, "usage_details", None)
+    )
+    reported = _mapping(usage_details)
+    if not reported:
+        return None
+    return normalize_token_usage(reported)

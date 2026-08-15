@@ -41,4 +41,4 @@ fi
 echo "✅ Backend and worker started!"
 echo "📝 Use 'docker compose -f docker-compose.stack.yml logs -f shopify-backend offload-worker' to see logs."
 
-echo "🤖 OpenAI is the default LLM provider; configure OPENAI_API_KEY or Supabase Vault before processing."
+echo "🤖 Copilot BYOK is the semantic runtime; configure the active provider key before processing."

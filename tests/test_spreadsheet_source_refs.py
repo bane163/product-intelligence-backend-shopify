@@ -4,6 +4,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from application.services.spreadsheet_source_refs import enrich_spreadsheet_source_refs
+from application.domain.shopify_mutation_plan import merge_structured_product, review_changes
 
 
 def workbook_bytes(rows):
@@ -42,6 +43,52 @@ def test_adds_exact_refs_for_first_variant_and_normalizes_numeric_price():
     assert {(ref["field"], ref["cell"]) for ref in products[0]["source_refs"]} == {
         ("title", "A3"), ("vendor", "B3"), ("sku", "C3"), ("price", "D3")
     }
+
+
+def test_plain_inventory_header_links_all_eight_counts_to_k2_through_k9_and_review_rows():
+    counts = [50, 75, 60, 120, 30, 40, 35, 200]
+    sizes = ["S", "S", "M", "M", "L", "L", "XL", "XL"]
+    colors = ["Red", "Blue"] * 4
+    variants = [
+        {
+            "option1": size,
+            "option2": color,
+            "sku": f"TEE-{size}-{color}",
+            "price": 20,
+            "inventory_quantity": quantity,
+        }
+        for size, color, quantity in zip(sizes, colors, counts)
+    ]
+    product = {
+        "title": "Inventory tee",
+        "options": [
+            {"name": "Size", "values": ["S", "M", "L", "XL"]},
+            {"name": "Color", "values": ["Red", "Blue"]},
+        ],
+        "variants": variants,
+    }
+    rows = [[
+        "Title", "Option1 Name", "Option1 Value", "Option2 Name", "Option2 Value",
+        "SKU", "Price", "Unused 1", "Unused 2", "Unused 3", "Inventory",
+    ]]
+    rows.extend([
+        ["Inventory tee" if index == 0 else "", "Size", size, "Color", color,
+         variant["sku"], 20, "", "", "", quantity]
+        for index, (size, color, quantity, variant) in enumerate(zip(sizes, colors, counts, variants))
+    ])
+
+    enrich_spreadsheet_source_refs([product], workbook_bytes(rows), "inventory.xlsx", "inventory-file")
+
+    quantity_refs = [
+        ref for ref in product["source_refs"] if ref.get("field") == "inventory_quantity"
+    ]
+    assert [variant["inventory_quantity"] for variant in product["variants"]] == counts
+    assert sorted(ref["cell"] for ref in quantity_refs) == [f"K{row}" for row in range(2, 10)]
+    proposed, blockers, unapplied = merge_structured_product(None, product, {"title": product["title"]})
+    assert blockers == [] and unapplied == []
+    inventory_rows = [row for row in review_changes(None, product, proposed) if row["field"] == "inventory_quantity"]
+    assert sorted(row["proposed"] for row in inventory_rows) == sorted(counts)
+    assert sorted(row["source_ref"]["cell"] for row in inventory_rows) == [f"K{row}" for row in range(2, 10)]
 
 
 def test_replaces_invalid_existing_sku_ref_on_anchored_sheet():
@@ -121,7 +168,7 @@ def test_keyboard_template_resolves_every_variant_continuation_cell_and_option_r
         (f"{linear}.sku", "O3"),
         (f"{linear}.price", "U3"),
         (f"{linear}.inventoryItem.cost", "AV3"),
-        (f"{linear}.inventory_quantity", "R3"),
+        ("inventory[switch-linear-layout-us].inventory_quantity", "R3"),
         (f"{linear}.fulfillment_service", "T3"),
     } <= cells_by_path
     assert {

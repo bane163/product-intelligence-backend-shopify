@@ -189,29 +189,40 @@ async def test_product_intelligence_suggestions_trace_payload_uses_image_uris(mo
     )
 
     class _FakeAgent:
+        def __init__(self, **kwargs):
+            _ = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            _ = args
+
         async def run(self, user_message):
             _ = user_message
             return SimpleNamespace(value={"suggestions": []}, text="", usage=None)
 
     class _FakeClient:
-        def create_agent(self, **kwargs):
+        def __init__(self, **kwargs):
             _ = kwargs
-            return _FakeAgent()
+
+        async def stop(self):
+            return None
 
     monkeypatch.setitem(
         run_product_intelligence_suggestions.__globals__,
-        "_create_chat_client",
-        lambda model_env: _FakeClient(),
+        "GitHubCopilotAgent",
+        _FakeAgent,
     )
     monkeypatch.setitem(
         run_product_intelligence_suggestions.__globals__,
-        "render_prompt",
-        lambda template, **kwargs: "instructions" if "instructions" in template else "user prompt",
+        "CopilotClient",
+        _FakeClient,
     )
 
     response = await run_product_intelligence_suggestions(
         products=[{"title": "Catalog Product", "images": [{"src": "data:image/png;base64,AAAA"}]}],
-        model_env={"OLLAMA_API_KEY": "secret"},
+        model_env={"OLLAMA_API_KEY": "secret", "OLLAMA_MODEL_ID": "gpt-test", "OLLAMA_CLOUD_URL": "https://api.openai.com/v1"},
         trace_event=lambda **kwargs: traces.append(kwargs),
     )
 

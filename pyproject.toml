@@ -5,7 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "agent-framework>=1.0.0b251108",
+    "agent-framework-core==1.13.0",
+    "agent-framework-github-copilot==1.0.1",
+    "agent-framework-monty==1.0.0b260730",
+    "pydantic-monty==0.0.18",
     "azure-ai-documentintelligence==1.0.2",
     "black>=25.11.0",
     "cryptography>=44.0.0",
@@ -31,4 +34,5 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "integration: requires live local infrastructure such as Supabase or Collabora",
+    "live_copilot: opt-in live Copilot BYOK smoke test",
 ]

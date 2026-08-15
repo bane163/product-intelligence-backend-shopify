@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from html import unescape
 import re
 from typing import Any, Iterable
+
+import fitz
 
 from application.domain.review_value_paths import (
     ReviewValue,
@@ -269,6 +273,17 @@ def validate_indexed_pdf_evidence(
         paths_by_position, mismatched = _canonical_ref_paths(refs, items)
         for path in mismatched:
             add(path, "does not identify a canonical extracted value")
+        for position, ref in enumerate(refs):
+            forbidden = [
+                key
+                for key in ("page", "bbox", "source_file_id", "anchor_id", "source_provider")
+                if ref.get(key) is not None
+            ]
+            if forbidden:
+                path = paths_by_position.get(position) or str(
+                    ref.get("value_path") or "<missing-value-path>"
+                )
+                add(path, f"contains model-supplied locators: {', '.join(forbidden)}")
 
         refs_by_path: dict[str, list[dict[str, Any]]] = {}
         for position, path in paths_by_position.items():
@@ -378,8 +393,15 @@ def blank_unverified_optional_pdf_values(
             prefix = f"variant[{subject}]"
             inventory = variant.get("inventoryItem") or variant.get("inventory_item")
             for field, aliases in PROTECTED_VARIANT_ALIASES.items():
-                path = canonical_value_path(f"{prefix}.{field}")
-                if path not in unsupported_paths:
+                candidate_paths = (
+                    canonical_value_path(f"{prefix}.{field}"),
+                    canonical_value_path(f"inventory[{subject}].{field}"),
+                )
+                path = next(
+                    (candidate for candidate in candidate_paths if candidate in unsupported_paths),
+                    None,
+                )
+                if path is None:
                     continue
                 for alias in aliases:
                     variant.pop(alias, None)
@@ -438,59 +460,183 @@ def _variant_subject_for_blanking(
     return re.sub(r"[^a-z0-9]+", "-", subject.casefold()).strip("-") or "value"
 
 
+def _normalized_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _plain_html(value: str) -> str:
+    text = re.sub(r"<\s*br\s*/?\s*>", " ", value, flags=re.IGNORECASE)
+    text = re.sub(r"</\s*(?:p|div|li|h[1-6]|tr|td|th)\s*>", " ", text, flags=re.IGNORECASE)
+    return _normalized_text(unescape(re.sub(r"<[^>]+>", " ", text)))
+
+
+def _numeric_representations(value: Any) -> list[str]:
+    if isinstance(value, bool):
+        return ["true" if value else "false", "yes" if value else "no"]
+    if not isinstance(value, (int, float, Decimal)):
+        return []
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation:
+        return []
+    plain = format(number, "f")
+    trimmed = plain.rstrip("0").rstrip(".") if "." in plain else plain
+    variants = [plain, trimmed]
+    if number == number.to_integral_value():
+        variants.append(format(number, ",.0f"))
+    else:
+        variants.extend((format(number, ",f").rstrip("0").rstrip("."), f"{number:.2f}"))
+    return list(dict.fromkeys(item for item in variants if item))
+
+
+def _value_representations(value: Any) -> tuple[str, ...]:
+    """Return deterministic visible-PDF renderings, most specific first."""
+    candidates: list[str] = []
+    if isinstance(value, (list, tuple)):
+        parts = [_plain_html(str(item)) for item in value if item not in (None, "")]
+        for separator in (", ", ",", "; ", " | ", " "):
+            if parts:
+                candidates.append(separator.join(parts))
+    elif isinstance(value, dict):
+        # Structured values have no reliable single visible representation.
+        return ()
+    else:
+        candidates.extend(_numeric_representations(value))
+        raw = _normalized_text(value)
+        if raw:
+            candidates.append(raw)
+            plain = _plain_html(raw)
+            if plain != raw:
+                candidates.append(plain)
+    return tuple(dict.fromkeys(item for item in candidates if item))
+
+
+def _rect_overlap(left: fitz.Rect, right: fitz.Rect) -> bool:
+    intersection = left & right
+    return not intersection.is_empty and intersection.get_area() > 0
+
+
+def _normalized_bbox(rect: fitz.Rect, page: fitz.Page) -> tuple[float, float, float, float] | None:
+    width, height = float(page.rect.width), float(page.rect.height)
+    if width <= 0 or height <= 0:
+        return None
+    values = (
+        max(0.0, min(1.0, rect.x0 / width)),
+        max(0.0, min(1.0, rect.y0 / height)),
+        max(0.0, min(1.0, rect.x1 / width)),
+        max(0.0, min(1.0, rect.y1 / height)),
+    )
+    return values if values[0] < values[2] and values[1] < values[3] else None
+
+
+def _tight_value_bbox(
+    document: fitz.Document | None,
+    entry: EvidenceEntry,
+    value: Any,
+) -> tuple[float, float, float, float] | None:
+    if document is None or entry.page < 1 or entry.page > document.page_count:
+        return None
+    page = document.load_page(entry.page - 1)
+    width, height = float(page.rect.width), float(page.rect.height)
+    trusted = fitz.Rect(
+        entry.bbox[0] * width,
+        entry.bbox[1] * height,
+        entry.bbox[2] * width,
+        entry.bbox[3] * height,
+    )
+    for representation in _value_representations(value):
+        matches = [
+            rect
+            for rect in page.search_for(representation)
+            if _rect_overlap(rect, trusted)
+        ]
+        # A representation that occurs more than once inside the trusted region
+        # is ambiguous. Keep the trusted coarse region instead of guessing.
+        if len(matches) > 1:
+            return None
+        if len(matches) == 1:
+            return _normalized_bbox(matches[0] & trusted, page)
+    return None
+
+
 def resolve_indexed_pdf_source_refs(
-    products: list[dict[str, Any]], catalog: EvidenceCatalog, source_file_id: str
+    products: list[dict[str, Any]],
+    catalog: EvidenceCatalog,
+    source_file_id: str,
+    *,
+    pdf_content: bytes | None = None,
+    resolution_stats: dict[str, int] | None = None,
 ) -> int:
-    """Replace all model locators with trusted catalog coordinates."""
+    """Replace model locators with trusted coordinates, tightening when unique."""
     resolved_count = 0
-    for product in products:
-        items = list(iter_review_values(product))
-        incoming = product.get("source_refs")
-        refs = (
-            [ref for ref in incoming if isinstance(ref, dict)]
-            if isinstance(incoming, list)
-            else []
-        )
-        paths_by_position, _ = _canonical_ref_paths(refs, items)
-        item_by_path = {canonical_value_path(item.value_path): item for item in items}
-        verified: list[dict[str, Any]] = []
-        origins = (
-            product.get("value_origins")
-            if isinstance(product.get("value_origins"), dict)
-            else {}
-        )
-        canonical_origins = {
-            canonical_value_path(key): value for key, value in origins.items()
-        }
-        for position, canonical_path in paths_by_position.items():
-            item = item_by_path.get(canonical_value_path(canonical_path))
-            if (
-                item is None
-                or _origin_for(product, item.value_path) in NON_SOURCE_ORIGINS
-            ):
-                continue
-            evidence_index = _numeric_index(refs[position].get("evidence_index"))
-            entry = (
-                catalog.resolve(evidence_index) if evidence_index is not None else None
+    exact_count = 0
+    coarse_count = 0
+    document: fitz.Document | None = None
+    if pdf_content:
+        try:
+            document = fitz.open(stream=pdf_content, filetype="pdf")
+        except Exception:
+            document = None
+    try:
+        for product in products:
+            items = list(iter_review_values(product))
+            incoming = product.get("source_refs")
+            refs = (
+                [ref for ref in incoming if isinstance(ref, dict)]
+                if isinstance(incoming, list)
+                else []
             )
-            if entry is None:
-                continue
-            verified.append(
-                {
-                    "source_file_id": source_file_id,
-                    "field": item.field,
-                    "value_path": item.value_path,
-                    "document_kind": "pdf",
-                    "anchor_id": entry.anchor_id,
-                    "page": entry.page,
-                    "bbox": list(entry.bbox),
-                    "value": str(item.value),
-                    "source_provider": entry.provider,
-                }
+            paths_by_position, _ = _canonical_ref_paths(refs, items)
+            item_by_path = {canonical_value_path(item.value_path): item for item in items}
+            verified: list[dict[str, Any]] = []
+            origins = (
+                product.get("value_origins")
+                if isinstance(product.get("value_origins"), dict)
+                else {}
             )
-            canonical_origins[canonical_value_path(item.value_path)] = "source"
-            resolved_count += 1
-        product["source_refs"] = verified
-        if canonical_origins:
-            product["value_origins"] = canonical_origins
+            canonical_origins = {
+                canonical_value_path(key): value for key, value in origins.items()
+            }
+            for position, canonical_path in paths_by_position.items():
+                item = item_by_path.get(canonical_value_path(canonical_path))
+                if (
+                    item is None
+                    or _origin_for(product, item.value_path) in NON_SOURCE_ORIGINS
+                ):
+                    continue
+                evidence_index = _numeric_index(refs[position].get("evidence_index"))
+                entry = (
+                    catalog.resolve(evidence_index) if evidence_index is not None else None
+                )
+                if entry is None:
+                    continue
+                tight_bbox = _tight_value_bbox(document, entry, item.value)
+                bbox = tight_bbox or entry.bbox
+                if tight_bbox is None:
+                    coarse_count += 1
+                else:
+                    exact_count += 1
+                verified.append(
+                    {
+                        "source_file_id": source_file_id,
+                        "field": item.field,
+                        "value_path": item.value_path,
+                        "document_kind": "pdf",
+                        "anchor_id": entry.anchor_id,
+                        "page": entry.page,
+                        "bbox": list(bbox),
+                        "value": str(item.value),
+                        "source_provider": entry.provider,
+                    }
+                )
+                canonical_origins[canonical_value_path(item.value_path)] = "source"
+                resolved_count += 1
+            product["source_refs"] = verified
+            if canonical_origins:
+                product["value_origins"] = canonical_origins
+    finally:
+        if document is not None:
+            document.close()
+    if resolution_stats is not None:
+        resolution_stats.update(exact=exact_count, coarse=coarse_count)
     return resolved_count

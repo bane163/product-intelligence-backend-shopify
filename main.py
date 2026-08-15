@@ -13,6 +13,7 @@ from shared.observability import (
 
 # Import routers from the api package
 from api.agents import router as agents_router
+from api.shopify_products import router as shopify_products_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -153,6 +154,7 @@ app.add_middleware(
 )
 
 app.include_router(agents_router)
+app.include_router(shopify_products_router)
 
 
 @app.get("/health", tags=["ops"])
@@ -173,7 +175,7 @@ async def readiness_check():
         probes = {
             "product_draft_review_edits": "session_id,base_draft_revision,edit_revision,pending_products,working_file_id,status",
             "submitted_documents": "approved_selection,value_provenance",
-            "shopify_mutation_plans": "approved_selection,review_contract_version",
+            "shopify_mutation_plans": "approved_selection,review_contract_version,inventory_context",
             "file_metadata": "content_revision",
             "product_source_references": "value_path",
         }
@@ -206,7 +208,7 @@ async def readiness_check():
             )
     return {
         "status": "ready",
-        "review_contract_version": 3,
+        "review_contract_version": 4,
         "review_schema_ready": True,
         "services": ["supabase", "llm", "collabora", "tracing", "shopify"],
         "collabora": {key: value for key, value in collabora.items() if key != "discovery"},

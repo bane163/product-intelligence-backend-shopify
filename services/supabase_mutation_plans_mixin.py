@@ -32,31 +32,61 @@ class SupabaseMutationPlansMixin:
                 field = str(row.get("field") or "")
                 code = message = None
                 if field in {"tags", "values"} and not isinstance(value, list):
-                    code, message = "INVALID_LIST", "Enter one value per line, or revert this field."
-                elif row.get("value_type") in {"money", "weight"} and field != "inventoryItem.weight.unit":
+                    code, message = (
+                        "INVALID_LIST",
+                        "Enter one value per line, or revert this field.",
+                    )
+                elif (
+                    row.get("value_type") in {"money", "weight"}
+                    and field != "inventoryItem.weight.unit"
+                ):
                     if value is None or value == "":
                         continue
                     try:
                         number = float(value)
                     except (TypeError, ValueError):
                         number = -1
-                    if number < 0 or number != number or number in {float("inf"), float("-inf")}:
-                        code, message = "INVALID_DECIMAL", "Enter a finite number that is zero or greater."
-                elif field == "title" and (not isinstance(value, str) or not value.strip()):
+                    if (
+                        number < 0
+                        or number != number
+                        or number in {float("inf"), float("-inf")}
+                    ):
+                        code, message = (
+                            "INVALID_DECIMAL",
+                            "Enter a finite number that is zero or greater.",
+                        )
+                elif (
+                    row.get("value_type") == "integer"
+                    or row.get("edit_schema", {}).get("editor") == "integer"
+                ):
+                    try:
+                        from application.domain.shopify_mutation_plan import (
+                            validate_inventory_quantity,
+                        )
+
+                        validate_inventory_quantity(value)
+                    except ValueError:
+                        code, message = (
+                            "INVALID_INTEGER",
+                            "Enter a whole number from 0 to 1,000,000,000.",
+                        )
+                elif field == "title" and (
+                    not isinstance(value, str) or not value.strip()
+                ):
                     code, message = "REQUIRED", "This field is required."
                 if code and message:
-                    errors.append({
-                        "change_id": str(row.get("change_id") or ""),
-                        "value_path": str(row.get("value_path") or ""),
-                        "code": code,
-                        "message": message,
-                    })
+                    errors.append(
+                        {
+                            "change_id": str(row.get("change_id") or ""),
+                            "value_path": str(row.get("value_path") or ""),
+                            "code": code,
+                            "message": message,
+                        }
+                    )
         return errors
 
     @classmethod
-    def _hydrate_review_edit_session(
-        cls, session: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _hydrate_review_edit_session(cls, session: dict[str, Any]) -> dict[str, Any]:
         """Add safe durable-state defaults to sessions created before history support."""
         hydrated = deepcopy(session)
 
@@ -76,19 +106,25 @@ class SupabaseMutationPlansMixin:
             expanded_ids = raw_grid_state.get("expandedItemIds")
             if isinstance(expanded_ids, list):
                 grid_state["expandedItemIds"] = list(
-                    dict.fromkeys(item for item in expanded_ids if isinstance(item, str))
+                    dict.fromkeys(
+                        item for item in expanded_ids if isinstance(item, str)
+                    )
                 )
             pages = raw_grid_state.get("pagesByItem")
             if isinstance(pages, dict):
                 grid_state["pagesByItem"] = {
                     str(key): value
                     for key, value in pages.items()
-                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    if isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value >= 0
                 }
         hydrated["grid_state"] = grid_state
 
         raw_history = hydrated.get("history")
-        unfiltered_history = deepcopy(raw_history) if isinstance(raw_history, list) else []
+        unfiltered_history = (
+            deepcopy(raw_history) if isinstance(raw_history, list) else []
+        )
         raw_cursor = hydrated.get("history_cursor")
         old_cursor = (
             raw_cursor
@@ -102,12 +138,14 @@ class SupabaseMutationPlansMixin:
             "selection",
         }
         history = [
-            entry for entry in unfiltered_history
+            entry
+            for entry in unfiltered_history
             if isinstance(entry, dict) and entry.get("operation") in content_operations
         ]
         hydrated["history"] = history
         cursor = sum(
-            1 for entry in unfiltered_history[:max(0, old_cursor)]
+            1
+            for entry in unfiltered_history[: max(0, old_cursor)]
             if isinstance(entry, dict) and entry.get("operation") in content_operations
         )
         hydrated["history_cursor"] = max(0, min(cursor, len(history)))
@@ -120,32 +158,49 @@ class SupabaseMutationPlansMixin:
         hydrated["base_plan_id"] = base_plan_id
 
         edit_revision = hydrated.get("edit_revision")
-        if not isinstance(edit_revision, int) or isinstance(edit_revision, bool) or edit_revision < 1:
+        if (
+            not isinstance(edit_revision, int)
+            or isinstance(edit_revision, bool)
+            or edit_revision < 1
+        ):
             hydrated["edit_revision"] = 1
         return hydrated
 
-    def cleanup_expired_review_edit_sessions(self, *, shop_domain: str | None = None) -> int:
+    def cleanup_expired_review_edit_sessions(
+        self, *, shop_domain: str | None = None
+    ) -> int:
         """Expire stale sessions and remove their isolated workbook copies."""
         tenant = shop_domain.strip().lower() if shop_domain else None
         now = datetime.now(timezone.utc)
         expired: list[dict[str, Any]] = []
         for session in list(self.review_edit_sessions.values()):
-            if session.get("status") != "active" or (tenant and session.get("shop_domain") != tenant):
+            if session.get("status") != "active" or (
+                tenant and session.get("shop_domain") != tenant
+            ):
                 continue
             try:
-                expires_at = datetime.fromisoformat(str(session.get("expires_at") or "").replace("Z", "+00:00"))
+                expires_at = datetime.fromisoformat(
+                    str(session.get("expires_at") or "").replace("Z", "+00:00")
+                )
             except ValueError:
                 continue
             if expires_at <= now:
                 expired.append(session)
         client = self._get_supabase_client()
         if client:
-            query = client.table("product_draft_review_edits").select("*").eq("status", "active").lte("expires_at", now.isoformat())
+            query = (
+                client.table("product_draft_review_edits")
+                .select("*")
+                .eq("status", "active")
+                .lte("expires_at", now.isoformat())
+            )
             if tenant:
                 query = query.eq("shop_domain", tenant)
             result = query.execute()
             for row in result.data or []:
-                if isinstance(row, dict) and not any(item.get("session_id") == row.get("session_id") for item in expired):
+                if isinstance(row, dict) and not any(
+                    item.get("session_id") == row.get("session_id") for item in expired
+                ):
                     expired.append(row)
         for session in expired:
             saved = {**session, "status": "expired", "updated_at": now.isoformat()}
@@ -160,11 +215,7 @@ class SupabaseMutationPlansMixin:
         hydrated = normalize_review_plan_rows(plan)
         if hydrated.get("currency_code"):
             return hydrated
-        items = (
-            hydrated.get("items")
-            if isinstance(hydrated.get("items"), list)
-            else []
-        )
+        items = hydrated.get("items") if isinstance(hydrated.get("items"), list) else []
         currency_code = next(
             (
                 item.get("currency_code")
@@ -257,7 +308,9 @@ class SupabaseMutationPlansMixin:
         stored = self._hydrate_review_edit_session({**session, "shop_domain": tenant})
         client = self._get_supabase_client()
         if client:
-            persisted = {key: value for key, value in stored.items() if key != "field_errors"}
+            persisted = {
+                key: value for key, value in stored.items() if key != "field_errors"
+            }
             client.table("product_draft_review_edits").upsert(
                 persisted, on_conflict="session_id"
             ).execute()
@@ -300,7 +353,9 @@ class SupabaseMutationPlansMixin:
             and session.get("status") == "active"
         ]
         if candidates:
-            session = max(candidates, key=lambda session: session.get("updated_at") or "")
+            session = max(
+                candidates, key=lambda session: session.get("updated_at") or ""
+            )
             hydrated = self._hydrate_review_edit_session(session)
             self.review_edit_sessions[str(hydrated["session_id"])] = hydrated
             return hydrated

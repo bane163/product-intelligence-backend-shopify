@@ -14,6 +14,9 @@ Requires that exactly one field must be supplied and that field must not be `nul
 """
 directive @oneOf on INPUT_OBJECT
 
+"""Makes a supported mutation safely retryable with the supplied unique key."""
+directive @idempotent(key: String!) on FIELD
+
 """Exposes a URL that specifies the behavior of this scalar."""
 directive @specifiedBy(
   """The URL that specifies the behavior of this scalar."""
@@ -33618,8 +33621,8 @@ input InventoryQuantityInput {
   """The quantity to which the inventory quantity will be set."""
   quantity: Int!
 
-  """The current quantity to be compared against the persisted quantity."""
-  compareQuantity: Int
+  """The current quantity to compare against the persisted quantity before changing it."""
+  changeFromQuantity: Int
 }
 
 """Details about an individual quantity name."""
@@ -94078,4 +94081,3 @@ enum WeightUnit {
   """Imperial system unit of mass."""
   OUNCES
 }
-

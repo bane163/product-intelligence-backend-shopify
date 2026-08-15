@@ -1,4 +1,4 @@
-from shared.token_usage import normalize_token_usage
+from shared.token_usage import normalize_reported_token_usage, normalize_token_usage
 
 
 class UsageDetails:
@@ -24,4 +24,15 @@ def test_openai_and_legacy_usage_aliases():
     assert normalize_token_usage({"input_tokens": 9, "output_tokens": 3, "total_tokens": 12})["total_tokens"] == 12
     assert normalize_token_usage({"prompt_token_count": 7, "completion_token_count": 2}) == {
         "prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9
+    }
+
+
+def test_reported_usage_preserves_absence_instead_of_inventing_zero_totals():
+    assert normalize_reported_token_usage(None) is None
+    assert normalize_reported_token_usage(object()) is None
+    assert normalize_reported_token_usage({"usage_details": {}}) is None
+    assert normalize_reported_token_usage(Response()) == {
+        "prompt_tokens": 21,
+        "completion_tokens": 8,
+        "total_tokens": 29,
     }

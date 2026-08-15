@@ -8,7 +8,7 @@ from app_context import AppContext, ServiceRegistry
 from infrastructure.adapters.supabase_adapter import SupabaseAdapter
 from services.supabase_service import SupabaseService
 from services.tracing_service import TracingService
-from application.services.offload_worker import _is_retryable_job_failure
+from application.services.offload_worker import _failure_code, _is_retryable_job_failure
 
 
 def test_corrupt_document_failures_are_not_retryable():
@@ -22,6 +22,41 @@ def test_source_evidence_validation_failures_are_not_retryable():
     assert not _is_retryable_job_failure(
         job_type="document_import",
         error_message="SOURCE_EVIDENCE_VALIDATION_FAILED: title needs an evidence_index",
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("COPILOT_PERMISSION_DENIED: execute_code", "COPILOT_PERMISSION_DENIED"),
+        ("Copilot unavailable tool: execute_code", "COPILOT_TOOL_UNAVAILABLE"),
+        ("COPILOT_EXTRACTION_INVALID: invalid payload", "COPILOT_INVALID_PAYLOAD"),
+    ],
+)
+def test_copilot_contract_failures_are_terminal(message, code):
+    assert not _is_retryable_job_failure(job_type="document_import", error_message=message)
+    assert _failure_code(message) == code
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        ("Provider unavailable: status 503", "COPILOT_PROVIDER_UNAVAILABLE"),
+        ("Rate limit exceeded (HTTP 429)", "COPILOT_RATE_LIMITED"),
+        ("Network error: connection reset", "collabora_unavailable"),
+        ("Copilot request timed out", "COPILOT_PROVIDER_TIMEOUT"),
+        ("Collabora service unavailable", "collabora_unavailable"),
+    ],
+)
+def test_recognized_transient_document_failures_remain_retryable(message, code):
+    assert _is_retryable_job_failure(job_type="document_import", error_message=message)
+    assert _failure_code(message) == code
+
+
+def test_unrecognized_document_failure_is_terminal():
+    assert not _is_retryable_job_failure(
+        job_type="document_import",
+        error_message="Unexpected malformed worker state",
     )
 
 
@@ -425,7 +460,7 @@ async def test_run_once_requeues_document_import_job_before_max_attempts(monkeyp
 
     async def fake_process_document_execute(**kwargs):
         _ = kwargs
-        raise RuntimeError("transient extraction failure")
+        raise RuntimeError("provider temporarily unavailable")
 
     monkeypatch.setattr(
         offload_worker,
@@ -442,7 +477,7 @@ async def test_run_once_requeues_document_import_job_before_max_attempts(monkeyp
     job = ctx.supabase.runs.get_offload_job(job_id)
     assert job is not None
     assert job["status"] == "retryable"
-    assert "transient extraction failure" in str(job.get("error", "")).lower()
+    assert "provider temporarily unavailable" in str(job.get("error", "")).lower()
     assert int(job.get("attempt_count") or 0) == 1
     available_at = datetime.fromisoformat(
         str(job.get("available_at")).replace("Z", "+00:00")

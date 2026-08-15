@@ -17,6 +17,7 @@ from app_context import AppContext, get_ctx
 from application.domain.shopify_mutation_plan import (
     build_review_plan_item,
     materialize_execution_proposed,
+    materialize_inventory_operations,
     merge_structured_product,
     normalize_review_plan_rows,
     preserve_blank_fields,
@@ -63,6 +64,99 @@ PRODUCT_VARIANTS_PAGE_QUERY = """query MutationPlanProductVariants($id: ID!, $af
 VARIANTS_BY_SKU_QUERY = """query MutationPlanVariantsBySku($query: String!) {
   productVariants(first: 10, query: $query) { nodes { id sku product { id handle } } }
 }"""
+LOCATIONS_QUERY = """query MutationPlanLocations {
+  locations(first: 250, includeLegacy: false) { nodes {
+    id name isActive isFulfillmentService
+    address { address1 address2 city provinceCode zip countryCode }
+  } }
+}"""
+INVENTORY_SNAPSHOT_QUERY = """query MutationPlanInventory($id: ID!, $locationId: ID!) {
+  product(id: $id) { variants(first: 250) { nodes {
+    id selectedOptions { name value }
+    inventoryItem { id tracked inventoryLevel(locationId: $locationId) {
+      id quantities(names: ["available"]) { name quantity }
+    } }
+  } pageInfo { hasNextPage endCursor } } }
+}"""
+INVENTORY_SNAPSHOT_PAGE_QUERY = """query MutationPlanInventoryPage($id: ID!, $locationId: ID!, $after: String!) {
+  product(id: $id) { variants(first: 250, after: $after) { nodes {
+    id selectedOptions { name value }
+    inventoryItem { id tracked inventoryLevel(locationId: $locationId) {
+      id quantities(names: ["available"]) { name quantity }
+    } }
+  } pageInfo { hasNextPage endCursor } } }
+}"""
+INVENTORY_SCOPES = {"write_inventory", "read_inventory", "read_locations"}
+
+
+def _has_inventory(products: list[dict[str, Any]]) -> bool:
+    for product in products:
+        raw = product.get("variants")
+        if isinstance(raw, dict):
+            raw = raw.get("nodes")
+        for variant in raw if isinstance(raw, list) else []:
+            if isinstance(variant, dict) and any(
+                key in variant for key in ("inventory_quantity", "inventoryQuantity")
+            ):
+                return True
+    return False
+
+
+def _location_view(node: dict[str, Any]) -> dict[str, Any]:
+    address = node.get("address") if isinstance(node.get("address"), dict) else {}
+    lines = [
+        address.get("address1"),
+        address.get("address2"),
+        ", ".join(
+            filter(
+                None,
+                [address.get("city"), address.get("provinceCode"), address.get("zip")],
+            )
+        ),
+        address.get("countryCode"),
+    ]
+    return {
+        "id": str(node.get("id") or ""),
+        "name": str(node.get("name") or "Location"),
+        **({"address": [str(line) for line in lines if line]} if any(lines) else {}),
+    }
+
+
+def _apply_inventory_snapshot(live: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    raw_live = (
+        live.get("variants", {}).get("nodes", [])
+        if isinstance(live.get("variants"), dict)
+        else []
+    )
+    raw_snapshot = (
+        snapshot.get("variants", {}).get("nodes", [])
+        if isinstance(snapshot.get("variants"), dict)
+        else []
+    )
+    by_id = {item.get("id"): item for item in raw_snapshot if isinstance(item, dict)}
+    for variant in raw_live:
+        if not isinstance(variant, dict) or variant.get("id") not in by_id:
+            continue
+        inventory_item = by_id[variant["id"]].get("inventoryItem")
+        if not isinstance(inventory_item, dict):
+            continue
+        variant["inventoryItem"] = {
+            **(variant.get("inventoryItem") or {}),
+            **inventory_item,
+        }
+        level = inventory_item.get("inventoryLevel")
+        variant["_inventory_stocked"] = isinstance(level, dict)
+        quantities = level.get("quantities") if isinstance(level, dict) else []
+        available = next(
+            (
+                q.get("quantity")
+                for q in quantities
+                if isinstance(q, dict) and q.get("name") == "available"
+            ),
+            None,
+        )
+        if isinstance(available, int):
+            variant["inventory_quantity"] = available
 
 
 def _service(ctx: AppContext) -> Any:
@@ -141,26 +235,42 @@ async def _repair_legacy_review_evidence(
         return draft
     file_id = str(draft.get("input_file_id") or "")
     source = ctx.supabase.file.get_file(file_id) if file_id else None
-    if not isinstance(source, dict) or not isinstance(source.get("content"), (bytes, bytearray)):
+    if not isinstance(source, dict) or not isinstance(
+        source.get("content"), (bytes, bytearray)
+    ):
         return draft
     original_products = _products(draft)
     products = deepcopy(original_products)
     filename = str(draft.get("input_filename") or source.get("name") or file_id)
     lower_name = filename.casefold()
     if lower_name.endswith((".xlsx", ".xlsm", ".csv")):
-        from application.services.spreadsheet_source_refs import enrich_spreadsheet_source_refs
+        from application.services.spreadsheet_source_refs import (
+            enrich_spreadsheet_source_refs,
+        )
 
-        enrich_spreadsheet_source_refs(products, bytes(source["content"]), filename, source_file_id=file_id)
+        enrich_spreadsheet_source_refs(
+            products, bytes(source["content"]), filename, source_file_id=file_id
+        )
     elif lower_name.endswith(".pdf") and ctx.services.document_layout is not None:
         from application.services.pdf_source_refs import verify_pdf_source_refs
 
-        layout = await ctx.services.document_layout.analyze_pdf(bytes(source["content"]), file_id)
+        layout = await ctx.services.document_layout.analyze_pdf(
+            bytes(source["content"]), file_id
+        )
         verify_pdf_source_refs(products, layout, file_id)
     else:
         return draft
     for product in products:
-        origins = product.get("value_origins") if isinstance(product.get("value_origins"), dict) else {}
-        for ref in product.get("source_refs") if isinstance(product.get("source_refs"), list) else []:
+        origins = (
+            product.get("value_origins")
+            if isinstance(product.get("value_origins"), dict)
+            else {}
+        )
+        for ref in (
+            product.get("source_refs")
+            if isinstance(product.get("source_refs"), list)
+            else []
+        ):
             if isinstance(ref, dict) and ref.get("value_path"):
                 origins.setdefault(str(ref["value_path"]), "source")
         if origins:
@@ -168,12 +278,19 @@ async def _repair_legacy_review_evidence(
     if products == original_products:
         return draft
     saved = ctx.supabase.drafts.save_product_draft(
-        draft_id=str(draft["draft_id"]), run_id=draft.get("run_id"),
-        import_mode=str(draft.get("import_mode") or "auto"), draft_name=draft.get("draft_name"),
-        shop_domain=tenant, input_file_id=draft.get("input_file_id"), input_filename=draft.get("input_filename"),
-        output_file_id=draft.get("output_file_id"), output_filename=draft.get("output_filename"),
-        extraction_status=draft.get("extraction_status"), extraction_run_id=draft.get("extraction_run_id"),
-        extraction_error=draft.get("extraction_error"), products=products,
+        draft_id=str(draft["draft_id"]),
+        run_id=draft.get("run_id"),
+        import_mode=str(draft.get("import_mode") or "auto"),
+        draft_name=draft.get("draft_name"),
+        shop_domain=tenant,
+        input_file_id=draft.get("input_file_id"),
+        input_filename=draft.get("input_filename"),
+        output_file_id=draft.get("output_file_id"),
+        output_filename=draft.get("output_filename"),
+        extraction_status=draft.get("extraction_status"),
+        extraction_run_id=draft.get("extraction_run_id"),
+        extraction_error=draft.get("extraction_error"),
+        products=products,
         revision=int(draft.get("revision") or 1),
     )
     LOG.info("import_review_legacy_evidence_rebuilt draft_id=%s", draft.get("draft_id"))
@@ -237,7 +354,10 @@ async def update_product_draft(
     summary="Run post-extraction quality gate",
 )
 async def create_mutation_plan(
-    draft_id: str, request: Request, ctx: AppContext = Depends(get_ctx)
+    draft_id: str,
+    request: Request,
+    payload: dict[str, Any] = Body(default={}),
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     tenant = require_authenticated_shop_domain(request)
     draft = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=tenant)
@@ -250,7 +370,9 @@ async def create_mutation_plan(
         for item in (previous or {}).get("items", [])
         if isinstance(item, dict) and isinstance(item.get("source_index"), int)
     }
-    quality_report = build_quality_report(_products(draft), status=QUALITY_STATUS_LIVE_PENDING)
+    quality_report = build_quality_report(
+        _products(draft), status=QUALITY_STATUS_LIVE_PENDING
+    )
     _save_quality_state(
         ctx, draft, status=QUALITY_STATUS_LIVE_PENDING, report=quality_report
     )
@@ -265,13 +387,98 @@ async def create_mutation_plan(
         currency_code = str(
             scopes_result.get("data", {}).get("shop", {}).get("currencyCode") or "USD"
         ).upper()
-        if "write_products" not in {
-            x.get("handle") for x in scopes if isinstance(x, dict)
-        }:
+        granted_scopes = {x.get("handle") for x in scopes if isinstance(x, dict)}
+        if "write_products" not in granted_scopes:
             raise _review_error(
                 "The offline session does not have write_products access",
                 status_code=403,
             )
+        inventory_required = _has_inventory(_products(draft))
+        locations: list[dict[str, Any]] = []
+        selected_location: dict[str, Any] | None = None
+        auto_selected = False
+        requested_location_id = payload.get("inventory_location_id")
+        if requested_location_id is not None and (
+            not isinstance(requested_location_id, str)
+            or not requested_location_id.strip()
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INVALID_INVENTORY_LOCATION",
+                    "message": "inventory_location_id must be a Shopify location ID",
+                },
+            )
+        if inventory_required:
+            missing_scopes = sorted(INVENTORY_SCOPES - granted_scopes)
+            if missing_scopes:
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "code": SHOPIFY_REAUTH_REQUIRED,
+                        "action": "/auth/login",
+                        "missing_scopes": missing_scopes,
+                        "message": "Reconnect Shopify to review and apply inventory quantities.",
+                    },
+                )
+            locations_result = await client.graphql(LOCATIONS_QUERY)
+            location_nodes = (
+                locations_result.get("data", {}).get("locations", {}).get("nodes", [])
+            )
+            eligible_nodes = [
+                node
+                for node in location_nodes
+                if isinstance(node, dict)
+                and node.get("isActive") is True
+                and node.get("isFulfillmentService") is False
+                and node.get("id")
+            ]
+            locations = [_location_view(node) for node in eligible_nodes]
+            eligible_by_id = {location["id"]: location for location in locations}
+            if requested_location_id is not None:
+                selected_location = eligible_by_id.get(requested_location_id)
+                if selected_location is None:
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "INVALID_INVENTORY_LOCATION",
+                            "message": "Choose an active merchant-managed Shopify location.",
+                        },
+                    )
+            else:
+                prior_location = (
+                    (previous or {})
+                    .get("inventory_context", {})
+                    .get("selected_location")
+                    if isinstance((previous or {}).get("inventory_context"), dict)
+                    else None
+                )
+                prior_id = (
+                    prior_location.get("id")
+                    if isinstance(prior_location, dict)
+                    else None
+                )
+                selected_location = eligible_by_id.get(prior_id)
+                if selected_location is None and len(locations) == 1:
+                    selected_location = locations[0]
+                    auto_selected = True
+        inventory_status = (
+            "not_needed"
+            if not inventory_required
+            else (
+                "ready"
+                if selected_location
+                else "no_eligible_locations" if not locations else "location_required"
+            )
+        )
+        inventory_context = {
+            "required": inventory_required,
+            "status": inventory_status,
+            "quantity_name": "available",
+            "locations": locations,
+            "selected_location": selected_location,
+            "auto_selected": auto_selected,
+        }
         items: list[dict[str, Any]] = []
         sku_lookup_cache: dict[str, list[dict[str, Any]]] = {}
         for index, product in enumerate(_products(draft)):
@@ -327,6 +534,46 @@ async def create_mutation_plan(
                         else {}
                     )
                 live["variants"] = {"nodes": variant_nodes}
+                if selected_location:
+                    inventory_result = await client.graphql(
+                        INVENTORY_SNAPSHOT_QUERY,
+                        {"id": live["id"], "locationId": selected_location["id"]},
+                    )
+                    inventory_product = inventory_result.get("data", {}).get("product")
+                    if isinstance(inventory_product, dict):
+                        inventory_connection = (
+                            inventory_product.get("variants")
+                            if isinstance(inventory_product.get("variants"), dict)
+                            else {}
+                        )
+                        inventory_nodes = list(inventory_connection.get("nodes") or [])
+                        inventory_page_info = inventory_connection.get("pageInfo") or {}
+                        while (
+                            inventory_page_info.get("hasNextPage")
+                            and inventory_page_info.get("endCursor")
+                            and len(inventory_nodes) <= 2048
+                        ):
+                            inventory_page_result = await client.graphql(
+                                INVENTORY_SNAPSHOT_PAGE_QUERY,
+                                {
+                                    "id": live["id"],
+                                    "locationId": selected_location["id"],
+                                    "after": inventory_page_info["endCursor"],
+                                },
+                            )
+                            inventory_page = (
+                                inventory_page_result.get("data", {})
+                                .get("product", {})
+                                .get("variants", {})
+                            )
+                            inventory_nodes.extend(
+                                node
+                                for node in inventory_page.get("nodes", [])
+                                if isinstance(node, dict)
+                            )
+                            inventory_page_info = inventory_page.get("pageInfo") or {}
+                        inventory_product["variants"] = {"nodes": inventory_nodes}
+                        _apply_inventory_snapshot(live, inventory_product)
             operation = "update" if live else "create"
             blockers, unapplied = validate_product(
                 product, creating=operation == "create"
@@ -356,7 +603,8 @@ async def create_mutation_plan(
                         node for node in raw_sku_nodes if isinstance(node, dict)
                     ]
                 collisions = [
-                    node for node in sku_lookup_cache[cache_key]
+                    node
+                    for node in sku_lookup_cache[cache_key]
                     if str(node.get("sku") or "").casefold() == cache_key
                     and (
                         not live
@@ -375,12 +623,14 @@ async def create_mutation_plan(
                         "remedy": "edit",
                     }
                     quality_report["issues"].append(live_issue)
-                    blockers.append({
-                        "code": live_issue["code"],
-                        "field": live_issue["value_path"],
-                        "message": live_issue["message"],
-                        "remedies": ["edit", "skip"],
-                    })
+                    blockers.append(
+                        {
+                            "code": live_issue["code"],
+                            "field": live_issue["value_path"],
+                            "message": live_issue["message"],
+                            "remedies": ["edit", "skip"],
+                        }
+                    )
             product_quality_issues = issues_for_product(quality_report, index)
             existing_blocker_codes = {
                 str(item.get("code")) for item in blockers if isinstance(item, dict)
@@ -447,18 +697,33 @@ async def create_mutation_plan(
                 quality_report["issues"].append(deferred_issue)
             prior_item = previous_by_source_index.get(index)
             plan_item = build_review_plan_item(
-                    item_id=str(uuid.uuid4()),
-                    currency_code=currency_code,
-                    source_index=index,
-                    source_product=product,
-                    live_snapshot=live,
-                    proposed=proposed,
-                    operation=operation,
-                    blockers=blockers,
-                    unapplied=unapplied,
-                    prior_item=prior_item,
-                )
+                item_id=str(uuid.uuid4()),
+                currency_code=currency_code,
+                source_index=index,
+                source_product=product,
+                live_snapshot=live,
+                proposed=proposed,
+                operation=operation,
+                blockers=blockers,
+                unapplied=unapplied,
+                prior_item=prior_item,
+            )
             plan_item["quality_issues"] = product_quality_issues
+            for row in plan_item.get("review_changes", []):
+                if not isinstance(row, dict) or row.get("scope") != "inventory":
+                    continue
+                row["required"] = True
+                row["selectable"] = False
+                if inventory_status != "ready":
+                    row["disposition"] = "deferred"
+                    row["included"] = False
+                    row["reason_codes"] = [
+                        (
+                            "NO_ELIGIBLE_INVENTORY_LOCATIONS"
+                            if inventory_status == "no_eligible_locations"
+                            else "INVENTORY_LOCATION_REQUIRED"
+                        )
+                    ]
             items.append(plan_item)
     finally:
         await client.close()
@@ -485,7 +750,8 @@ async def create_mutation_plan(
         "version": int((previous or {}).get("version") or 0) + 1,
         "status": "review",
         "currency_code": currency_code,
-        "review_contract_version": 3,
+        "review_contract_version": 4,
+        "inventory_context": inventory_context,
         "items": items,
         "approved_at": None,
         "created_at": _now(),
@@ -493,7 +759,12 @@ async def create_mutation_plan(
         "quality_summary": quality_report.get("summary"),
     }
     plan = normalize_review_plan_rows(plan)
-    review_rows = [row for item in items for row in item.get("review_changes", []) if isinstance(row, dict)]
+    review_rows = [
+        row
+        for item in items
+        for row in item.get("review_changes", [])
+        if isinstance(row, dict)
+    ]
     unknown_count = sum(row.get("origin") == "unknown" for row in review_rows)
     LOG.info(
         "import_review_plan_built draft_id=%s version=%s rows=%s unknown_provenance=%s",
@@ -538,14 +809,23 @@ async def patch_mutation_plan_selection(
     items = list(plan.get("items") or [])
     item_selections = payload.get("item_selections")
     if item_selections is not None:
-        if plan.get("review_contract_version") not in {2, 3}:
+        if plan.get("review_contract_version") not in {2, 3, 4}:
             raise HTTPException(
                 status_code=409,
-                detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before selecting fields"},
+                detail={
+                    "code": UNSUPPORTED_REVIEW_CONTRACT,
+                    "message": "Regenerate this review plan before selecting fields",
+                },
             )
-        if not isinstance(item_selections, list) or not all(isinstance(x, dict) for x in item_selections):
-            raise HTTPException(status_code=400, detail="item_selections must be an array of objects")
-        selections = {str(entry.get("item_id") or ""): entry for entry in item_selections}
+        if not isinstance(item_selections, list) or not all(
+            isinstance(x, dict) for x in item_selections
+        ):
+            raise HTTPException(
+                status_code=400, detail="item_selections must be an array of objects"
+            )
+        selections = {
+            str(entry.get("item_id") or ""): entry for entry in item_selections
+        }
         valid_ids = {str(item.get("item_id")) for item in items}
         if set(selections) - valid_ids:
             raise _review_error("Selection contains an unknown product")
@@ -555,11 +835,22 @@ async def patch_mutation_plan_selection(
                 continue
             included = entry.get("included")
             change_ids = entry.get("included_change_ids")
-            if not isinstance(included, bool) or not isinstance(change_ids, list) or not all(isinstance(x, str) for x in change_ids):
-                raise HTTPException(status_code=400, detail="Each item selection requires included and included_change_ids")
+            if (
+                not isinstance(included, bool)
+                or not isinstance(change_ids, list)
+                or not all(isinstance(x, str) for x in change_ids)
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Each item selection requires included and included_change_ids",
+                )
             if included and not item.get("selectable"):
-                raise _review_error("Selection contains a product that cannot be applied")
-            rows = [row for row in item.get("review_changes", []) if isinstance(row, dict)]
+                raise _review_error(
+                    "Selection contains a product that cannot be applied"
+                )
+            rows = [
+                row for row in item.get("review_changes", []) if isinstance(row, dict)
+            ]
             known = {str(row.get("change_id")) for row in rows if row.get("change_id")}
             requested_change_ids = set(change_ids)
             if requested_change_ids - known:
@@ -575,7 +866,9 @@ async def patch_mutation_plan_selection(
                 if row.get("disposition") != "applicable"
             }
             if included and not required.issubset(requested_change_ids):
-                raise _review_error("Required or structurally dependent changes cannot be excluded")
+                raise _review_error(
+                    "Required or structurally dependent changes cannot be excluded"
+                )
             if requested_change_ids & disallowed:
                 raise _review_error("Blocked or deferred changes cannot be included")
             item["selected"] = bool(included)
@@ -588,18 +881,26 @@ async def patch_mutation_plan_selection(
             item["review_changes"] = rows
     else:
         requested = payload.get("selected_item_ids")
-        if not isinstance(requested, list) or not all(isinstance(x, str) for x in requested):
-            raise HTTPException(status_code=400, detail="selected_item_ids must be an array of strings")
+        if not isinstance(requested, list) or not all(
+            isinstance(x, str) for x in requested
+        ):
+            raise HTTPException(
+                status_code=400, detail="selected_item_ids must be an array of strings"
+            )
         selected_ids = set(requested)
         valid_selectable = {str(x.get("item_id")) for x in items if x.get("selectable")}
         if selected_ids - valid_selectable:
             raise _review_error("Selection contains an item that cannot be applied")
         for item in items:
-            selected = bool(item.get("selectable") and item.get("item_id") in selected_ids)
+            selected = bool(
+                item.get("selectable") and item.get("item_id") in selected_ids
+            )
             item["selected"] = selected
             for row in item.get("review_changes", []):
                 if isinstance(row, dict):
-                    row["included"] = bool(selected and row.get("disposition") == "applicable")
+                    row["included"] = bool(
+                        selected and row.get("disposition") == "applicable"
+                    )
     plan = {**plan, "items": items, "updated_at": _now()}
     _service(ctx).save_mutation_plan(plan)
     return {"plan": plan}
@@ -627,6 +928,26 @@ async def approve_mutation_plan(
         raise _review_error("Select at least one valid change")
     if any(x.get("blockers") for x in selected):
         raise _review_error("Selected changes contain blockers")
+    inventory_context = plan.get("inventory_context")
+    if (
+        plan.get("review_contract_version") == 4
+        and isinstance(inventory_context, dict)
+        and inventory_context.get("required")
+    ):
+        if inventory_context.get("status") != "ready":
+            raise _review_error(
+                "Choose an inventory location before applying inventory"
+            )
+        for item in selected:
+            rows = [
+                row for row in item.get("review_changes", []) if isinstance(row, dict)
+            ]
+            inventory_rows = [row for row in rows if row.get("scope") == "inventory"]
+            if any(
+                not row.get("included") or row.get("disposition") != "applicable"
+                for row in inventory_rows
+            ):
+                raise _review_error("All inventory and tracking changes are required")
     selected_warnings = sorted(
         str(issue.get("issue_id") or issue.get("code") or "")
         for item in selected
@@ -656,9 +977,16 @@ async def approve_mutation_plan(
         "items": [
             {
                 **item,
-                "execution_proposed": materialize_execution_proposed(item)
-                if item.get("selected")
-                else None,
+                "execution_proposed": (
+                    materialize_execution_proposed(item)
+                    if item.get("selected")
+                    else None
+                ),
+                "inventory_operations": (
+                    materialize_inventory_operations(plan, item)
+                    if item.get("selected")
+                    else []
+                ),
             }
             for item in plan.get("items", [])
         ],
@@ -679,7 +1007,8 @@ async def approve_mutation_plan(
         "warnings_acknowledged_at": _now() if selected_warnings else None,
         "warnings_acknowledgment_hash": (
             hashlib.sha256(json.dumps(selected_warnings).encode("utf-8")).hexdigest()
-            if selected_warnings else None
+            if selected_warnings
+            else None
         ),
         "updated_at": _now(),
     }

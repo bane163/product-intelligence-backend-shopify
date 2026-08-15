@@ -13,7 +13,7 @@ from application.domain.product_intelligence_patching import (
 )
 from application.domain.extraction_quality import build_quality_report
 from application.domain.field_derivation_policy import apply_server_owned_origins
-from application.ports.llm_port import LLMPort
+from application.ports.llm_port import ExtractionRequest, LLMPort, ModelConfiguration
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
 from application.services.document_formats import classify_document, validate_document_content
@@ -126,28 +126,24 @@ async def execute(
         except ValueError as exc:
             raise ValueError(f"Invalid file content: {exc}") from exc
 
-        model_env = None
-        model_provider = None
-        model_file_search_enabled = None
+        model_config = ModelConfiguration(
+            provider="openai",
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            model_id=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+        )
         if shop_domain:
             active_model = supabase.llm_configs.get_active_llm_model_config(shop_domain)
             if active_model:
-                model_env = {
-                    "OLLAMA_CLOUD_URL": str(active_model.get("base_url") or ""),
-                    "OLLAMA_MODEL_ID": str(active_model.get("model_id") or ""),
-                    "OLLAMA_API_KEY": str(active_model.get("api_key") or ""),
-                }
-                model_provider = (
-                    str(active_model.get("provider"))
-                    if active_model.get("provider") is not None
-                    else None
+                model_config = ModelConfiguration(
+                    provider=str(active_model.get("provider") or "openai"),
+                    base_url=str(active_model.get("base_url") or ""),
+                    model_id=str(active_model.get("model_id") or ""),
+                    api_key=str(active_model.get("api_key") or ""),
+                    max_tokens=(int(active_model["max_tokens"]) if active_model.get("max_tokens") is not None else None),
+                    timeout_seconds=(float(active_model["timeout_seconds"]) if active_model.get("timeout_seconds") is not None else None),
+                    extra=(active_model.get("extra") if isinstance(active_model.get("extra"), dict) else None),
                 )
-                model_extra = active_model.get("extra")
-                model_file_search_enabled = True
-                if isinstance(model_extra, dict):
-                    explicit_toggle = model_extra.get("enable_file_search")
-                    if isinstance(explicit_toggle, bool):
-                        model_file_search_enabled = explicit_toggle
                 supabase.runs.create_or_update_run(
                     run_id,
                     {
@@ -163,7 +159,7 @@ async def execute(
                         "model_name": active_model.get("model_id"),
                         "provider": active_model.get("provider"),
                         "config_name": active_model.get("name"),
-                        "file_search_enabled": model_file_search_enabled,
+                        "copilot_byok": True,
                     },
                 )
 
@@ -202,7 +198,6 @@ async def execute(
 
         pdf_layout = None
         evidence_catalog: EvidenceCatalog | None = None
-        extracted_text_override = None
         canonical_source_file_id = source_file_id
         if document_format.kind in {"pdf", "docx", "pptx", "image"}:
             if not source_file_id or not shop_domain:
@@ -255,7 +250,6 @@ async def execute(
                     "Azure processed the image but returned no usable textual anchors"
                 )
             evidence_catalog = build_evidence_catalog(pdf_layout)
-            extracted_text_override = evidence_catalog.to_prompt_text()
             emit_and_persist(
                 phase="pdf_page_coverage",
                 message="Resolved PDF layout coverage",
@@ -271,36 +265,23 @@ async def execute(
                 },
             )
 
-        extraction_prompt = DEFAULT_IMPORT_AGENT_PROMPT
-        if evidence_catalog is not None:
-            extraction_prompt += (
-                " The extracted PDF text is a numbered evidence catalog. For every directly "
-                "document-sourced review value, return a source_ref containing its exact canonical "
-                "value_path and numeric evidence_index. Do not return page numbers, bounding boxes, "
-                "source IDs, or anchor IDs. For values that are not directly sourced, explicitly set "
-                "value_origins for that canonical path to derived, defaulted, or ai_assisted."
-            )
-
         max_evidence_attempts = 3 if evidence_catalog is not None else 1
         result: ProductsList | dict[str, Any] | str | None = None
+        validation_feedback: str | None = None
         for evidence_attempt in range(max_evidence_attempts):
-            result = await llm.run_excel_agent_workflow(
-                file_bytes,
-                collabora_base_url=collabora_url,
-                agent_prompt=extraction_prompt,
-                model_env=model_env,
-                model_provider=model_provider,
-                model_file_search_enabled=model_file_search_enabled,
-                input_name=input_name,
-                input_content_type=input_content_type,
-                extraction_mode=extraction_mode,
-                # PDF output is written only after indexed evidence validates.
-                write_to_file=write_to_file and evidence_catalog is None,
-                output_path=final_output_path,
-                writer_agent_prompt=DEFAULT_IMPORT_WRITER_PROMPT,
-                trace_event=trace_event,
-                extracted_text_override=extracted_text_override,
-                shop_domain=shop_domain,
+            result = await llm.extract(
+                ExtractionRequest(
+                    document_kind=document_format.kind,
+                    content=file_bytes,
+                    filename=input_name or "uploaded-document",
+                    content_type=input_content_type or "application/octet-stream",
+                    model=model_config,
+                    evidence_catalog=evidence_catalog,
+                    validation_feedback=validation_feedback,
+                    extraction_mode=("first_sheet" if extraction_mode.strip().lower() == "first_sheet" else "per_sheet"),
+                    collabora_base_url=collabora_url,
+                    trace_event=trace_event,
+                )
             )
             if isinstance(result, ProductsList):
                 result = {
@@ -333,10 +314,13 @@ async def execute(
                 )
             validation = validate_indexed_pdf_evidence(candidate_products, evidence_catalog)
             if validation.valid:
+                resolution_stats: dict[str, int] = {}
                 resolved = resolve_indexed_pdf_source_refs(
                     candidate_products,
                     evidence_catalog,
                     canonical_source_file_id or input_name or "uploaded.pdf",
+                    pdf_content=file_bytes,
+                    resolution_stats=resolution_stats,
                 )
                 if isinstance(result, dict):
                     result["products"] = candidate_products
@@ -346,6 +330,8 @@ async def execute(
                     payload_preview={
                         "attempt": evidence_attempt + 1,
                         "resolved": resolved,
+                        "exact_regions": resolution_stats.get("exact", 0),
+                        "coarse_regions": resolution_stats.get("coarse", 0),
                         "catalog_size": len(evidence_catalog.entries),
                     },
                 )
@@ -383,11 +369,7 @@ async def execute(
                     "affected_paths": list(validation.affected_paths),
                 },
             )
-            extraction_prompt = (
-                f"{DEFAULT_IMPORT_AGENT_PROMPT}\n\n{validation.feedback}\n"
-                "Use only the numbered evidence catalog supplied with this request and return the "
-                "complete products payload, not a patch."
-            )
+            validation_feedback = validation.feedback
         if isinstance(result, dict):
             enrichment_attempted = False
             enrichment_applied = False
@@ -484,7 +466,6 @@ async def execute(
                 result["enrichment_warning"] = enrichment_warning
             if (
                 write_to_file
-                and (enrichment_applied or evidence_catalog is not None)
                 and isinstance(result.get("products"), list)
             ):
                 try:

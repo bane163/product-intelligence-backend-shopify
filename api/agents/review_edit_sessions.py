@@ -31,7 +31,11 @@ from application.domain.shopify_mutation_plan import (
     build_review_plan_item,
     normalize_review_plan_rows,
 )
-from .mutation_plans import REVIEW_REQUIRED, UNSUPPORTED_REVIEW_CONTRACT, create_mutation_plan
+from .mutation_plans import (
+    REVIEW_REQUIRED,
+    UNSUPPORTED_REVIEW_CONTRACT,
+    create_mutation_plan,
+)
 from .utils import require_authenticated_shop_domain
 
 router = APIRouter()
@@ -55,20 +59,31 @@ def _now() -> str:
 
 
 def _conflict(message: str) -> HTTPException:
-    return HTTPException(status_code=409, detail={"code": REVIEW_REQUIRED, "message": message})
+    return HTTPException(
+        status_code=409, detail={"code": REVIEW_REQUIRED, "message": message}
+    )
 
 
 def _products(draft: dict[str, Any]) -> list[dict[str, Any]]:
     value = draft.get("products")
-    return deepcopy([item for item in value if isinstance(item, dict)]) if isinstance(value, list) else []
+    return (
+        deepcopy([item for item in value if isinstance(item, dict)])
+        if isinstance(value, list)
+        else []
+    )
 
 
-def _require_review_v2(ctx: AppContext, draft_id: str, tenant: str) -> dict[str, Any] | None:
+def _require_review_v2(
+    ctx: AppContext, draft_id: str, tenant: str
+) -> dict[str, Any] | None:
     plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
-    if isinstance(plan, dict) and plan.get("review_contract_version") not in {2, 3}:
+    if isinstance(plan, dict) and plan.get("review_contract_version") not in {2, 3, 4}:
         raise HTTPException(
             status_code=409,
-            detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before editing"},
+            detail={
+                "code": UNSUPPORTED_REVIEW_CONTRACT,
+                "message": "Regenerate this review plan before editing",
+            },
         )
     return plan
 
@@ -76,7 +91,9 @@ def _require_review_v2(ctx: AppContext, draft_id: str, tenant: str) -> dict[str,
 def _workbook_model(products: list[dict[str, Any]]) -> ProductsList:
     normalized = deepcopy(products)
     for product in normalized:
-        if isinstance(product.get("_value_origins"), dict) and not isinstance(product.get("value_origins"), dict):
+        if isinstance(product.get("_value_origins"), dict) and not isinstance(
+            product.get("value_origins"), dict
+        ):
             product["value_origins"] = product["_value_origins"]
     return ProductsList.model_validate({"products": normalized})
 
@@ -91,7 +108,10 @@ def _field_error(row: dict[str, Any], code: str, message: str) -> dict[str, str]
 
 
 def _validation_failure(
-    errors: list[dict[str, str]], *, draft_id: str | None = None, session_id: str | None = None
+    errors: list[dict[str, str]],
+    *,
+    draft_id: str | None = None,
+    session_id: str | None = None,
 ) -> HTTPException:
     return HTTPException(
         status_code=422,
@@ -125,22 +145,36 @@ def _preflight_field_errors(
             if not isinstance(item, dict) or item.get("source_index") != product_index:
                 continue
             matching_row = next(
-                (row for row in item.get("review_changes", []) if isinstance(row, dict) and row.get("field") == field),
+                (
+                    row
+                    for row in item.get("review_changes", [])
+                    if isinstance(row, dict) and row.get("field") == field
+                ),
                 None,
             )
             if matching_row:
                 break
-        message = str(validation.get("msg") or "This value is invalid.") if isinstance(validation, dict) else "This value is invalid."
+        message = (
+            str(validation.get("msg") or "This value is invalid.")
+            if isinstance(validation, dict)
+            else "This value is invalid."
+        )
         errors.append(
-            _field_error(matching_row or {"value_path": ".".join(map(str, loc))}, "INVALID_PRODUCT", message)
+            _field_error(
+                matching_row or {"value_path": ".".join(map(str, loc))},
+                "INVALID_PRODUCT",
+                message,
+            )
         )
     if not errors:
-        errors.append({
-            "change_id": "",
-            "value_path": "product",
-            "code": "INVALID_PRODUCT",
-            "message": "One or more product values cannot be written to the workbook.",
-        })
+        errors.append(
+            {
+                "change_id": "",
+                "value_path": "product",
+                "code": "INVALID_PRODUCT",
+                "message": "One or more product values cannot be written to the workbook.",
+            }
+        )
     return errors
 
 
@@ -148,7 +182,9 @@ def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
     schema = row.get("edit_schema") if isinstance(row.get("edit_schema"), dict) else {}
     editor = str(schema.get("editor") or "text")
     if editor == "list":
-        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) for item in value
+        ):
             raise ValueError("Enter one value per line.")
         values = [item.strip() for item in value if item.strip()]
         if len({item.casefold() for item in values}) != len(values):
@@ -168,6 +204,10 @@ def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
         if not number.is_finite() or number < 0:
             raise ValueError("Enter a finite number that is zero or greater.")
         return float(number)
+    if editor == "integer":
+        from application.domain.shopify_mutation_plan import validate_inventory_quantity
+
+        return validate_inventory_quantity(value)
     if editor == "boolean":
         if isinstance(value, bool):
             return value
@@ -175,7 +215,9 @@ def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
             return value.casefold() == "true"
         raise ValueError("Choose Yes or No.")
     if editor == "enum":
-        options = schema.get("options") if isinstance(schema.get("options"), list) else []
+        options = (
+            schema.get("options") if isinstance(schema.get("options"), list) else []
+        )
         if value not in options:
             raise ValueError("Choose one of the available values.")
         return value
@@ -189,20 +231,32 @@ def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
         return value if schema.get("preserve_string") else parsed
     if not isinstance(value, str):
         raise ValueError("Enter a text value.")
-    normalized = value.strip() if schema.get("required") or schema.get("format") else value
+    normalized = (
+        value.strip() if schema.get("required") or schema.get("format") else value
+    )
     if schema.get("required") and not normalized:
         raise ValueError("This field is required.")
-    if schema.get("format") == "handle" and normalized and not HANDLE_RE.fullmatch(normalized):
+    if (
+        schema.get("format") == "handle"
+        and normalized
+        and not HANDLE_RE.fullmatch(normalized)
+    ):
         raise ValueError("Use lowercase letters, numbers, and single hyphens only.")
     return normalized
 
 
 def _option_rename_map(row: dict[str, Any], value: list[str]) -> dict[str, str]:
     before = row.get("proposed")
-    if not isinstance(before, list) or any(not isinstance(item, str) for item in before):
+    if not isinstance(before, list) or any(
+        not isinstance(item, str) for item in before
+    ):
         before = row.get("original_proposed")
-    if not isinstance(before, list) or any(not isinstance(item, str) for item in before):
-        raise ValueError("This option list is malformed. Revert it or edit the workbook.")
+    if not isinstance(before, list) or any(
+        not isinstance(item, str) for item in before
+    ):
+        raise ValueError(
+            "This option list is malformed. Revert it or edit the workbook."
+        )
     if len(value) != len(before):
         raise ValueError("Add or remove option values in the workbook instead.")
     old_by_fold = {item.casefold(): item for item in before}
@@ -223,7 +277,9 @@ def _cascade_option_renames(
         return
     folded = {old.casefold(): new for old, new in rename_map.items()}
     options = product.get("options") if isinstance(product.get("options"), list) else []
-    option_index = next((index for index, candidate in enumerate(options) if candidate is option), -1)
+    option_index = next(
+        (index for index, candidate in enumerate(options) if candidate is option), -1
+    )
     option_name = str(option.get("name") or "")
     for variant in _variants(product):
         positional = f"option{option_index + 1}"
@@ -231,14 +287,23 @@ def _cascade_option_renames(
             replacement = folded.get(str(variant[positional]).casefold())
             if replacement:
                 variant[positional] = replacement
-        for key in ("selectedOptions", "selected_options", "optionValues", "option_values"):
+        for key in (
+            "selectedOptions",
+            "selected_options",
+            "optionValues",
+            "option_values",
+        ):
             pairs = variant.get(key)
             if not isinstance(pairs, list):
                 continue
             for pair in pairs:
                 if not isinstance(pair, dict):
                     continue
-                pair_name = pair.get("optionName") or pair.get("option_name") or pair.get("name")
+                pair_name = (
+                    pair.get("optionName")
+                    or pair.get("option_name")
+                    or pair.get("name")
+                )
                 value_key = "value" if "value" in pair else "name"
                 if str(pair_name or "").casefold() != option_name.casefold():
                     continue
@@ -248,21 +313,29 @@ def _cascade_option_renames(
 
 
 def _cascade_plan_variant_subjects(
-    working_plan: dict[str, Any], product_index: int, option_name: str, rename_map: dict[str, str]
+    working_plan: dict[str, Any],
+    product_index: int,
+    option_name: str,
+    rename_map: dict[str, str],
 ) -> None:
     if not rename_map:
         return
     item = next(
         (
-            candidate for candidate in working_plan.get("items", [])
-            if isinstance(candidate, dict) and candidate.get("source_index") == product_index
+            candidate
+            for candidate in working_plan.get("items", [])
+            if isinstance(candidate, dict)
+            and candidate.get("source_index") == product_index
         ),
         None,
     )
     if not isinstance(item, dict):
         return
     for candidate in item.get("review_changes", []):
-        if not isinstance(candidate, dict) or candidate.get("scope") not in {"variant", "inventory"}:
+        if not isinstance(candidate, dict) or candidate.get("scope") not in {
+            "variant",
+            "inventory",
+        }:
             continue
         subject = str(candidate.get("subject") or "")
         for old, new in rename_map.items():
@@ -294,40 +367,101 @@ def _mark_workbook_edits(
             if product.get(field) != original.get(field):
                 origins[path] = "merchant_edited"
         option_fields = ("name", "values")
-        original_options = original.get("options") if isinstance(original.get("options"), list) else []
-        for option_index, option in enumerate(product.get("options") if isinstance(product.get("options"), list) else []):
-            old_option = original_options[option_index] if option_index < len(original_options) and isinstance(original_options[option_index], dict) else {}
+        original_options = (
+            original.get("options") if isinstance(original.get("options"), list) else []
+        )
+        for option_index, option in enumerate(
+            product.get("options") if isinstance(product.get("options"), list) else []
+        ):
+            old_option = (
+                original_options[option_index]
+                if option_index < len(original_options)
+                and isinstance(original_options[option_index], dict)
+                else {}
+            )
             if not isinstance(option, dict):
                 continue
-            subject = option.get("name") or old_option.get("name") or f"Option {option_index + 1}"
+            subject = (
+                option.get("name")
+                or old_option.get("name")
+                or f"Option {option_index + 1}"
+            )
             for field in option_fields:
                 if option.get(field) != old_option.get(field):
-                    origins[f"option[{_normalized_path_part(subject)}].{field}"] = "merchant_edited"
+                    origins[f"option[{_normalized_path_part(subject)}].{field}"] = (
+                        "merchant_edited"
+                    )
         option_names = _schema_from_product(product)
         old_variants = _variants(original)
         variant_aliases = {
-            "compare_at_price": "compareAtPrice", "inventory_policy": "inventoryPolicy",
-            "tax_code": "taxCode", "cost_per_item": "inventoryItem.cost",
-            "tracked": "inventoryItem.tracked", "requires_shipping": "inventoryItem.requiresShipping",
-            "weight": "inventoryItem.weight.value", "weight_unit": "inventoryItem.weight.unit",
+            "compare_at_price": "compareAtPrice",
+            "inventory_policy": "inventoryPolicy",
+            "tax_code": "taxCode",
+            "cost_per_item": "inventoryItem.cost",
+            "tracked": "inventoryItem.tracked",
+            "requires_shipping": "inventoryItem.requiresShipping",
+            "weight": "inventoryItem.weight.value",
+            "weight_unit": "inventoryItem.weight.unit",
+            "inventory_quantity": "inventory_quantity",
         }
         for variant_index, variant in enumerate(_variants(product)):
-            old_variant = old_variants[variant_index] if variant_index < len(old_variants) else {}
+            old_variant = (
+                old_variants[variant_index] if variant_index < len(old_variants) else {}
+            )
             subject = _variant_subject(variant, option_names)
-            for field in ("price", "compare_at_price", "sku", "barcode", "taxable", "tax_code", "inventory_policy", "cost_per_item", "tracked", "requires_shipping", "weight", "weight_unit"):
+            for field in (
+                "price",
+                "compare_at_price",
+                "sku",
+                "barcode",
+                "taxable",
+                "tax_code",
+                "inventory_policy",
+                "cost_per_item",
+                "tracked",
+                "requires_shipping",
+                "weight",
+                "weight_unit",
+                "inventory_quantity",
+            ):
                 if variant.get(field) != old_variant.get(field):
                     canonical = variant_aliases.get(field, field)
-                    scope = "inventory" if canonical.startswith("inventoryItem.") else "variant"
-                    origins[f"{scope}[{_normalized_path_part(subject)}].{canonical}"] = "merchant_edited"
-        old_metafields = original.get("metafields") if isinstance(original.get("metafields"), list) else []
-        for mf_index, metafield in enumerate(product.get("metafields") if isinstance(product.get("metafields"), list) else []):
-            old_metafield = old_metafields[mf_index] if mf_index < len(old_metafields) and isinstance(old_metafields[mf_index], dict) else {}
+                    scope = (
+                        "inventory"
+                        if canonical == "inventory_quantity"
+                        or (
+                            canonical == "inventoryItem.tracked"
+                            and "inventory_quantity" in variant
+                        )
+                        else "variant"
+                    )
+                    origins[
+                        f"{scope}[{_normalized_path_part(subject)}].{canonical}"
+                    ] = "merchant_edited"
+        old_metafields = (
+            original.get("metafields")
+            if isinstance(original.get("metafields"), list)
+            else []
+        )
+        for mf_index, metafield in enumerate(
+            product.get("metafields")
+            if isinstance(product.get("metafields"), list)
+            else []
+        ):
+            old_metafield = (
+                old_metafields[mf_index]
+                if mf_index < len(old_metafields)
+                and isinstance(old_metafields[mf_index], dict)
+                else {}
+            )
             if not isinstance(metafield, dict):
                 continue
             subject = f"{metafield.get('namespace')}.{metafield.get('key')}"
             for field in ("value", "type"):
                 if metafield.get(field) != old_metafield.get(field):
-                    origins[f"metafield[{_normalized_path_part(subject)}].{field}"] = "merchant_edited"
+                    origins[f"metafield[{_normalized_path_part(subject)}].{field}"] = (
+                        "merchant_edited"
+                    )
         if isinstance(original.get("source_refs"), list):
             product["source_refs"] = deepcopy(original["source_refs"])
     return after
@@ -343,6 +477,15 @@ def _coerce_review_value(row: dict[str, Any], value: Any) -> Any:
     if value_type in {"money", "weight"} and isinstance(value, str):
         try:
             return float(value)
+        except ValueError:
+            return value
+    if value_type == "integer":
+        try:
+            from application.domain.shopify_mutation_plan import (
+                validate_inventory_quantity,
+            )
+
+            return validate_inventory_quantity(value)
         except ValueError:
             return value
     if value_type == "json" and isinstance(value, str):
@@ -374,7 +517,9 @@ def _set_product_value(
     subject = str(row.get("subject") or "")
     if scope == "product":
         if "." in resolved or "[" in resolved:
-            raise HTTPException(status_code=422, detail=f"Grid editing is not supported for {path}")
+            raise HTTPException(
+                status_code=422, detail=f"Grid editing is not supported for {path}"
+            )
         product[resolved] = value
     elif scope in {"variant", "inventory"}:
         target = _unique_variant_target(product, row)
@@ -395,22 +540,50 @@ def _set_product_value(
         }
         target[aliases.get(field, field)] = value
     elif scope == "option":
-        options = product.get("options") if isinstance(product.get("options"), list) else []
-        target = next((option for option in options if isinstance(option, dict) and str(option.get("name") or "") == subject), None)
+        options = (
+            product.get("options") if isinstance(product.get("options"), list) else []
+        )
+        target = next(
+            (
+                option
+                for option in options
+                if isinstance(option, dict) and str(option.get("name") or "") == subject
+            ),
+            None,
+        )
         if target is None:
-            raise HTTPException(status_code=422, detail=f"Option is unavailable for {path}")
+            raise HTTPException(
+                status_code=422, detail=f"Option is unavailable for {path}"
+            )
         if field == "values" and isinstance(value, list):
             _cascade_option_renames(product, target, _option_rename_map(row, value))
         target[field] = value
     elif scope == "metafield":
         namespace, _, key = subject.partition(".")
-        metafields = product.get("metafields") if isinstance(product.get("metafields"), list) else []
-        target = next((item for item in metafields if isinstance(item, dict) and item.get("namespace") == namespace and item.get("key") == key), None)
+        metafields = (
+            product.get("metafields")
+            if isinstance(product.get("metafields"), list)
+            else []
+        )
+        target = next(
+            (
+                item
+                for item in metafields
+                if isinstance(item, dict)
+                and item.get("namespace") == namespace
+                and item.get("key") == key
+            ),
+            None,
+        )
         if target is None:
-            raise HTTPException(status_code=422, detail=f"Metafield is unavailable for {path}")
+            raise HTTPException(
+                status_code=422, detail=f"Metafield is unavailable for {path}"
+            )
         target[field] = value
     else:
-        raise HTTPException(status_code=422, detail=f"Grid editing is not supported for {path}")
+        raise HTTPException(
+            status_code=422, detail=f"Grid editing is not supported for {path}"
+        )
     origin_maps = [
         candidate
         for candidate in (product.get("value_origins"), product.get("_value_origins"))
@@ -495,9 +668,11 @@ def _snapshot_working_plan(
                     {
                         **deepcopy(option),
                         "values": [
-                            deepcopy(value)
-                            if isinstance(value, dict)
-                            else {"name": value}
+                            (
+                                deepcopy(value)
+                                if isinstance(value, dict)
+                                else {"name": value}
+                            )
                             for value in option.get("values", [])
                         ],
                     }
@@ -517,22 +692,28 @@ def _snapshot_working_plan(
                     proposed=row.get("proposed"),
                     disposition=str(row.get("disposition") or "applicable"),
                     change_kind=str(row.get("change_kind") or "updated"),
-                    value_type=str(row.get("value_type")) if row.get("value_type") else None,
+                    value_type=(
+                        str(row.get("value_type")) if row.get("value_type") else None
+                    ),
                 )
                 row["edit_schema"] = inferred["edit_schema"]
             row.setdefault("original_proposed", deepcopy(row.get("proposed")))
             row.setdefault("original_origin", row.get("origin", "unknown"))
             row.setdefault(
                 "original_source_ref",
-                deepcopy(row.get("source_ref"))
-                if isinstance(row.get("source_ref"), dict)
-                else None,
+                (
+                    deepcopy(row.get("source_ref"))
+                    if isinstance(row.get("source_ref"), dict)
+                    else None
+                ),
             )
             row.setdefault(
                 "original_source_refs",
-                deepcopy(row.get("source_refs"))
-                if isinstance(row.get("source_refs"), list)
-                else [],
+                (
+                    deepcopy(row.get("source_refs"))
+                    if isinstance(row.get("source_refs"), list)
+                    else []
+                ),
             )
     return normalize_review_plan_rows(working_plan)
 
@@ -558,10 +739,7 @@ def _working_row_match(
         if not isinstance(item, dict) or not isinstance(item.get("source_index"), int):
             continue
         for row in item.get("review_changes", []):
-            if (
-                isinstance(row, dict)
-                and str(row.get("change_id") or "") == change_id
-            ):
+            if isinstance(row, dict) and str(row.get("change_id") or "") == change_id:
                 matches.append((int(item["source_index"]), item, row))
     if not matches:
         raise _validation_failure(
@@ -588,9 +766,7 @@ def _working_row_match(
     return matches[0]
 
 
-def _require_editable_row(
-    row: dict[str, Any], *, option_values: bool = False
-) -> None:
+def _require_editable_row(row: dict[str, Any], *, option_values: bool = False) -> None:
     if row.get("editable") is not True:
         raise _validation_failure(
             [
@@ -625,9 +801,7 @@ def _replace_working_item(
     raise HTTPException(status_code=409, detail="History item is unavailable")
 
 
-def _structural_state(
-    product: dict[str, Any], item: dict[str, Any]
-) -> dict[str, Any]:
+def _structural_state(product: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     return {"product": deepcopy(product), "item": deepcopy(item)}
 
 
@@ -650,9 +824,7 @@ def _restore_structural_state(
     ):
         raise HTTPException(status_code=409, detail="Option history is invalid")
     products[product_index] = deepcopy(product)
-    _replace_working_item(
-        working_plan, str(entry.get("item_id") or ""), deepcopy(item)
-    )
+    _replace_working_item(working_plan, str(entry.get("item_id") or ""), deepcopy(item))
 
 
 def _working_items(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -710,14 +882,19 @@ def _preserve_working_selection(
             row["included"] = bool(
                 item["selected"]
                 and row.get("disposition") == "applicable"
-                and (row.get("required") or str(row.get("change_id") or "") in included_ids)
+                and (
+                    row.get("required")
+                    or str(row.get("change_id") or "") in included_ids
+                )
             )
     return result
 
 
 def _validate_string_list(value: Any, field: str) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise HTTPException(status_code=400, detail=f"{field} must be an array of strings")
+        raise HTTPException(
+            status_code=400, detail=f"{field} must be an array of strings"
+        )
     return list(dict.fromkeys(value))
 
 
@@ -757,7 +934,9 @@ def _history_entry(
 def _operation_payloads(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
     """Return durable operations, or None when the legacy changes contract is used."""
     if "operation" in payload and "operations" in payload:
-        raise HTTPException(status_code=400, detail="Use operation or operations, not both")
+        raise HTTPException(
+            status_code=400, detail="Use operation or operations, not both"
+        )
     raw: Any
     if "operation" in payload:
         raw = payload["operation"]
@@ -769,7 +948,9 @@ def _operation_payloads(payload: dict[str, Any]) -> list[dict[str, Any]] | None:
     if "operations" in payload:
         raw = payload["operations"]
         if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
-            raise HTTPException(status_code=400, detail="operations must be an array of objects")
+            raise HTTPException(
+                status_code=400, detail="operations must be an array of objects"
+            )
         return raw
     return None
 
@@ -785,7 +966,9 @@ def _apply_value_operations(
     for operation in operations:
         operation_type = operation.get("operation") or operation.get("type")
         if operation_type not in {"value_edit", "value_revert"}:
-            raise HTTPException(status_code=400, detail="operation must be value_edit or value_revert")
+            raise HTTPException(
+                status_code=400, detail="operation must be value_edit or value_revert"
+            )
         change_id = str(operation.get("change_id") or "")
         product_index, _item, row = _working_row_match(working_plan, change_id)
         path = str(operation.get("value_path") or "")
@@ -824,17 +1007,25 @@ def _apply_value_operations(
         before = {
             "proposed": deepcopy(row.get("proposed")),
             "origin": row.get("origin", "unknown"),
-            "source_ref": deepcopy(row.get("source_ref"))
-            if isinstance(row.get("source_ref"), dict)
-            else None,
-            "source_refs": deepcopy(row.get("source_refs"))
-            if isinstance(row.get("source_refs"), list)
-            else [],
+            "source_ref": (
+                deepcopy(row.get("source_ref"))
+                if isinstance(row.get("source_ref"), dict)
+                else None
+            ),
+            "source_refs": (
+                deepcopy(row.get("source_refs"))
+                if isinstance(row.get("source_refs"), list)
+                else []
+            ),
         }
         option_renames: dict[str, str] = {}
         if operation_type == "value_revert":
             value = deepcopy(row.get("original_proposed"))
-            if row.get("scope") == "option" and row.get("field") == "values" and isinstance(value, list):
+            if (
+                row.get("scope") == "option"
+                and row.get("field") == "values"
+                and isinstance(value, list)
+            ):
                 option_renames = _option_rename_map(row, value)
             origin = str(row.get("original_origin") or "unknown")
             source_ref = row.get("original_source_ref")
@@ -845,9 +1036,9 @@ def _apply_value_operations(
                 if row.get("scope") == "option" and row.get("field") == "values":
                     option_renames = _option_rename_map(row, value)
             except ValueError as exc:
-                raise _validation_failure([
-                    _field_error(row, "INVALID_REVIEW_VALUE", str(exc))
-                ]) from None
+                raise _validation_failure(
+                    [_field_error(row, "INVALID_REVIEW_VALUE", str(exc))]
+                ) from None
             origin = "merchant_edited"
             source_ref = None
             source_refs = [
@@ -860,9 +1051,9 @@ def _apply_value_operations(
         try:
             _set_product_value(products[product_index], row, value, origin=origin)
         except ValueError as exc:
-            raise _validation_failure([
-                _field_error(row, "INVALID_OPTION_VALUES", str(exc))
-            ]) from None
+            raise _validation_failure(
+                [_field_error(row, "INVALID_OPTION_VALUES", str(exc))]
+            ) from None
         except HTTPException as exc:
             if exc.status_code != 422:
                 raise
@@ -888,7 +1079,10 @@ def _apply_value_operations(
             _set_item_proposed_value(item, row, value)
         if option_renames:
             _cascade_plan_variant_subjects(
-                working_plan, product_index, str(row.get("subject") or ""), option_renames
+                working_plan,
+                product_index,
+                str(row.get("subject") or ""),
+                option_renames,
             )
         row["proposed"] = deepcopy(_coerce_review_value(row, value))
         row["origin"] = origin
@@ -903,20 +1097,26 @@ def _apply_value_operations(
         after = {
             "proposed": deepcopy(row.get("proposed")),
             "origin": row["origin"],
-            "source_ref": deepcopy(row.get("source_ref"))
-            if isinstance(row.get("source_ref"), dict)
-            else None,
-            "source_refs": deepcopy(row.get("source_refs"))
-            if isinstance(row.get("source_refs"), list)
-            else [],
+            "source_ref": (
+                deepcopy(row.get("source_ref"))
+                if isinstance(row.get("source_ref"), dict)
+                else None
+            ),
+            "source_refs": (
+                deepcopy(row.get("source_refs"))
+                if isinstance(row.get("source_refs"), list)
+                else []
+            ),
         }
-        appended.append(_history_entry(
-            str(operation_type),
-            before,
-            after,
-            change_id=change_id,
-            value_path=path,
-        ))
+        appended.append(
+            _history_entry(
+                str(operation_type),
+                before,
+                after,
+                change_id=change_id,
+                value_path=path,
+            )
+        )
 
     # A fresh operation after undo replaces the abandoned redo branch.
     durable_history = deepcopy(history[:history_cursor])
@@ -960,9 +1160,7 @@ def _transform_option_state(
     if not origin_maps:
         edited_product["value_origins"] = {}
         origin_maps = [edited_product["value_origins"]]
-    option_path = (
-        f"option[{_normalized_path_part(row.get('subject'))}].values"
-    )
+    option_path = f"option[{_normalized_path_part(row.get('subject'))}].values"
     for origins in origin_maps:
         origins[option_path] = "merchant_edited"
     variant_identity_rename: tuple[int, str, str] | None = None
@@ -971,9 +1169,7 @@ def _transform_option_state(
         new_value = str(operation.get("to") or "")
         option_name = str(row.get("subject") or "")
         option_names = _schema_from_product(
-            item.get("proposed")
-            if isinstance(item.get("proposed"), dict)
-            else {}
+            item.get("proposed") if isinstance(item.get("proposed"), dict) else {}
         )
         option_index = next(
             (
@@ -994,17 +1190,17 @@ def _transform_option_state(
         currency_code=str(item.get("currency_code") or "USD"),
         source_index=int(item.get("source_index") or 0),
         source_product=edited_product,
-        live_snapshot=item.get("live_snapshot")
-        if isinstance(item.get("live_snapshot"), dict)
-        else None,
+        live_snapshot=(
+            item.get("live_snapshot")
+            if isinstance(item.get("live_snapshot"), dict)
+            else None
+        ),
         proposed=edited_proposed,
         operation=str(item.get("operation") or "update"),
-        blockers=item.get("blockers")
-        if isinstance(item.get("blockers"), list)
-        else [],
-        unapplied=item.get("unapplied")
-        if isinstance(item.get("unapplied"), list)
-        else [],
+        blockers=item.get("blockers") if isinstance(item.get("blockers"), list) else [],
+        unapplied=(
+            item.get("unapplied") if isinstance(item.get("unapplied"), list) else []
+        ),
         prior_item=item,
         variant_identity_rename=variant_identity_rename,
     )
@@ -1056,13 +1252,9 @@ def _apply_option_value_operation(
             products[product_index], item, row, operation
         )
     except OptionValueEditError as exc:
-        raise _validation_failure(
-            [_field_error(row, exc.code, str(exc))]
-        ) from None
+        raise _validation_failure([_field_error(row, exc.code, str(exc))]) from None
     products[product_index] = edited_product
-    _replace_working_item(
-        working_plan, str(item.get("item_id") or ""), rebuilt
-    )
+    _replace_working_item(working_plan, str(item.get("item_id") or ""), rebuilt)
     after = _structural_state(edited_product, rebuilt)
     entry = _history_entry(
         "option_values_edit",
@@ -1093,7 +1285,11 @@ def _apply_option_value_revert(
     path = str(operation.get("value_path") or "")
     if path != str(row.get("value_path") or ""):
         raise _validation_failure(
-            [_field_error(row, "STALE_VALUE_PATH", "Refresh before reverting this field.")]
+            [
+                _field_error(
+                    row, "STALE_VALUE_PATH", "Refresh before reverting this field."
+                )
+            ]
         )
     _require_editable_row(row, option_values=True)
     bases = working_plan.get("_option_edit_bases")
@@ -1115,10 +1311,7 @@ def _apply_option_value_revert(
     target_subject = str(row.get("subject") or "")
     active_option_edits: list[dict[str, Any]] = []
     for entry in history[:history_cursor]:
-        if (
-            not isinstance(entry, dict)
-            or str(entry.get("item_id") or "") != item_id
-        ):
+        if not isinstance(entry, dict) or str(entry.get("item_id") or "") != item_id:
             continue
         entry_subject = str(entry.get("option_subject") or "")
         if entry.get("operation") == "option_values_edit":
@@ -1248,7 +1441,9 @@ def _apply_ui_operation(
                 detail="A deselected item cannot include changes",
             )
         if selected and item.get("selectable") is False:
-            raise HTTPException(status_code=422, detail=f"Item is not selectable: {item_id}")
+            raise HTTPException(
+                status_code=422, detail=f"Item is not selectable: {item_id}"
+            )
         rows = [row for row in item.get("review_changes", []) if isinstance(row, dict)]
         requested_ids = set(included_ids)
         required_ids = {
@@ -1274,14 +1469,14 @@ def _apply_ui_operation(
         before = _selection_state(item)
         after = {"selected": selected, "included_change_ids": included_ids}
         _set_selection_state(item, after)
-        return _history_entry(
-            "selection", before, after, item_id=item_id
-        )
+        return _history_entry("selection", before, after, item_id=item_id)
 
     if operation_type == "filters":
         value = operation.get("filterValues")
         if not isinstance(value, dict):
-            raise HTTPException(status_code=400, detail="filterValues must be an object")
+            raise HTTPException(
+                status_code=400, detail="filterValues must be an object"
+            )
         after = deepcopy(value)
         grid_state["filterValues"] = after
         return None
@@ -1324,14 +1519,20 @@ def _set_row_history_state(
     change_id = str(entry.get("change_id") or "")
     match = _working_rows(working_plan).get(change_id)
     if match is None:
-        raise HTTPException(status_code=409, detail=f"History row is unavailable: {change_id}")
+        raise HTTPException(
+            status_code=409, detail=f"History row is unavailable: {change_id}"
+        )
     product_index, row = match
     if product_index >= len(products):
         raise HTTPException(status_code=409, detail="History product is unavailable")
     proposed = deepcopy(state.get("proposed"))
     origin = str(state.get("origin") or "unknown")
     option_renames: dict[str, str] = {}
-    if row.get("scope") == "option" and row.get("field") == "values" and isinstance(proposed, list):
+    if (
+        row.get("scope") == "option"
+        and row.get("field") == "values"
+        and isinstance(proposed, list)
+    ):
         option_renames = _option_rename_map(row, proposed)
     _set_product_value(products[product_index], row, proposed, origin=origin)
     item = next(
@@ -1406,29 +1607,23 @@ def _apply_operations(
     for operation in operations:
         operation_type = operation.get("operation") or operation.get("type")
         if operation_type == "option_values_edit":
-            products, durable_history, history_cursor = (
-                _apply_option_value_operation(
+            products, durable_history, history_cursor = _apply_option_value_operation(
+                products,
+                working_plan,
+                operation,
+                durable_history,
+                history_cursor,
+            )
+        elif operation_type == "value_revert":
+            change_id = str(operation.get("change_id") or "")
+            _product_index, _item, row = _working_row_match(working_plan, change_id)
+            if row.get("scope") == "option" and row.get("field") == "values":
+                products, durable_history, history_cursor = _apply_option_value_revert(
                     products,
                     working_plan,
                     operation,
                     durable_history,
                     history_cursor,
-                )
-            )
-        elif operation_type == "value_revert":
-            change_id = str(operation.get("change_id") or "")
-            _product_index, _item, row = _working_row_match(
-                working_plan, change_id
-            )
-            if row.get("scope") == "option" and row.get("field") == "values":
-                products, durable_history, history_cursor = (
-                    _apply_option_value_revert(
-                        products,
-                        working_plan,
-                        operation,
-                        durable_history,
-                        history_cursor,
-                    )
                 )
             else:
                 products, durable_history, history_cursor = _apply_value_operations(
@@ -1471,13 +1666,19 @@ def _apply_grid_changes(
         change_id = str(change.get("change_id") or "")
         match = rows.get(change_id)
         if not match:
-            raise HTTPException(status_code=422, detail=f"Unknown change_id: {change_id}")
+            raise HTTPException(
+                status_code=422, detail=f"Unknown change_id: {change_id}"
+            )
         product_index, row = match
         path = str(change.get("value_path") or "")
         if path != row.get("value_path"):
-            raise HTTPException(status_code=422, detail=f"value_path does not match {change_id}")
+            raise HTTPException(
+                status_code=422, detail=f"value_path does not match {change_id}"
+            )
         if product_index >= len(products):
-            raise HTTPException(status_code=422, detail="Change targets a missing product")
+            raise HTTPException(
+                status_code=422, detail="Change targets a missing product"
+            )
         _set_product_value(products[product_index], row, change.get("value"))
     return products
 
@@ -1512,9 +1713,14 @@ async def create_review_edit_session(
         raise _conflict("Draft revision is stale")
     active = _service(ctx).get_active_review_edit_session(draft_id, shop_domain=tenant)
     if active:
-        if active.get("surface") == surface and int(active.get("base_draft_revision") or 0) == current_revision:
+        if (
+            active.get("surface") == surface
+            and int(active.get("base_draft_revision") or 0) == current_revision
+        ):
             return {"session": active, "resumed": True}
-        raise _conflict("Apply or discard the active edit session before switching surfaces")
+        raise _conflict(
+            "Apply or discard the active edit session before switching surfaces"
+        )
 
     products = _products(draft)
     working_file_id: str | None = None
@@ -1531,29 +1737,35 @@ async def create_review_edit_session(
             shop_domain=tenant,
         )
     now = _now()
-    session = _service(ctx).save_review_edit_session({
-        "session_id": str(uuid.uuid4()),
-        "draft_id": draft_id,
-        "shop_domain": tenant,
-        "surface": surface,
-        "base_draft_revision": current_revision,
-        "edit_revision": 1,
-        "pending_products": products,
-        "working_plan": _snapshot_working_plan(plan, products)
-        if isinstance(plan, dict)
-        else {},
-        "base_plan_id": plan.get("plan_id") if isinstance(plan, dict) else None,
-        "grid_state": deepcopy(payload.get("grid_state"))
-        if isinstance(payload.get("grid_state"), dict)
-        else _service(ctx)._default_review_grid_state(),
-        "history": [],
-        "history_cursor": 0,
-        "working_file_id": working_file_id,
-        "status": "active",
-        "created_at": now,
-        "updated_at": now,
-        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat(),
-    })
+    session = _service(ctx).save_review_edit_session(
+        {
+            "session_id": str(uuid.uuid4()),
+            "draft_id": draft_id,
+            "shop_domain": tenant,
+            "surface": surface,
+            "base_draft_revision": current_revision,
+            "edit_revision": 1,
+            "pending_products": products,
+            "working_plan": (
+                _snapshot_working_plan(plan, products) if isinstance(plan, dict) else {}
+            ),
+            "base_plan_id": plan.get("plan_id") if isinstance(plan, dict) else None,
+            "grid_state": (
+                deepcopy(payload.get("grid_state"))
+                if isinstance(payload.get("grid_state"), dict)
+                else _service(ctx)._default_review_grid_state()
+            ),
+            "history": [],
+            "history_cursor": 0,
+            "working_file_id": working_file_id,
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+            "expires_at": (
+                datetime.now(timezone.utc) + timedelta(hours=24)
+            ).isoformat(),
+        }
+    )
     return {"session": session, "resumed": False}
 
 
@@ -1569,7 +1781,10 @@ async def patch_review_edit_session(
     session = _service(ctx).get_review_edit_session(session_id, shop_domain=tenant)
     if not session or session.get("draft_id") != draft_id:
         raise HTTPException(status_code=404, detail="Edit session not found")
-    if session.get("status") != "active" or session.get("surface") not in {"grid", "workbook"}:
+    if session.get("status") != "active" or session.get("surface") not in {
+        "grid",
+        "workbook",
+    }:
         raise _conflict("Review edit session is not active")
     expected = payload.get("expected_edit_revision")
     current = int(session.get("edit_revision") or 1)
@@ -1616,8 +1831,14 @@ async def patch_review_edit_session(
     latest_plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
     if not isinstance(latest_plan, dict):
         raise _conflict("Mutation plan is missing")
-    if latest_plan.get("review_contract_version") not in {2, 3}:
-        raise HTTPException(status_code=409, detail={"code": UNSUPPORTED_REVIEW_CONTRACT, "message": "Regenerate this review plan before editing"})
+    if latest_plan.get("review_contract_version") not in {2, 3, 4}:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": UNSUPPORTED_REVIEW_CONTRACT,
+                "message": "Regenerate this review plan before editing",
+            },
+        )
     pending = _products({"products": session.get("pending_products")})
     working_plan = session.get("working_plan")
     if not isinstance(working_plan, dict) or not working_plan.get("items"):
@@ -1642,9 +1863,11 @@ async def patch_review_edit_session(
         if not isinstance(changes, list):
             raise HTTPException(status_code=400, detail="changes must be an array")
         operations = [
-            {**change, "operation": "value_edit"}
-            if isinstance(change, dict)
-            else change
+            (
+                {**change, "operation": "value_edit"}
+                if isinstance(change, dict)
+                else change
+            )
             for change in changes
         ]
     if any(not isinstance(operation, dict) for operation in operations):
@@ -1655,7 +1878,8 @@ async def patch_review_edit_session(
             (
                 operation
                 for operation in operations
-                if (operation.get("type") or operation.get("operation")) not in ui_operations
+                if (operation.get("type") or operation.get("operation"))
+                not in ui_operations
             ),
             None,
         )
@@ -1672,7 +1896,10 @@ async def patch_review_edit_session(
         )
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, dict) else {}
-        if exc.status_code == 422 and detail.get("code") == REVIEW_FIELD_VALIDATION_FAILED:
+        if (
+            exc.status_code == 422
+            and detail.get("code") == REVIEW_FIELD_VALIDATION_FAILED
+        ):
             LOG.warning(
                 "import_review_field_validation_failed draft_id=%s session_id=%s change_ids=%s",
                 draft_id,
@@ -1684,16 +1911,18 @@ async def patch_review_edit_session(
                 ),
             )
         raise
-    saved = _service(ctx).save_review_edit_session({
-        **session,
-        "pending_products": pending,
-        "working_plan": working_plan,
-        "grid_state": grid_state,
-        "history": history,
-        "history_cursor": history_cursor,
-        "edit_revision": current + 1,
-        "updated_at": _now(),
-    })
+    saved = _service(ctx).save_review_edit_session(
+        {
+            **session,
+            "pending_products": pending,
+            "working_plan": working_plan,
+            "grid_state": grid_state,
+            "history": history,
+            "history_cursor": history_cursor,
+            "edit_revision": current + 1,
+            "updated_at": _now(),
+        }
+    )
     return {"session": saved}
 
 
@@ -1711,7 +1940,11 @@ def _grid_session_for_action(
         raise _conflict("Grid edit session is not active")
     current = int(session.get("edit_revision") or 1)
     expected = payload.get("expected_edit_revision")
-    if not isinstance(expected, int) or isinstance(expected, bool) or expected != current:
+    if (
+        not isinstance(expected, int)
+        or isinstance(expected, bool)
+        or expected != current
+    ):
         raise _conflict("Edit revision is stale")
     return session, current
 
@@ -1727,16 +1960,18 @@ def _save_history_action(
     working_plan: dict[str, Any],
     grid_state: dict[str, Any],
 ) -> dict[str, Any]:
-    return _service(ctx).save_review_edit_session({
-        **session,
-        "pending_products": pending,
-        "working_plan": working_plan,
-        "grid_state": grid_state,
-        "history": history,
-        "history_cursor": cursor,
-        "edit_revision": current + 1,
-        "updated_at": _now(),
-    })
+    return _service(ctx).save_review_edit_session(
+        {
+            **session,
+            "pending_products": pending,
+            "working_plan": working_plan,
+            "grid_state": grid_state,
+            "history": history,
+            "history_cursor": cursor,
+            "edit_revision": current + 1,
+            "updated_at": _now(),
+        }
+    )
 
 
 @router.post("/product-drafts/{draft_id}/review-edit-sessions/{session_id}/undo")
@@ -1863,13 +2098,18 @@ async def apply_review_edit_session(
     if expected is not None and expected != int(session.get("edit_revision") or 1):
         raise _conflict("Edit revision is stale")
     draft = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=tenant)
-    if not draft or int(draft.get("revision") or 1) != int(session.get("base_draft_revision") or 0):
+    if not draft or int(draft.get("revision") or 1) != int(
+        session.get("base_draft_revision") or 0
+    ):
         raise _conflict("Draft revision is stale")
     pending_before = _products({"products": session.get("pending_products")})
     if session.get("surface") == "workbook":
         working_file_id = str(session.get("working_file_id") or "")
         working_file = ctx.supabase.file.get_file(working_file_id)
-        if not working_file or str(working_file.get("shop_domain") or "").strip().lower() != tenant:
+        if (
+            not working_file
+            or str(working_file.get("shop_domain") or "").strip().lower() != tenant
+        ):
             raise _conflict("Workbook working copy is unavailable")
         try:
             parsed = read_generated_workbook(bytes(working_file["content"]))
@@ -1899,10 +2139,14 @@ async def apply_review_edit_session(
                 if isinstance(error, dict)
             ),
         )
-        raise _validation_failure([
-            error for error in existing_field_errors if isinstance(error, dict)
-        ])
-    working_plan = session.get("working_plan") if isinstance(session.get("working_plan"), dict) else {}
+        raise _validation_failure(
+            [error for error in existing_field_errors if isinstance(error, dict)]
+        )
+    working_plan = (
+        session.get("working_plan")
+        if isinstance(session.get("working_plan"), dict)
+        else {}
+    )
     try:
         workbook_model = _workbook_model(products)
         workbook = create_excel_bytes(workbook_model)
@@ -1943,18 +2187,26 @@ async def apply_review_edit_session(
         products=products,
         revision=new_revision,
     )
-    plan_response = await create_mutation_plan(draft_id=draft_id, request=request, ctx=ctx)
+    plan_response = await create_mutation_plan(
+        draft_id=draft_id, request=request, ctx=ctx
+    )
     rebuilt_plan = plan_response["plan"]
-    if session.get("surface") == "grid" and isinstance(session.get("working_plan"), dict):
+    if session.get("surface") == "grid" and isinstance(
+        session.get("working_plan"), dict
+    ):
         working_plan = session["working_plan"]
         bases = working_plan.get("_option_edit_bases")
-        affected_item_ids = {
-            str(state.get("item", {}).get("item_id") or "")
-            for state in bases.values()
+        affected_item_ids = (
+            {
+                str(state.get("item", {}).get("item_id") or "")
+                for state in bases.values()
+                if isinstance(bases, dict)
+                and isinstance(state, dict)
+                and isinstance(state.get("item"), dict)
+            }
             if isinstance(bases, dict)
-            and isinstance(state, dict)
-            and isinstance(state.get("item"), dict)
-        } if isinstance(bases, dict) else set()
+            else set()
+        )
         working_by_source = {
             int(item["source_index"]): item
             for item in working_plan.get("items", [])
@@ -1963,9 +2215,8 @@ async def apply_review_edit_session(
             and str(item.get("item_id") or "") in affected_item_ids
         }
         for index, fresh_item in enumerate(rebuilt_plan.get("items", [])):
-            if (
-                not isinstance(fresh_item, dict)
-                or not isinstance(fresh_item.get("source_index"), int)
+            if not isinstance(fresh_item, dict) or not isinstance(
+                fresh_item.get("source_index"), int
             ):
                 continue
             source_index = int(fresh_item["source_index"])
@@ -1981,24 +2232,36 @@ async def apply_review_edit_session(
                 ),
                 source_index=source_index,
                 source_product=products[source_index],
-                live_snapshot=fresh_item.get("live_snapshot")
-                if isinstance(fresh_item.get("live_snapshot"), dict)
-                else None,
-                proposed=structural_item.get("proposed")
-                if isinstance(structural_item.get("proposed"), dict)
-                else {},
+                live_snapshot=(
+                    fresh_item.get("live_snapshot")
+                    if isinstance(fresh_item.get("live_snapshot"), dict)
+                    else None
+                ),
+                proposed=(
+                    structural_item.get("proposed")
+                    if isinstance(structural_item.get("proposed"), dict)
+                    else {}
+                ),
                 operation=str(fresh_item.get("operation") or "update"),
-                blockers=structural_item.get("blockers")
-                if isinstance(structural_item.get("blockers"), list)
-                else [],
-                unapplied=structural_item.get("unapplied")
-                if isinstance(structural_item.get("unapplied"), list)
-                else [],
+                blockers=(
+                    structural_item.get("blockers")
+                    if isinstance(structural_item.get("blockers"), list)
+                    else []
+                ),
+                unapplied=(
+                    structural_item.get("unapplied")
+                    if isinstance(structural_item.get("unapplied"), list)
+                    else []
+                ),
                 prior_item=structural_item,
             )
-        rebuilt_plan = _preserve_working_selection(rebuilt_plan, session["working_plan"])
+        rebuilt_plan = _preserve_working_selection(
+            rebuilt_plan, session["working_plan"]
+        )
         _service(ctx).save_mutation_plan(rebuilt_plan)
-    applied = _service(ctx).save_review_edit_session({**session, "status": "applied", "updated_at": _now()})
+    applied = _service(ctx).save_review_edit_session(
+        {**session, "status": "applied", "updated_at": _now()}
+    )
     if isinstance(session.get("working_file_id"), str) and session["working_file_id"]:
         ctx.supabase.file.delete_file(session["working_file_id"])
     canonical_file = ctx.supabase.file.get_file(output_file_id) or {}
@@ -2024,7 +2287,12 @@ async def discard_review_edit_session(
     if not session or session.get("draft_id") != draft_id:
         raise HTTPException(status_code=404, detail="Edit session not found")
     if session.get("status") == "active":
-        session = _service(ctx).save_review_edit_session({**session, "status": "discarded", "updated_at": _now()})
-        if isinstance(session.get("working_file_id"), str) and session["working_file_id"]:
+        session = _service(ctx).save_review_edit_session(
+            {**session, "status": "discarded", "updated_at": _now()}
+        )
+        if (
+            isinstance(session.get("working_file_id"), str)
+            and session["working_file_id"]
+        ):
             ctx.supabase.file.delete_file(session["working_file_id"])
     return {"session": session}

@@ -18,4 +18,4 @@ docker-compose -f docker-compose.stack.yml -f docker-compose.debug.yml up -d --b
 echo "✅ Backend and worker rebuilt and started."
 echo "💡 Dependency updates (like new Python packages) require running this build script."
 
-echo "🤖 OpenAI is the default LLM provider; custom Ollama endpoints remain configurable in Settings."
+echo "🤖 Copilot BYOK is the semantic runtime; OpenAI and compatible endpoints remain configurable in Settings."

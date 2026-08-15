@@ -1,7 +1,7 @@
-from typing import Any, AsyncIterator, Dict, Protocol, Union
+from typing import Any, AsyncIterator, Protocol
 
-from agent_framework import Workflow
 from ai.models import ProductsList
+from application.ports.llm_port import ExtractionRequest
 from application.ports.supabase_port import SupabaseNamespacedPort
 
 
@@ -94,40 +94,4 @@ class TracingServiceInterface(Protocol):
 
 
 class LLMServiceInterface(Protocol):
-    def get_agent_workflow(
-        self,
-        excel_input: Union[bytes, str],
-        collabora_base_url: str | None = None,
-        agent_prompt: str = "Please analyze the document and the associated image(s).",
-        model_env: Dict[str, str] | None = None,
-        model_provider: str | None = None,
-        model_file_search_enabled: bool | None = None,
-        *,
-        input_name: str | None = None,
-        input_content_type: str | None = None,
-        extraction_mode: str = "per_sheet",
-        write_to_file: bool = False,
-        output_path: str | None = None,
-        writer_agent_prompt: str | None = None,
-        trace_event=None,
-        shop_domain: str | None = None,
-    ) -> Workflow: ...
-
-    async def run_excel_agent_workflow(
-        self,
-        excel_input: Union[bytes, str],
-        collabora_base_url: str | None = None,
-        agent_prompt: str = "Please analyze the document and the associated image(s).",
-        model_env: Dict[str, str] | None = None,
-        model_provider: str | None = None,
-        model_file_search_enabled: bool | None = None,
-        *,
-        input_name: str | None = None,
-        input_content_type: str | None = None,
-        extraction_mode: str = "per_sheet",
-        write_to_file: bool = False,
-        output_path: str | None = None,
-        writer_agent_prompt: str | None = None,
-        trace_event=None,
-        shop_domain: str | None = None,
-    ) -> ProductsList | dict | str | None: ...
+    async def extract(self, request: ExtractionRequest) -> ProductsList: ...

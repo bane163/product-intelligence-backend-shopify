@@ -57,7 +57,7 @@ def test_catalog_numbering_is_deterministic_by_page_position_not_input_order():
     assert forward == reverse
 
 
-def test_valid_index_is_authoritative_and_model_locations_are_ignored():
+def test_valid_index_rejects_model_locations_then_resolves_trusted_coordinates():
     catalog = build_evidence_catalog(
         layout(anchor("cropped-title", "lassic Cotton T-Shirt", (0.2, 0.3, 0.8, 0.4)))
     )
@@ -76,6 +76,11 @@ def test_valid_index_is_authoritative_and_model_locations_are_ignored():
         ],
     }
 
+    rejected = validate_indexed_pdf_evidence([product], catalog)
+    assert not rejected.valid
+    assert "model-supplied locators" in rejected.feedback
+    for key in ("page", "bbox", "anchor_id", "source_file_id"):
+        product["source_refs"][0].pop(key)
     assert validate_indexed_pdf_evidence([product], catalog).valid
     assert resolve_indexed_pdf_source_refs([product], catalog, "trusted-file") == 1
     assert product["source_refs"] == [
@@ -110,6 +115,80 @@ def test_duplicate_visible_text_is_disambiguated_by_selected_index():
     resolve_indexed_pdf_source_refs([product], catalog, "file")
     assert product["source_refs"][0]["anchor_id"] == "second"
     assert product["source_refs"][0]["bbox"] == [0.1, 0.6, 0.4, 0.7]
+
+
+def _table_pdf_bytes(lines: list[str]) -> bytes:
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page(width=612, height=792)
+    for index, line in enumerate(lines):
+        page.insert_text((72, 90 + index * 45), line, fontsize=12)
+    content = document.tobytes()
+    document.close()
+    return content
+
+
+def test_shared_pdf_block_resolves_html_list_numeric_and_scalar_values_to_distinct_boxes():
+    pdf = _table_pdf_bytes([
+        "Coastal Cotton Shirt",
+        "Soft cotton shirt",
+        "Harbor Goods",
+        "summer, cotton",
+        "SKU-100",
+        "19.99",
+    ])
+    coarse = (0.05, 0.05, 0.9, 0.55)
+    catalog = build_evidence_catalog(layout(anchor("shared-block", "Product table", coarse)))
+    product = {
+        "title": "Coastal Cotton Shirt",
+        "body_html": "<p>Soft cotton shirt</p>",
+        "vendor": "Harbor Goods",
+        "tags": ["summer", "cotton"],
+        "variants": [{"sku": "SKU-100", "price": "19.99"}],
+        "source_refs": [
+            {"value_path": "title", "evidence_index": 1},
+            {"value_path": "body_html", "evidence_index": 1},
+            {"value_path": "vendor", "evidence_index": 1},
+            {"value_path": "tags", "evidence_index": 1},
+            {"value_path": "variant[SKU-100].sku", "evidence_index": 1},
+            {"value_path": "variant[SKU-100].price", "evidence_index": 1},
+        ],
+    }
+    stats: dict[str, int] = {}
+
+    assert validate_indexed_pdf_evidence([product], catalog).valid
+    assert resolve_indexed_pdf_source_refs(
+        [product], catalog, "file", pdf_content=pdf, resolution_stats=stats
+    ) == 6
+
+    boxes = [tuple(ref["bbox"]) for ref in product["source_refs"]]
+    assert len(set(boxes)) == 6
+    assert all(coarse[0] <= box[0] < box[2] <= coarse[2] for box in boxes)
+    assert all(coarse[1] <= box[1] < box[3] <= coarse[3] for box in boxes)
+    assert stats == {"exact": 6, "coarse": 0}
+
+
+def test_duplicate_or_missing_pdf_value_keeps_trusted_coarse_box():
+    pdf = _table_pdf_bytes(["Repeated", "Repeated", "Different"])
+    coarse = (0.05, 0.05, 0.9, 0.4)
+    catalog = build_evidence_catalog(layout(anchor("shared", "Shared region", coarse)))
+    product = {
+        "title": "Repeated",
+        "vendor": "Missing vendor",
+        "source_refs": [
+            {"value_path": "title", "evidence_index": 1},
+            {"value_path": "vendor", "evidence_index": 1},
+        ],
+    }
+    stats: dict[str, int] = {}
+
+    resolve_indexed_pdf_source_refs(
+        [product], catalog, "file", pdf_content=pdf, resolution_stats=stats
+    )
+
+    assert [ref["bbox"] for ref in product["source_refs"]] == [list(coarse), list(coarse)]
+    assert stats == {"exact": 0, "coarse": 2}
 
 
 def test_feedback_names_missing_invalid_and_mismatched_canonical_paths():

@@ -708,6 +708,10 @@ async def create_mutation_plan(
                 unapplied=unapplied,
                 prior_item=prior_item,
             )
+            if operation == "create" and not str(product.get("status") or "").strip():
+                for row in plan_item.get("review_changes", []):
+                    if isinstance(row, dict) and row.get("scope") == "product" and row.get("field") == "status":
+                        row["origin"] = "defaulted"
             plan_item["quality_issues"] = product_quality_issues
             for row in plan_item.get("review_changes", []):
                 if not isinstance(row, dict) or row.get("scope") != "inventory":
@@ -750,7 +754,7 @@ async def create_mutation_plan(
         "version": int((previous or {}).get("version") or 0) + 1,
         "status": "review",
         "currency_code": currency_code,
-        "review_contract_version": 4,
+        "review_contract_version": 5,
         "inventory_context": inventory_context,
         "items": items,
         "approved_at": None,
@@ -809,7 +813,7 @@ async def patch_mutation_plan_selection(
     items = list(plan.get("items") or [])
     item_selections = payload.get("item_selections")
     if item_selections is not None:
-        if plan.get("review_contract_version") not in {2, 3, 4}:
+        if plan.get("review_contract_version") not in {2, 3, 4, 5}:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -930,7 +934,7 @@ async def approve_mutation_plan(
         raise _review_error("Selected changes contain blockers")
     inventory_context = plan.get("inventory_context")
     if (
-        plan.get("review_contract_version") == 4
+        plan.get("review_contract_version") in {4, 5}
         and isinstance(inventory_context, dict)
         and inventory_context.get("required")
     ):

@@ -287,7 +287,7 @@ async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
                 "expected_edit_revision": 1,
                 "operations": [
                     {"type": "filters", "filterValues": {"changes": "all", "query": "shirt"}},
-                    {"type": "expansion", "expandedItemIds": ["item-1"]},
+                    {"type": "expansion", "expandedItemIds": ["product:0"]},
                     {"type": "pagination", "pagesByItem": {"item-1": 3}},
                     {"type": "workspace_view", "workspaceView": "changes"},
                     {
@@ -314,9 +314,11 @@ async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
     assert patched.status_code == 200, patched.text
     patched_session = patched.json()["session"]
     assert patched_session["grid_state"] == {
-        "filterValues": {"changes": "all", "query": "shirt"},
-        "expandedItemIds": ["item-1"],
-        "pagesByItem": {"item-1": 3},
+        "filterValues": {"productStatus": "all"},
+        "expandedItemIds": ["product:0"],
+        "expansionInitialized": True,
+        "pagesByItem": {},
+        "productPage": 0,
     }
     assert [entry["operation"] for entry in patched_session["history"]] == ["selection"]
     assert all(entry["operation_id"] for entry in patched_session["history"])
@@ -327,9 +329,11 @@ async def test_durable_ui_operations_survive_reload_and_undo_redo_selection():
     base_item = base_session["working_plan"]["items"][0]
     assert base_session["history_cursor"] == 0
     assert base_session["grid_state"] == {
-        "filterValues": {"changes": "all", "query": "shirt"},
-        "expandedItemIds": ["item-1"],
-        "pagesByItem": {"item-1": 3},
+        "filterValues": {"productStatus": "all"},
+        "expandedItemIds": ["product:0"],
+        "expansionInitialized": True,
+        "pagesByItem": {},
+        "productPage": 0,
     }
     assert base_item["selected"] is True
     assert [row["included"] for row in base_item["review_changes"]] == [True, True]
@@ -367,6 +371,9 @@ async def test_workbook_session_preserves_initial_grid_state_and_accepts_ui_oper
                 "grid_state": initial_grid_state,
             },
         )
+        assert created.status_code == 410
+        assert created.json()["detail"]["code"] == "WORKBOOK_REVIEW_RETIRED"
+        return
         session = created.json()["session"]
         patched = await client.patch(
             f"{base}/{session['session_id']}",
@@ -405,6 +412,7 @@ async def test_workbook_session_preserves_initial_grid_state_and_accepts_ui_oper
         "filterValues": {"changes": "all"},
         "pagesByItem": {"item-1": 2},
         "expandedItemIds": [],
+        "expansionInitialized": False,
     }
     assert rejected.status_code == 409
     assert resumed.json()["session"]["grid_state"] == patched.json()["session"]["grid_state"]
@@ -602,9 +610,11 @@ async def test_reset_restores_base_plan_products_and_grid_from_partial_history()
     assert reset_item["selected"] is True
     assert [row["included"] for row in reset_item["review_changes"]] == [True, True]
     assert reset_session["grid_state"] == {
-        "filterValues": {},
+        "filterValues": {"productStatus": "all"},
         "expandedItemIds": [],
+        "expansionInitialized": False,
         "pagesByItem": {},
+        "productPage": 0,
     }
     assert reset_session["history"] == []
     assert reset_session["history_cursor"] == 0
@@ -635,7 +645,7 @@ async def test_edit_sessions_are_tenant_scoped_and_enforce_one_surface():
             headers={"x-shop-domain": shop},
         )
 
-    assert switched.status_code == 409
+    assert switched.status_code == 410
     assert cross_tenant.status_code == 404
     assert discarded.status_code == 200
     assert discarded.json()["session"]["status"] == "discarded"
@@ -673,6 +683,9 @@ async def test_workbook_apply_parses_saved_copy_and_rebuilds_once(monkeypatch):
     headers = {"x-shop-domain": shop}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         created = await client.post(base, headers=headers, json={"surface": "workbook", "base_revision": 1})
+        assert created.status_code == 410
+        assert created.json()["detail"]["code"] == "WORKBOOK_REVIEW_RETIRED"
+        return
         session = created.json()["session"]
         working = service.get_file(session["working_file_id"])
         workbook = openpyxl.load_workbook(io.BytesIO(working["content"]))
@@ -1276,9 +1289,11 @@ def test_legacy_review_edit_session_is_lazily_hydrated_with_safe_history_default
     assert session is not None
     assert session["working_plan"] == {}
     assert session["grid_state"] == {
-        "filterValues": {"changes": "hide_deferred"},
+        "filterValues": {"productStatus": "all"},
         "expandedItemIds": [],
+        "expansionInitialized": False,
         "pagesByItem": {},
+        "productPage": 0,
     }
     assert session["history"] == []
     assert session["history_cursor"] == 0
@@ -1315,9 +1330,11 @@ def test_review_edit_session_hydration_bounds_history_cursor_and_grid_state():
     assert session["history_cursor"] == 0
     assert session["history"] == []
     assert session["grid_state"] == {
-        "filterValues": {},
-        "expandedItemIds": ["item-1"],
-        "pagesByItem": {"item-1": 2},
+        "filterValues": {"productStatus": "all"},
+        "expandedItemIds": [],
+        "expansionInitialized": False,
+        "pagesByItem": {},
+        "productPage": 0,
     }
 
     session["history_cursor"] = -10

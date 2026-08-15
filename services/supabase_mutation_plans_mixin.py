@@ -14,9 +14,11 @@ class SupabaseMutationPlansMixin:
     @staticmethod
     def _default_review_grid_state() -> dict[str, Any]:
         return {
-            "filterValues": {"changes": "hide_deferred"},
+            "filterValues": {"productStatus": "all"},
             "expandedItemIds": [],
+            "expansionInitialized": False,
             "pagesByItem": {},
+            "productPage": 0,
         }
 
     @staticmethod
@@ -31,7 +33,10 @@ class SupabaseMutationPlansMixin:
                 value = row.get("proposed")
                 field = str(row.get("field") or "")
                 code = message = None
-                if field in {"tags", "values"} and not isinstance(value, list):
+                schema = row.get("edit_schema") if isinstance(row.get("edit_schema"), dict) else {}
+                if schema.get("required") and (value is None or (isinstance(value, str) and not value.strip())):
+                    code, message = "REQUIRED", "This field is required."
+                elif field in {"tags", "values"} and not isinstance(value, list):
                     code, message = (
                         "INVALID_LIST",
                         "Enter one value per line, or revert this field.",
@@ -70,10 +75,6 @@ class SupabaseMutationPlansMixin:
                             "INVALID_INTEGER",
                             "Enter a whole number from 0 to 1,000,000,000.",
                         )
-                elif field == "title" and (
-                    not isinstance(value, str) or not value.strip()
-                ):
-                    code, message = "REQUIRED", "This field is required."
                 if code and message:
                     errors.append(
                         {
@@ -100,25 +101,34 @@ class SupabaseMutationPlansMixin:
         if isinstance(raw_grid_state, dict):
             filter_values = raw_grid_state.get("filterValues")
             if isinstance(filter_values, dict):
-                grid_state["filterValues"] = {
-                    str(key): value for key, value in filter_values.items()
-                }
+                product_status = filter_values.get("productStatus")
+                if product_status in {"all", "ready", "warning", "needs_correction", "excluded"}:
+                    grid_state["filterValues"] = {"productStatus": product_status}
             expanded_ids = raw_grid_state.get("expandedItemIds")
             if isinstance(expanded_ids, list):
-                grid_state["expandedItemIds"] = list(
-                    dict.fromkeys(
-                        item for item in expanded_ids if isinstance(item, str)
+                valid_ids = {
+                    (
+                        f"product:{item.get('source_index')}"
+                        if isinstance(item.get("source_index"), int)
+                        and not isinstance(item.get("source_index"), bool)
+                        else str(item.get("item_id") or "")
                     )
-                )
-            pages = raw_grid_state.get("pagesByItem")
-            if isinstance(pages, dict):
-                grid_state["pagesByItem"] = {
-                    str(key): value
-                    for key, value in pages.items()
-                    if isinstance(value, int)
-                    and not isinstance(value, bool)
-                    and value >= 0
+                    for item in hydrated["working_plan"].get("items", [])
+                    if isinstance(item, dict)
                 }
+                grid_state["expandedItemIds"] = list(dict.fromkeys(
+                    value for value in expanded_ids
+                    if isinstance(value, str) and value in valid_ids
+                ))
+            initialized = raw_grid_state.get("expansionInitialized")
+            grid_state["expansionInitialized"] = (
+                initialized if isinstance(initialized, bool)
+                else bool(grid_state["expandedItemIds"])
+            )
+            grid_state["pagesByItem"] = {}
+            product_page = raw_grid_state.get("productPage")
+            if isinstance(product_page, int) and not isinstance(product_page, bool) and product_page >= 0:
+                grid_state["productPage"] = product_page
         hydrated["grid_state"] = grid_state
 
         raw_history = hydrated.get("history")

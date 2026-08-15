@@ -44,8 +44,16 @@ REVIEW_FIELD_VALIDATION_FAILED = "REVIEW_FIELD_VALIDATION_FAILED"
 CONTENT_HISTORY_OPERATIONS = {
     "value_edit",
     "value_revert",
+    "cell_edit",
+    "cell_revert",
     "option_values_edit",
     "selection",
+    "option_dimension_add",
+    "option_dimension_rename",
+    "option_dimension_reorder",
+    "option_dimension_remove",
+    "variant_add",
+    "variant_remove",
 }
 HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
@@ -77,7 +85,7 @@ def _require_review_v2(
     ctx: AppContext, draft_id: str, tenant: str
 ) -> dict[str, Any] | None:
     plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
-    if isinstance(plan, dict) and plan.get("review_contract_version") not in {2, 3, 4}:
+    if isinstance(plan, dict) and plan.get("review_contract_version") not in {2, 3, 4, 5}:
         raise HTTPException(
             status_code=409,
             detail={
@@ -766,6 +774,35 @@ def _working_row_match(
     return matches[0]
 
 
+def _working_cell_match(
+    plan: dict[str, Any], cell_id: str
+) -> tuple[int, dict[str, Any], dict[str, Any]]:
+    matches: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for item in plan.get("items", []):
+        if not isinstance(item, dict) or not isinstance(item.get("source_index"), int):
+            continue
+        preview = item.get("review_preview")
+        if not isinstance(preview, dict):
+            continue
+        cells: list[Any] = []
+        product = preview.get("product")
+        if isinstance(product, dict) and isinstance(product.get("cells"), list):
+            cells.extend(product["cells"])
+        if isinstance(preview.get("metafield_cells"), list):
+            cells.extend(preview["metafield_cells"])
+        for variant in preview.get("variants", []):
+            if isinstance(variant, dict) and isinstance(variant.get("cells"), list):
+                cells.extend(variant["cells"])
+        for cell in cells:
+            if isinstance(cell, dict) and str(cell.get("cell_id") or "") == cell_id:
+                matches.append((int(item["source_index"]), item, cell))
+    if len(matches) != 1:
+        raise _validation_failure(
+            [{"change_id": "", "value_path": "", "code": "STALE_CELL_IDENTITY", "message": "This preview cell changed. Refresh and try again."}]
+        )
+    return matches[0]
+
+
 def _require_editable_row(row: dict[str, Any], *, option_values: bool = False) -> None:
     if row.get("editable") is not True:
         raise _validation_failure(
@@ -1204,6 +1241,8 @@ def _transform_option_state(
         prior_item=item,
         variant_identity_rename=variant_identity_rename,
     )
+    rebuilt["selected"] = bool(item.get("selected"))
+    rebuilt["selectable"] = bool(item.get("selectable"))
     return edited_product, rebuilt
 
 
@@ -1407,6 +1446,274 @@ def _apply_option_value_revert(
     return products, durable_history, len(durable_history)
 
 
+def _dimension_id(item: dict[str, Any], option: dict[str, Any]) -> str | None:
+    preview = item.get("review_preview")
+    dimensions = preview.get("option_dimensions") if isinstance(preview, dict) else []
+    for dimension in dimensions if isinstance(dimensions, list) else []:
+        if isinstance(dimension, dict) and str(dimension.get("name") or "").casefold() == str(option.get("name") or "").casefold():
+            return str(dimension.get("dimension_id") or "")
+    return None
+
+
+def _option_records(product: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = product.get("productOptions") if isinstance(product.get("productOptions"), list) else product.get("options")
+    result = deepcopy([value for value in raw if isinstance(value, dict)]) if isinstance(raw, list) else []
+    if len(result) == 1 and str(result[0].get("name") or "").strip().casefold() == "title":
+        values = result[0].get("values")
+        names = [str(value.get("name") if isinstance(value, dict) else value).strip().casefold() for value in values] if isinstance(values, list) else []
+        if names in ([], ["default title"]):
+            return []
+    return result
+
+
+def _set_option_records(product: dict[str, Any], options: list[dict[str, Any]]) -> None:
+    product.pop("options", None)
+    product["productOptions"] = [
+        {**option, "position": index + 1}
+        for index, option in enumerate(options)
+    ]
+
+
+def _variant_option_map(variant: dict[str, Any]) -> dict[str, str]:
+    raw = variant.get("optionValues") or variant.get("selectedOptions") or []
+    result: dict[str, str] = {}
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("optionName") or entry.get("option_name") or (entry.get("name") if "value" in entry else "")).strip()
+        value = str(entry.get("value") if "value" in entry else entry.get("name") or "").strip()
+        if name and value:
+            result[name.casefold()] = value
+    return result
+
+
+def _set_variant_options(variant: dict[str, Any], options: list[dict[str, Any]], values: dict[str, str]) -> None:
+    variant.pop("selectedOptions", None)
+    variant.pop("selected_options", None)
+    variant.pop("option_values", None)
+    for key in ("option1", "option2", "option3"):
+        variant.pop(key, None)
+    if options:
+        variant["optionValues"] = [
+            {"optionName": str(option["name"]), "name": values[str(option["name"]).casefold()]}
+            for option in options
+        ]
+    else:
+        variant["optionValues"] = [{"optionName": "Title", "name": "Default Title"}]
+
+
+def _validate_structural_product(product: dict[str, Any]) -> None:
+    options = _option_records(product)
+    names = [str(option.get("name") or "").strip() for option in options]
+    if len(options) > 3:
+        raise ValueError("Shopify supports at most three option dimensions.")
+    if any(not name for name in names) or len({name.casefold() for name in names}) != len(names):
+        raise ValueError("Option names must be nonblank and unique.")
+    declared: dict[str, set[str]] = {}
+    for option in options:
+        name = str(option.get("name") or "")
+        values = [str(value.get("name") if isinstance(value, dict) else value).strip() for value in option.get("values", [])]
+        if not values or any(not value for value in values) or len({value.casefold() for value in values}) != len(values):
+            raise ValueError(f"{name} values must be nonblank and unique.")
+        declared[name.casefold()] = {value.casefold() for value in values}
+    variants = _variants(product)
+    if not variants:
+        raise ValueError("A product must have at least one variant.")
+    if len(variants) > 2048:
+        raise ValueError("This product exceeds Shopify's 2,048 variant limit.")
+    combos: set[tuple[str, ...]] = set()
+    skus: set[str] = set()
+    for variant in variants:
+        values = _variant_option_map(variant)
+        combo = tuple(values.get(name.casefold(), "").casefold() for name in names)
+        if options and (not all(combo) or any(combo[index] not in declared[names[index].casefold()] for index in range(len(names)))):
+            raise ValueError("Every variant must use one declared value for each option.")
+        if combo in combos:
+            raise ValueError("Variant option combinations must be unique.")
+        combos.add(combo)
+        sku = str(variant.get("sku") or "").strip().casefold()
+        if sku and sku in skus:
+            raise ValueError("Variant SKUs must be unique.")
+        if sku:
+            skus.add(sku)
+
+
+def _transform_structure(product: dict[str, Any], item: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(product)
+    options = _option_records(result)
+    variants = _variants(result) or [{}]
+    operation_type = str(operation.get("operation") or operation.get("type") or "")
+    dimension_id = str(operation.get("dimension_id") or "")
+    option_index = next((index for index, option in enumerate(options) if _dimension_id(item, option) == dimension_id), None)
+
+    if operation_type == "option_dimension_add":
+        name = str(operation.get("name") or "").strip()
+        value = str(operation.get("value") or "").strip()
+        if not name or not value:
+            raise ValueError("Enter a nonblank option name and value.")
+        if len(options) >= 3 or any(str(option.get("name") or "").casefold() == name.casefold() for option in options):
+            raise ValueError("Option dimensions must be unique and limited to three.")
+        options.append({"name": name, "values": [{"name": value}]})
+        for variant in variants:
+            values = _variant_option_map(variant)
+            values[name.casefold()] = value
+            _set_variant_options(variant, options, values)
+    elif operation_type == "option_dimension_rename":
+        if option_index is None:
+            raise ValueError("This option changed. Refresh before editing it.")
+        name = str(operation.get("name") or "").strip()
+        if not name or any(index != option_index and str(option.get("name") or "").casefold() == name.casefold() for index, option in enumerate(options)):
+            raise ValueError("Option names must be nonblank and unique.")
+        old = str(options[option_index].get("name") or "")
+        options[option_index]["name"] = name
+        for variant in variants:
+            values = _variant_option_map(variant)
+            values[name.casefold()] = values.pop(old.casefold(), "")
+            _set_variant_options(variant, options, values)
+    elif operation_type == "option_dimension_reorder":
+        ids = operation.get("dimension_ids")
+        if not isinstance(ids, list) or len(ids) != len(options) or set(map(str, ids)) != {str(_dimension_id(item, option)) for option in options}:
+            raise ValueError("Reorder must include every current option exactly once.")
+        by_id = {str(_dimension_id(item, option)): option for option in options}
+        options = [by_id[str(value)] for value in ids]
+        for variant in variants:
+            _set_variant_options(variant, options, _variant_option_map(variant))
+    elif operation_type == "option_dimension_remove":
+        if option_index is None:
+            raise ValueError("This option changed. Refresh before removing it.")
+        if item.get("live_snapshot") and not operation.get("confirm_live_deletion"):
+            raise ValueError("Confirm removal because it can delete live Shopify variants.")
+        removed = str(options[option_index].get("name") or "")
+        options.pop(option_index)
+        seen: set[tuple[str, ...]] = set()
+        kept: list[dict[str, Any]] = []
+        for variant in variants:
+            values = _variant_option_map(variant)
+            values.pop(removed.casefold(), None)
+            combo = tuple(values.get(str(option.get("name") or "").casefold(), "").casefold() for option in options)
+            if combo in seen:
+                raise ValueError("Removing this option would create duplicate variants.")
+            seen.add(combo)
+            _set_variant_options(variant, options, values)
+            kept.append(variant)
+        variants = kept
+    elif operation_type == "variant_add":
+        requested = operation.get("option_values")
+        if not isinstance(requested, dict) or set(key.casefold() for key in requested) != {str(option.get("name") or "").casefold() for option in options}:
+            raise ValueError("Choose one value for every option.")
+        values = {str(key).casefold(): str(value).strip() for key, value in requested.items()}
+        new_variant: dict[str, Any] = {"sku": "", "price": None, "barcode": None, "inventory_quantity": None}
+        _set_variant_options(new_variant, options, values)
+        variants.append(new_variant)
+    elif operation_type == "variant_remove":
+        if len(variants) <= 1:
+            raise ValueError("The final variant cannot be removed.")
+        identity = operation.get("subject_identity")
+        if not isinstance(identity, dict) or not isinstance(identity.get("values"), list):
+            raise ValueError("This variant identity is stale. Refresh and try again.")
+        expected = tuple(str(value).casefold() for value in identity["values"])
+        match_index = next((index for index, variant in enumerate(variants) if tuple(value for value in _canonical_variant_values(variant, options)) == expected), None)
+        if match_index is None:
+            raise ValueError("This variant identity is stale. Refresh and try again.")
+        preview_variants = (item.get("review_preview") or {}).get("variants", [])
+        is_live = any(isinstance(row, dict) and row.get("subject_identity") == identity and row.get("live_variant") for row in preview_variants)
+        if is_live and not operation.get("confirm_live_deletion"):
+            raise ValueError("Confirm removal of this live Shopify variant.")
+        variants.pop(match_index)
+    else:
+        raise ValueError("This structural operation is not supported.")
+    _set_option_records(result, options)
+    result["variants"] = variants
+    _validate_structural_product(result)
+    return result
+
+
+def _canonical_variant_values(variant: dict[str, Any], options: list[dict[str, Any]]) -> tuple[str, ...]:
+    values = _variant_option_map(variant)
+    return tuple(values.get(str(option.get("name") or "").casefold(), "").casefold() for option in options)
+
+
+def _apply_structure_operation(
+    products: list[dict[str, Any]], working_plan: dict[str, Any], operation: dict[str, Any],
+    history: list[dict[str, Any]], history_cursor: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    item_id = str(operation.get("item_id") or "")
+    item = _working_items(working_plan).get(item_id)
+    if not isinstance(item, dict) or not isinstance(item.get("source_index"), int):
+        raise _validation_failure([{"change_id": "", "value_path": "product", "code": "STALE_PRODUCT_IDENTITY", "message": "This product changed. Refresh and try again."}])
+    product_index = int(item["source_index"])
+    if product_index >= len(products):
+        raise _conflict("This product is no longer available")
+    before = _structural_state(products[product_index], item)
+    try:
+        edited_product = _transform_structure(products[product_index], item, operation)
+        edited_proposed = _transform_structure(item.get("proposed") if isinstance(item.get("proposed"), dict) else {}, item, operation)
+    except ValueError as exc:
+        raise _validation_failure([{"change_id": "", "value_path": "productOptions", "code": "INVALID_PRODUCT_STRUCTURE", "message": str(exc)}]) from None
+    rebuilt = build_review_plan_item(
+        item_id=item_id, currency_code=str(item.get("currency_code") or "USD"),
+        source_index=product_index, source_product=edited_product,
+        live_snapshot=item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else None,
+        proposed=edited_proposed, operation=str(item.get("operation") or "update"),
+        blockers=item.get("blockers") if isinstance(item.get("blockers"), list) else [],
+        unapplied=item.get("unapplied") if isinstance(item.get("unapplied"), list) else [], prior_item=item,
+    )
+    rebuilt["quality_issues"] = deepcopy(item.get("quality_issues") or [])
+    rebuilt["selected"] = bool(item.get("selected"))
+    rebuilt["selectable"] = bool(item.get("selectable"))
+    rebuilt = normalize_review_plan_rows({"review_contract_version": 5, "items": [rebuilt]})["items"][0]
+    products[product_index] = edited_product
+    _replace_working_item(working_plan, item_id, rebuilt)
+    after = _structural_state(edited_product, rebuilt)
+    operation_type = str(operation.get("operation") or operation.get("type"))
+    durable = deepcopy(history[:history_cursor])
+    durable.append(_history_entry(operation_type, before, after, item_id=item_id, product_index=product_index, structural=True, payload=deepcopy(operation)))
+    return products, durable, len(durable)
+
+
+def _apply_cell_operation(
+    products: list[dict[str, Any]], working_plan: dict[str, Any], operation: dict[str, Any],
+    history: list[dict[str, Any]], history_cursor: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    operation_type = str(operation.get("operation") or operation.get("type") or "")
+    cell_id = str(operation.get("cell_id") or "")
+    product_index, item, cell = _working_cell_match(working_plan, cell_id)
+    if str(operation.get("value_path") or "") != str(cell.get("value_path") or ""):
+        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "STALE_VALUE_PATH", "message": "This preview cell changed. Refresh and try again."}])
+    if cell.get("editable") is not True or product_index >= len(products):
+        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "REVIEW_FIELD_READ_ONLY", "message": "This preview cell is read-only."}])
+    try:
+        value = deepcopy(cell.get("original_proposed")) if operation_type == "cell_revert" else _canonical_review_value(cell, operation.get("value"))
+    except ValueError as exc:
+        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "INVALID_REVIEW_VALUE", "message": str(exc)}]) from None
+    before = _structural_state(products[product_index], item)
+    edited_product = deepcopy(products[product_index])
+    edited_proposed = deepcopy(item.get("proposed") if isinstance(item.get("proposed"), dict) else {})
+    try:
+        _set_product_value(edited_product, cell, value, origin="merchant_edited")
+        _set_product_value(edited_proposed, cell, value, origin="merchant_edited")
+    except (ValueError, HTTPException):
+        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "STALE_CELL_IDENTITY", "message": "This preview cell no longer has a unique target."}]) from None
+    rebuilt = build_review_plan_item(
+        item_id=str(item.get("item_id") or ""), currency_code=str(item.get("currency_code") or "USD"),
+        source_index=product_index, source_product=edited_product,
+        live_snapshot=item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else None,
+        proposed=edited_proposed, operation=str(item.get("operation") or "update"),
+        blockers=item.get("blockers") if isinstance(item.get("blockers"), list) else [],
+        unapplied=item.get("unapplied") if isinstance(item.get("unapplied"), list) else [], prior_item=item,
+    )
+    rebuilt["quality_issues"] = deepcopy(item.get("quality_issues") or [])
+    rebuilt["selected"] = bool(item.get("selected"))
+    rebuilt["selectable"] = bool(item.get("selectable"))
+    rebuilt = normalize_review_plan_rows({"review_contract_version": 5, "items": [rebuilt]})["items"][0]
+    products[product_index] = edited_product
+    _replace_working_item(working_plan, str(item.get("item_id") or ""), rebuilt)
+    after = _structural_state(edited_product, rebuilt)
+    durable = deepcopy(history[:history_cursor])
+    durable.append(_history_entry(operation_type, before, after, item_id=str(item.get("item_id") or ""), product_index=product_index, cell_id=cell_id, value_path=cell.get("value_path"), structural=True))
+    return products, durable, len(durable)
+
+
 def _apply_ui_operation(
     working_plan: dict[str, Any],
     grid_state: dict[str, Any],
@@ -1477,20 +1784,36 @@ def _apply_ui_operation(
             raise HTTPException(
                 status_code=400, detail="filterValues must be an object"
             )
-        after = deepcopy(value)
+        status = value.get("productStatus")
+        after = {"productStatus": status if status in {"all", "ready", "warning", "needs_correction", "excluded"} else "all"}
         grid_state["filterValues"] = after
         return None
 
     if operation_type == "expansion":
-        after = _validate_string_list(
-            operation.get("expandedItemIds"), "expandedItemIds"
-        )
-        grid_state["expandedItemIds"] = after
+        expanded_ids = _validate_string_list(operation.get("expandedItemIds"), "expandedItemIds")
+        valid_expansion_ids = {
+            (
+                f"product:{item.get('source_index')}"
+                if isinstance(item.get("source_index"), int)
+                and not isinstance(item.get("source_index"), bool)
+                else str(item.get("item_id") or "")
+            )
+            for item in _working_items(working_plan).values()
+        }
+        unknown = set(expanded_ids) - valid_expansion_ids
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"Unknown expanded product: {sorted(unknown)[0]}")
+        grid_state["expandedItemIds"] = list(dict.fromkeys(expanded_ids))
+        grid_state["expansionInitialized"] = True
         return None
 
     if operation_type == "pagination":
         after = _validated_pages(operation.get("pagesByItem"))
         grid_state["pagesByItem"] = after
+        product_page = operation.get("productPage", 0)
+        if not isinstance(product_page, int) or isinstance(product_page, bool) or product_page < 0:
+            raise HTTPException(status_code=400, detail="productPage must be a non-negative integer")
+        grid_state["productPage"] = product_page
         return None
 
     if operation_type == "workspace_view":
@@ -1576,7 +1899,11 @@ def _replay_history_entry(
     if not isinstance(state, (dict, list, str)):
         raise HTTPException(status_code=409, detail="History entry is not replayable")
     operation = entry.get("operation")
-    if operation == "option_values_edit" or (
+    if operation in {
+        "cell_edit", "cell_revert",
+        "option_values_edit", "option_dimension_add", "option_dimension_rename",
+        "option_dimension_reorder", "option_dimension_remove", "variant_add", "variant_remove",
+    } or (
         operation == "value_revert" and entry.get("structural")
     ):
         if not isinstance(state, dict):
@@ -1606,7 +1933,18 @@ def _apply_operations(
     durable_history = deepcopy(history)
     for operation in operations:
         operation_type = operation.get("operation") or operation.get("type")
-        if operation_type == "option_values_edit":
+        if operation_type in {"cell_edit", "cell_revert"}:
+            products, durable_history, history_cursor = _apply_cell_operation(
+                products, working_plan, operation, durable_history, history_cursor
+            )
+        elif operation_type in {
+            "option_dimension_add", "option_dimension_rename", "option_dimension_reorder",
+            "option_dimension_remove", "variant_add", "variant_remove",
+        }:
+            products, durable_history, history_cursor = _apply_structure_operation(
+                products, working_plan, operation, durable_history, history_cursor
+            )
+        elif operation_type == "option_values_edit":
             products, durable_history, history_cursor = _apply_option_value_operation(
                 products,
                 working_plan,
@@ -1647,6 +1985,9 @@ def _apply_operations(
                 durable_history = durable_history[:history_cursor]
                 durable_history.append(entry)
                 history_cursor = len(durable_history)
+    if working_plan.get("review_contract_version") == 5:
+        refreshed = normalize_review_plan_rows(working_plan)
+        working_plan["items"] = refreshed.get("items", working_plan.get("items", []))
     return products, durable_history, history_cursor
 
 
@@ -1702,8 +2043,14 @@ async def create_review_edit_session(
     tenant = require_authenticated_shop_domain(request, payload.get("shop_domain"))
     plan = _require_review_v2(ctx, draft_id, tenant)
     surface = payload.get("surface")
-    if surface not in {"grid", "workbook"}:
-        raise HTTPException(status_code=400, detail="surface must be grid or workbook")
+    if surface != "grid":
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "WORKBOOK_REVIEW_RETIRED",
+                "message": "Edit products directly in the Shopify preview.",
+            },
+        )
     draft = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=tenant)
     if not isinstance(draft, dict):
         raise HTTPException(status_code=404, detail="Draft not found")
@@ -1724,18 +2071,6 @@ async def create_review_edit_session(
 
     products = _products(draft)
     working_file_id: str | None = None
-    if surface == "workbook":
-        working_file_id = str(uuid.uuid4())
-        workbook = create_excel_bytes(_workbook_model(products))
-        save_file(
-            supabase=ctx.supabase,
-            file_id=working_file_id,
-            name=f"working-{draft.get('output_filename') or 'generated-import.xlsx'}",
-            content=workbook,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            file_origin="review_working_copy",
-            shop_domain=tenant,
-        )
     now = _now()
     session = _service(ctx).save_review_edit_session(
         {
@@ -1800,7 +2135,10 @@ async def patch_review_edit_session(
                 for operation in raw_operations
                 if isinstance(operation, dict)
                 and (operation.get("type") or operation.get("operation"))
-                == "option_values_edit"
+                in {
+                    "option_values_edit", "option_dimension_add", "option_dimension_rename",
+                    "option_dimension_reorder", "option_dimension_remove", "variant_add", "variant_remove",
+                }
             ),
             None,
         )
@@ -1831,7 +2169,7 @@ async def patch_review_edit_session(
     latest_plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
     if not isinstance(latest_plan, dict):
         raise _conflict("Mutation plan is missing")
-    if latest_plan.get("review_contract_version") not in {2, 3, 4}:
+    if latest_plan.get("review_contract_version") not in {2, 3, 4, 5}:
         raise HTTPException(
             status_code=409,
             detail={
@@ -1854,9 +2192,11 @@ async def patch_review_edit_session(
     grid_state = deepcopy(session.get("grid_state"))
     if not isinstance(grid_state, dict):
         grid_state = {
-            "filterValues": {"changes": "hide_deferred"},
+            "filterValues": {"productStatus": "all"},
             "expandedItemIds": [],
+            "expansionInitialized": False,
             "pagesByItem": {},
+            "productPage": 0,
         }
     if operations is None:
         changes = payload.get("changes")

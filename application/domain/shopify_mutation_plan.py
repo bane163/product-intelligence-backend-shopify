@@ -58,7 +58,14 @@ DEFERRED_FIELDS = {
     "google_custom_label_4": "TODO_GOOGLE_SHOPPING",
 }
 VALID_STATUSES = {"ACTIVE", "ARCHIVED", "DRAFT", "UNLISTED"}
-VALUE_ORIGINS = {"source", "ai_assisted", "merchant_edited", "derived", "unknown"}
+VALUE_ORIGINS = {
+    "source",
+    "ai_assisted",
+    "merchant_edited",
+    "derived",
+    "defaulted",
+    "unknown",
+}
 HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 MAX_OPTIONS = 3
 MAX_VARIANTS = 2048
@@ -1223,6 +1230,251 @@ def _technical_review_row(row: dict[str, Any]) -> bool:
     return namespace == "extractor" or field == "type" or "confidence" in subject
 
 
+def _preview_cell_id(item: dict[str, Any], scope: str, subject: Any, column: str) -> str:
+    """Return an identity that survives plan regeneration and row reordering."""
+    identity = "\x1f".join(
+        (
+            str(item.get("source_index", item.get("item_id", ""))),
+            scope.strip().casefold(),
+            json.dumps(subject, sort_keys=True, separators=(",", ":"))
+            if isinstance(subject, dict)
+            else str(subject or "").strip().casefold(),
+            column.strip().casefold(),
+        )
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _preview_column(field: str, scope: str) -> str:
+    product_columns = {
+        "descriptionHtml": "description",
+        "productType": "type",
+        "seo.title": "seoTitle",
+        "seo.description": "seoDescription",
+    }
+    variant_columns = {
+        "compareAtPrice": "compareAtPrice",
+        "inventoryItem.cost": "cost",
+        "inventoryItem.tracked": "inventoryTracker",
+        "inventoryItem.requiresShipping": "requiresShipping",
+        "inventoryItem.weight.value": "weightGrams",
+        "inventoryItem.weight.unit": "weightUnit",
+        "inventory_quantity": "inventoryQuantity",
+    }
+    if scope == "product":
+        return product_columns.get(field, field)
+    if scope == "metafield":
+        return field
+    return variant_columns.get(field, field)
+
+
+def _preview_cell(
+    item: dict[str, Any],
+    *,
+    column: str,
+    scope: str,
+    subject: str,
+    subject_identity: dict[str, Any] | None,
+    value_path: str,
+    current: Any,
+    proposed: Any,
+    row: dict[str, Any] | None,
+    required: bool = False,
+    live_variant: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    source = row if isinstance(row, dict) else {}
+    identity: Any = (
+        subject_identity
+        if isinstance(subject_identity, dict)
+        else ("product" if scope == "product" else subject)
+    )
+    field = str(source.get("field") or (value_path.split("].", 1)[-1] if "]." in value_path else value_path))
+    fallback_schema = _review_row(
+        scope=scope,
+        subject=subject,
+        subject_identity=subject_identity,
+        field=field,
+        current=current,
+        proposed=proposed,
+        disposition="applicable",
+        change_kind="updated",
+    )["edit_schema"]
+    quality = [
+        deepcopy(issue)
+        for issue in item.get("quality_issues", [])
+        if isinstance(issue, dict)
+        and issue.get("value_path") in {None, "", value_path}
+    ]
+    cell = {
+        "cell_id": _preview_cell_id(item, scope, identity, column),
+        "column_key": column,
+        "field": field,
+        "scope": scope,
+        "subject": subject,
+        "value_path": value_path,
+        "current": deepcopy(current),
+        "proposed": deepcopy(proposed),
+        "original_proposed": deepcopy(source.get("original_proposed", proposed)),
+        "change_id": source.get("change_id"),
+        "included": bool(source.get("included", item.get("selected", False))),
+        "disposition": source.get("disposition", "unchanged"),
+        "editable": bool(source.get("editable", scope in {"product", "variant", "inventory", "metafield"})),
+        "required": bool(required or source.get("required")),
+        "edit_schema": deepcopy(
+            source.get("edit_schema")
+            if isinstance(source.get("edit_schema"), dict)
+            else fallback_schema
+        ),
+        "origin": source.get("origin", "unknown"),
+        "quality_issues": quality,
+    }
+    if isinstance(subject_identity, dict):
+        cell["subject_identity"] = deepcopy(subject_identity)
+    for key in ("source_ref", "source_refs"):
+        if key in source:
+            cell[key] = deepcopy(source[key])
+    if isinstance(live_variant, dict):
+        cell["live_variant_impact"] = {
+            "live": True,
+            "product_id": item.get("resolved_product_id"),
+            "variant_id": live_variant.get("id"),
+        }
+    return cell
+
+
+def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
+    """Author the v5 cell contract from mutation authority, never client guesses."""
+    proposed = item.get("proposed") if isinstance(item.get("proposed"), dict) else {}
+    live = item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else {}
+    rows = [row for row in item.get("review_changes", []) if isinstance(row, dict)]
+
+    def row_for(scope: str, field: str, identity: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        matches = [row for row in rows if row.get("scope") == scope and row.get("field") == field]
+        if identity is not None:
+            matches = [row for row in matches if row.get("subject_identity") == identity]
+        return matches[0] if len(matches) == 1 else None
+
+    product_fields = (
+        ("title", "title"),
+        ("handle", "handle"),
+        ("descriptionHtml", "description"),
+        ("vendor", "vendor"),
+        ("productType", "type"),
+        ("tags", "tags"),
+        ("status", "status"),
+        ("seo.title", "seoTitle"),
+        ("seo.description", "seoDescription"),
+    )
+    product_cells: list[dict[str, Any]] = []
+    for field, column in product_fields:
+        proposed_value = proposed.get(field)
+        current_value = live.get(field)
+        if field.startswith("seo."):
+            nested = field.split(".", 1)[1]
+            proposed_value = (proposed.get("seo") or {}).get(nested) if isinstance(proposed.get("seo"), dict) else None
+            current_value = (live.get("seo") or {}).get(nested) if isinstance(live.get("seo"), dict) else None
+        row = row_for("product", field)
+        if field == "status" and not _text(proposed_value) and not live:
+            proposed_value = "DRAFT"
+            if row is None:
+                row = _review_row(
+                    scope="product", subject=str(proposed.get("title") or "Product"),
+                    field="status", current=None, proposed="DRAFT", disposition="applicable",
+                    change_kind="added",
+                )
+                row.update({"origin": "defaulted", "included": True, "editable": True})
+        product_cells.append(_preview_cell(
+            item, column=column, scope="product", subject=str(proposed.get("title") or "Product"),
+            subject_identity=None, value_path=field, current=current_value,
+            proposed=proposed_value, row=row, required=field == "title",
+        ))
+
+    option_names = _schema_from_product(proposed)
+    visible_option_names = (
+        []
+        if _is_placeholder_schema(option_names, _variants(proposed))
+        else option_names
+    )
+    live_option_names = _schema_from_product(live)
+    live_variants = _variants(live)
+    variant_cells: list[dict[str, Any]] = []
+    variant_rows: list[dict[str, Any]] = []
+    variant_fields = (
+        "sku", "barcode", "price", "compareAtPrice", "taxable", "taxCode",
+        "inventoryPolicy", "inventory_quantity", "inventoryItem.cost",
+        "inventoryItem.tracked", "inventoryItem.requiresShipping",
+        "inventoryItem.weight.value", "inventoryItem.weight.unit",
+    )
+    for index, variant in enumerate(_variants(proposed) or [{}]):
+        identity = _variant_subject_identity(variant, option_names)
+        subject = _variant_subject(variant, option_names)
+        live_variant = next(
+            (candidate for candidate in live_variants if _canonical_combo(candidate, live_option_names) == _canonical_combo(variant, option_names)),
+            None,
+        )
+        flat = _flatten_variant(variant)
+        live_flat = _flatten_variant(live_variant) if isinstance(live_variant, dict) else {}
+        cells: list[dict[str, Any]] = []
+        for option_index, option_name in enumerate(visible_option_names[:3]):
+            values = dict(_variant_pairs(variant, option_names))
+            live_values = dict(_variant_pairs(live_variant or {}, live_option_names))
+            cells.append(_preview_cell(
+                item, column=f"option{option_index + 1}Value", scope="variant", subject=subject,
+                subject_identity=identity, value_path=f"variant[{_normalized_path_part(subject)}].option{option_index + 1}",
+                current=live_values.get(option_name), proposed=values.get(option_name), row=None,
+                live_variant=live_variant,
+            ))
+        for field in variant_fields:
+            row = row_for("inventory" if field == "inventory_quantity" else "variant", field, identity)
+            if row is None and field.startswith("inventoryItem."):
+                row = row_for("variant", field, identity)
+            required = not live and field in {"sku", "price"}
+            cells.append(_preview_cell(
+                item, column=_preview_column(field, "variant"),
+                scope="inventory" if field == "inventory_quantity" else "variant",
+                subject=subject, subject_identity=identity,
+                value_path=(row or {}).get("value_path", f"variant[{_normalized_path_part(subject)}].{field}"),
+                current=live_flat.get(field), proposed=flat.get(field), row=row,
+                required=required, live_variant=live_variant,
+            ))
+        variant_cells.extend(cells)
+        variant_rows.append({
+            "row_id": _preview_cell_id(item, "variant", identity or subject, "row"),
+            "subject": subject,
+            "subject_identity": deepcopy(identity),
+            "live_variant": isinstance(live_variant, dict),
+            "cells": cells,
+        })
+
+    metafield_cells = []
+    for row in rows:
+        if row.get("scope") != "metafield" or row.get("presentation") == "hidden":
+            continue
+        metafield_cells.append(_preview_cell(
+            item, column=f"product.metafields.{row.get('subject')}", scope="metafield",
+            subject=str(row.get("subject") or ""), subject_identity=None,
+            value_path=str(row.get("value_path") or ""), current=row.get("current"),
+            proposed=row.get("proposed"), row=row,
+        ))
+    option_dimensions = [
+        {
+            "dimension_id": _preview_cell_id(item, "option", option.get("name"), "dimension"),
+            "name": str(option.get("name") or ""),
+            "position": index + 1,
+            "values": _option_values(option),
+            "live_variant_impact": any(_fold(option.get("name")) == _fold(name) for name in live_option_names),
+        }
+        for index, option in enumerate(_raw_options(proposed))
+        if not (_fold(option.get("name")) == "title" and _option_values(option) == ["Default Title"])
+    ]
+    return {
+        "product": {"cells": product_cells},
+        "variants": variant_rows,
+        "option_dimensions": option_dimensions,
+        "metafield_cells": metafield_cells,
+    }
+
+
 def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
     """Hydrate the additive v2 row presentation and edit-safety contract.
 
@@ -1231,7 +1483,7 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
     and prevents a missing or stale ``editable`` value from granting access.
     """
     normalized = deepcopy(plan)
-    if normalized.get("review_contract_version") not in {2, 3, 4}:
+    if normalized.get("review_contract_version") not in {2, 3, 4, 5}:
         return normalized
     items = normalized.get("items")
     if not isinstance(items, list):
@@ -1305,6 +1557,8 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
                 and disposition in {"applicable", "blocked"}
                 and target_exists
             )
+        if normalized.get("review_contract_version") == 5:
+            item["review_preview"] = build_review_preview(item)
     return normalized
 
 
@@ -2454,6 +2708,54 @@ def build_review_plan_item(
         blockers=blockers_copy,
         unapplied=unapplied_copy,
     )
+    option_names = _schema_from_product(proposed_copy)
+    for variant in _variants(proposed_copy):
+        subject = _variant_subject(variant, option_names)
+        identity = _variant_subject_identity(variant, option_names)
+        flat = _flatten_variant(variant)
+        for required_field in ("sku", "price"):
+            required_value = flat.get(required_field)
+            if required_value is not None and str(required_value).strip():
+                continue
+            existing_required = next(
+                (
+                    row
+                    for row in exact_review
+                    if row.get("scope") == "variant"
+                    and row.get("field") == required_field
+                    and row.get("subject_identity") == identity
+                ),
+                None,
+            )
+            if isinstance(existing_required, dict):
+                existing_required["disposition"] = "blocked"
+                existing_required["included"] = False
+                existing_required["selectable"] = False
+                existing_required["required"] = True
+                existing_required.setdefault("reason_codes", []).append(
+                    f"{required_field.upper()}_REQUIRED"
+                )
+                existing_required.setdefault("edit_schema", {})["required"] = True
+                blockers_copy.append(
+                    {"code": f"{required_field.upper()}_REQUIRED", "field": existing_required["value_path"], "remedies": ["edit", "skip"]}
+                )
+                continue
+            synthetic = _review_row(
+                scope="variant",
+                subject=subject,
+                subject_identity=identity,
+                field=required_field,
+                current=None,
+                proposed=flat.get(required_field),
+                disposition="blocked",
+                change_kind="rejected",
+                reason_codes=[f"{required_field.upper()}_REQUIRED"],
+            )
+            synthetic["edit_schema"]["required"] = True
+            exact_review.extend(_decorate_review_rows([synthetic], imported))
+            blockers_copy.append(
+                {"code": f"{required_field.upper()}_REQUIRED", "field": synthetic["value_path"], "remedies": ["edit", "skip"]}
+            )
     previous = prior_item if isinstance(prior_item, dict) else {}
     prior_rows = [
         row for row in previous.get("review_changes", []) if isinstance(row, dict)

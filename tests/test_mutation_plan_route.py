@@ -720,7 +720,8 @@ async def test_structured_only_trail_tee_mug_and_daypack_updates_start_selected(
         <= {change["field"] for change in item["applicable_changes"]}
         for item in items
     )
-    assert response.json()["plan"]["review_contract_version"] == 4
+    assert response.json()["plan"]["review_contract_version"] == 5
+    assert all(item["review_preview"]["variants"] for item in items)
     assert response.json()["plan"]["inventory_context"]["status"] == "ready"
     assert all(item["unapplied"] == [] for item in items)
     assert all(

@@ -71,6 +71,26 @@ MAX_OPTIONS = 3
 MAX_VARIANTS = 2048
 MAX_INVENTORY_QUANTITY = 1_000_000_000
 
+# Deliberately small, deterministic vocabularies.  Positional option headers are
+# only promoted when every value in the dimension belongs to exactly one class.
+# This is intentionally not fuzzy: uncertain source data remains a merchant
+# correction instead of becoming mutation authority.
+_POSITIONAL_OPTION_CLASSIFIERS: dict[str, set[str]] = {
+    "Size": {
+        "xxs", "xs", "s", "m", "l", "xl", "xxl", "xxxl",
+        "small", "medium", "large", "one size", "one-size",
+    },
+    "Color": {
+        "red", "orange", "yellow", "green", "blue", "purple", "pink",
+        "black", "white", "gray", "grey", "brown", "beige", "navy",
+        "teal", "gold", "silver", "cream", "ivory", "maroon", "coral",
+    },
+    "Material": {
+        "cotton", "linen", "wool", "silk", "polyester", "nylon",
+        "leather", "canvas", "denim", "cashmere", "rayon", "bamboo",
+    },
+}
+
 _VARIANT_ALIASES = {
     "sku": ("sku",),
     "price": ("price",),
@@ -207,6 +227,96 @@ def _schema_from_product(product: dict[str, Any]) -> list[str]:
             if pairs:
                 return [name for name, _ in pairs]
     return []
+
+
+def infer_positional_option_dimensions(product: dict[str, Any]) -> bool:
+    """Materialize high-confidence option names and retain unresolved positions.
+
+    Returns whether the product changed.  The private repair metadata is kept on
+    the draft so an unresolved positional dimension has a stable server-issued
+    identity across plan regeneration and edit sessions.
+    """
+    variants = _variants(product)
+    if not variants or _schema_from_product(product):
+        return False
+    highest = 0
+    for variant in variants:
+        for position in range(1, MAX_OPTIONS + 1):
+            if _text(variant.get(f"option{position}")):
+                highest = max(highest, position)
+    if highest == 0:
+        return False
+
+    dimensions: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    all_resolved = True
+    for position in range(1, highest + 1):
+        values = [_text(variant.get(f"option{position}")) for variant in variants]
+        complete = all(values)
+        matches = [
+            name
+            for name, vocabulary in _POSITIONAL_OPTION_CLASSIFIERS.items()
+            if complete and all(_fold(value) in vocabulary for value in values)
+        ]
+        inferred = matches[0] if len(matches) == 1 and _fold(matches[0]) not in used_names else ""
+        if inferred:
+            used_names.add(_fold(inferred))
+        else:
+            all_resolved = False
+        unique_values = list(dict.fromkeys(str(value) for value in values if value))
+        dimensions.append(
+            {
+                "dimension_id": f"source-option-{position}",
+                "position": position,
+                "name": inferred,
+                "values": unique_values,
+                "origin": "derived" if inferred else "unknown",
+                "requires_name": not bool(inferred),
+            }
+        )
+
+    changed = product.get("_review_option_dimensions") != dimensions
+    product["_review_option_dimensions"] = dimensions
+    if not all_resolved:
+        return changed
+
+    options = [
+        {
+            "name": dimension["name"],
+            "position": dimension["position"],
+            "values": [{"name": value} for value in dimension["values"]],
+        }
+        for dimension in dimensions
+    ]
+    product.pop("options", None)
+    product["productOptions"] = options
+    for variant in variants:
+        variant["optionValues"] = [
+            {
+                "optionName": dimension["name"],
+                "name": str(variant.get(f"option{dimension['position']}") or "").strip(),
+            }
+            for dimension in dimensions
+        ]
+    origins = product.get("value_origins")
+    if not isinstance(origins, dict):
+        origins = {}
+        product["value_origins"] = origins
+    for dimension in dimensions:
+        origins[f"options[{dimension['position'] - 1}].name"] = "derived"
+    refs = product.get("source_refs")
+    if isinstance(refs, list):
+        product["source_refs"] = [
+            ref for ref in refs
+            if not (
+                isinstance(ref, dict)
+                and re.fullmatch(
+                    r"(?:productOptions|options)\[\d+\]\.name",
+                    str(ref.get("value_path") or ""),
+                )
+            )
+        ]
+    return True
 
 
 def _is_placeholder_schema(names: list[str], variants: list[dict[str, Any]]) -> bool:
@@ -987,6 +1097,13 @@ def _value_path(row: dict[str, Any]) -> str:
     field = str(row.get("field") or "value")
     if scope == "product":
         return field
+    identity = row.get("subject_identity")
+    if (
+        scope in {"variant", "inventory"}
+        and isinstance(identity, dict)
+        and isinstance(identity.get("source_variant_index"), int)
+    ):
+        return f"variants[{identity['source_variant_index']}].{field}"
     return f"{scope}[{_normalized_path_part(row.get('subject'))}].{field}"
 
 
@@ -1121,6 +1238,11 @@ def _decorate_review_rows(
                 )
                 or row.get("scope") == "option"
                 or row.get("field") == "variant"
+                or (
+                    origin == "derived"
+                    and row.get("scope") == "variant"
+                    and row.get("field") == "sku"
+                )
             )
         )
         if isinstance(row.get("edit_schema"), dict) and row["edit_schema"].get(
@@ -1209,6 +1331,14 @@ def _review_row_target_exists(item: dict[str, Any], row: dict[str, Any]) -> bool
             for option in options
         )
     if scope in {"variant", "inventory"}:
+        identity = row.get("subject_identity")
+        repair_source = item.get("_repair_source")
+        if (
+            isinstance(identity, dict)
+            and isinstance(identity.get("source_variant_index"), int)
+            and isinstance(repair_source, dict)
+        ):
+            return 0 <= identity["source_variant_index"] < len(_variants(repair_source))
         return _unique_variant_target(proposed, row) is not None
     if scope == "metafield":
         metafields = proposed.get("metafields")
@@ -1345,6 +1475,11 @@ def _preview_cell(
 def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
     """Author the v5 cell contract from mutation authority, never client guesses."""
     proposed = item.get("proposed") if isinstance(item.get("proposed"), dict) else {}
+    repair_source = (
+        item.get("_repair_source")
+        if isinstance(item.get("_repair_source"), dict)
+        else proposed
+    )
     live = item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else {}
     rows = [row for row in item.get("review_changes", []) if isinstance(row, dict)]
 
@@ -1389,7 +1524,16 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
             proposed=proposed_value, row=row, required=field == "title",
         ))
 
-    option_names = _schema_from_product(proposed)
+    repair_dimensions = (
+        repair_source.get("_review_option_dimensions")
+        if isinstance(repair_source.get("_review_option_dimensions"), list)
+        else []
+    )
+    option_names = _schema_from_product(repair_source) or [
+        str(dimension.get("name") or f"Option {index + 1}")
+        for index, dimension in enumerate(repair_dimensions)
+        if isinstance(dimension, dict)
+    ]
     visible_option_names = (
         []
         if _is_placeholder_schema(option_names, _variants(proposed))
@@ -1405,8 +1549,19 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
         "inventoryItem.tracked", "inventoryItem.requiresShipping",
         "inventoryItem.weight.value", "inventoryItem.weight.unit",
     )
-    for index, variant in enumerate(_variants(proposed) or [{}]):
-        identity = _variant_subject_identity(variant, option_names)
+    preview_variants = _variants(repair_source) or _variants(proposed) or [{}]
+    for index, variant in enumerate(preview_variants):
+        source_backed = index < len(_variants(repair_source))
+        combo_identity = _variant_subject_identity(variant, option_names)
+        identity = (
+            {**combo_identity, "source_variant_index": index}
+            if source_backed and isinstance(combo_identity, dict)
+            else (
+                {"kind": "source_variant", "source_variant_index": index}
+                if source_backed
+                else combo_identity
+            )
+        )
         subject = _variant_subject(variant, option_names)
         live_variant = next(
             (candidate for candidate in live_variants if _canonical_combo(candidate, live_option_names) == _canonical_combo(variant, option_names)),
@@ -1417,11 +1572,12 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
         cells: list[dict[str, Any]] = []
         for option_index, option_name in enumerate(visible_option_names[:3]):
             values = dict(_variant_pairs(variant, option_names))
+            positional_value = _text(variant.get(f"option{option_index + 1}"))
             live_values = dict(_variant_pairs(live_variant or {}, live_option_names))
             cells.append(_preview_cell(
                 item, column=f"option{option_index + 1}Value", scope="variant", subject=subject,
                 subject_identity=identity, value_path=f"variant[{_normalized_path_part(subject)}].option{option_index + 1}",
-                current=live_values.get(option_name), proposed=values.get(option_name), row=None,
+                current=live_values.get(option_name), proposed=values.get(option_name) or positional_value, row=None,
                 live_variant=live_variant,
             ))
         for field in variant_fields:
@@ -1443,6 +1599,11 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
             "subject": subject,
             "subject_identity": deepcopy(identity),
             "live_variant": isinstance(live_variant, dict),
+            "source_variant_index": index if source_backed else None,
+            "repair_state": "blocked" if any(
+                str(blocker.get("field") or "").startswith(f"variants[{index}]")
+                for blocker in item.get("blockers", []) if isinstance(blocker, dict)
+            ) else "valid",
             "cells": cells,
         })
 
@@ -1467,6 +1628,20 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
         for index, option in enumerate(_raw_options(proposed))
         if not (_fold(option.get("name")) == "title" and _option_values(option) == ["Default Title"])
     ]
+    if repair_dimensions:
+        option_dimensions = [
+            {
+                "dimension_id": str(dimension.get("dimension_id") or f"source-option-{index + 1}"),
+                "name": str(dimension.get("name") or ""),
+                "position": int(dimension.get("position") or index + 1),
+                "values": [str(value) for value in dimension.get("values", [])],
+                "origin": str(dimension.get("origin") or "unknown"),
+                "requires_name": bool(dimension.get("requires_name")),
+                "live_variant_impact": False,
+            }
+            for index, dimension in enumerate(repair_dimensions)
+            if isinstance(dimension, dict)
+        ]
     return {
         "product": {"cells": product_cells},
         "variants": variant_rows,
@@ -1558,7 +1733,9 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
                 and target_exists
             )
         if normalized.get("review_contract_version") == 5:
-            item["review_preview"] = build_review_preview(item)
+            if "_repair_source" in item or not isinstance(item.get("review_preview"), dict):
+                item["review_preview"] = build_review_preview(item)
+            item.pop("_repair_source", None)
     return normalized
 
 
@@ -2708,8 +2885,79 @@ def build_review_plan_item(
         blockers=blockers_copy,
         unapplied=unapplied_copy,
     )
+    # Every source variant gets stable scalar repair rows, including variants
+    # rejected from the executable proposal.  Source index, rather than option
+    # identity, keeps duplicates independently editable.
+    repair_names = _schema_from_product(imported)
+    repair_dimensions = imported.get("_review_option_dimensions")
+    if not repair_names and isinstance(repair_dimensions, list):
+        repair_names = [
+            str(dimension.get("name") or f"Option {index + 1}")
+            for index, dimension in enumerate(repair_dimensions)
+            if isinstance(dimension, dict)
+        ]
+    source_variants = _variants(imported)
+    proposed_variants_for_repair = _variants(proposed_copy)
+    source_rows: list[dict[str, Any]] = []
+    for source_variant_index, variant in enumerate(source_variants):
+        combo_identity = _variant_subject_identity(variant, repair_names)
+        identity = (
+            {**combo_identity, "source_variant_index": source_variant_index}
+            if isinstance(combo_identity, dict)
+            else {
+                "kind": "source_variant",
+                "source_variant_index": source_variant_index,
+            }
+        )
+        subject = _variant_subject(variant, repair_names)
+        flattened = _flatten_variant(variant)
+        if source_variant_index < len(proposed_variants_for_repair):
+            flattened = {
+                **_flatten_variant(proposed_variants_for_repair[source_variant_index]),
+                **flattened,
+            }
+        for field in dict.fromkeys([*flattened, "sku", "price"]):
+            if field == "inventory_quantity" or field.startswith("inventoryItem."):
+                continue
+            targeted = [
+                str(blocker.get("code"))
+                for blocker in blockers_copy
+                if isinstance(blocker, dict)
+                and str(blocker.get("field") or "").startswith(
+                    f"variants[{source_variant_index}]"
+                )
+            ]
+            value = flattened.get(field)
+            required_missing = field in {"sku", "price"} and (
+                value is None or not str(value).strip()
+            )
+            row = _review_row(
+                scope=(
+                    "inventory"
+                    if field == "inventory_quantity"
+                    or (field == "inventoryItem.tracked" and "inventory_quantity" in flattened)
+                    else "variant"
+                ),
+                subject=subject,
+                subject_identity=identity,
+                field=field,
+                current=None,
+                proposed=value,
+                disposition="blocked" if targeted or required_missing else "applicable",
+                change_kind="rejected" if targeted else "added",
+                reason_codes=list(dict.fromkeys(targeted)),
+            )
+            if field in {"sku", "price"}:
+                row["edit_schema"]["required"] = True
+            source_rows.append(row)
+    if source_rows:
+        exact_review = [
+            row for row in exact_review
+            if row.get("scope") != "variant"
+        ]
+        exact_review.extend(_decorate_review_rows(source_rows, imported))
     option_names = _schema_from_product(proposed_copy)
-    for variant in _variants(proposed_copy):
+    for proposed_variant_index, variant in enumerate(_variants(proposed_copy)):
         subject = _variant_subject(variant, option_names)
         identity = _variant_subject_identity(variant, option_names)
         flat = _flatten_variant(variant)
@@ -2723,7 +2971,11 @@ def build_review_plan_item(
                     for row in exact_review
                     if row.get("scope") == "variant"
                     and row.get("field") == required_field
-                    and row.get("subject_identity") == identity
+                    and (
+                        row.get("subject_identity") == identity
+                        or row.get("value_path")
+                        == f"variants[{proposed_variant_index}].{required_field}"
+                    )
                 ),
                 None,
             )
@@ -2903,6 +3155,13 @@ def build_review_plan_item(
     elif live and not changes:
         resolved_operation = "unchanged"
     selectable = resolved_operation in {"create", "update"} and bool(changes)
+    selection_intent = str(previous.get("selection_intent") or "").lower()
+    if selection_intent not in {"include", "exclude"}:
+        selection_intent = (
+            "exclude"
+            if previous.get("selectable") is True and previous.get("selected") is False
+            else "include"
+        )
     item = {
         "item_id": str(item_id),
         "currency_code": str(currency_code),
@@ -2917,9 +3176,11 @@ def build_review_plan_item(
         "applicable_changes": changes,
         "review_changes": exact_review,
         "selectable": selectable,
-        "selected": bool(selectable and previous.get("selected", True)),
+        "selected": bool(selectable and selection_intent == "include"),
+        "selection_intent": selection_intent,
         "remedy": None,
         "execution": None,
+        "_repair_source": imported,
     }
     return normalize_review_plan_rows({"review_contract_version": 2, "items": [item]})[
         "items"

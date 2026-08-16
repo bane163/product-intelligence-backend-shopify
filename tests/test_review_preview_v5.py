@@ -5,6 +5,8 @@ import pytest
 from api.agents.review_edit_sessions import _apply_cell_operation, _transform_structure
 from application.domain.shopify_mutation_plan import (
     build_review_plan_item,
+    infer_positional_option_dimensions,
+    merge_structured_product,
     normalize_review_plan_rows,
 )
 
@@ -162,3 +164,71 @@ def test_cell_edit_creates_an_effective_change_for_an_unchanged_preview_cell():
         row["field"] == "vendor" and row["proposed"] == "Northwind"
         for row in rebuilt["review_changes"]
     )
+
+
+def test_positional_size_and_color_are_derived_with_three_source_rows():
+    product = {
+        "title": "T-shirt",
+        "variants": [
+            {"option1": "S", "option2": "Red", "sku": "TEE-S", "price": 20},
+            {"option1": "M", "option2": "Red", "sku": "TEE-M", "price": 20},
+            {"option1": "L", "option2": "Red", "sku": "TEE-L", "price": 20},
+        ],
+    }
+    assert infer_positional_option_dimensions(product)
+    proposed, blockers, _ = merge_structured_product(None, product, {"title": "T-shirt"})
+    assert blockers == []
+    item = build_review_plan_item(
+        item_id="tee", currency_code="USD", source_index=0,
+        source_product=product, live_snapshot=None, proposed=proposed,
+        operation="create",
+    )
+    item = normalize_review_plan_rows(
+        {"review_contract_version": 5, "items": [item]}
+    )["items"][0]
+
+    assert [dimension["name"] for dimension in item["review_preview"]["option_dimensions"]] == ["Size", "Color"]
+    assert all(
+        dimension["origin"] == "derived" and not dimension["requires_name"]
+        for dimension in item["review_preview"]["option_dimensions"]
+    )
+    assert [row["source_variant_index"] for row in item["review_preview"]["variants"]] == [0, 1, 2]
+    assert [
+        next(cell["value_path"] for cell in row["cells"] if cell["column_key"] == "sku")
+        for row in item["review_preview"]["variants"]
+    ] == ["variants[0].sku", "variants[1].sku", "variants[2].sku"]
+
+
+def test_ambiguous_positional_dimension_stays_visible_until_merchant_names_it():
+    product = {
+        "title": "Poster",
+        "variants": [
+            {"option1": "Classic", "sku": "POSTER-C", "price": 12},
+            {"option1": "Modern", "sku": "POSTER-M", "price": 12},
+        ],
+    }
+    assert infer_positional_option_dimensions(product)
+    proposed, blockers, _ = merge_structured_product(None, product, {"title": "Poster"})
+    item = build_review_plan_item(
+        item_id="poster", currency_code="USD", source_index=0,
+        source_product=product, live_snapshot=None, proposed=proposed,
+        operation="create", blockers=blockers,
+    )
+    item = normalize_review_plan_rows(
+        {"review_contract_version": 5, "items": [item]}
+    )["items"][0]
+    dimension = item["review_preview"]["option_dimensions"][0]
+    assert dimension["name"] == "" and dimension["requires_name"]
+    assert len(item["review_preview"]["variants"]) == 2
+
+    renamed = _transform_structure(
+        product,
+        item,
+        {
+            "operation": "option_dimension_rename",
+            "dimension_id": dimension["dimension_id"],
+            "name": "Style",
+        },
+    )
+    assert renamed["productOptions"][0]["name"] == "Style"
+    assert renamed["_review_option_dimensions"][0]["origin"] == "merchant_edited"

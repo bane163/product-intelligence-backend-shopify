@@ -16,6 +16,7 @@ import shopify_session_store
 from app_context import AppContext, get_ctx
 from application.domain.shopify_mutation_plan import (
     build_review_plan_item,
+    infer_positional_option_dimensions,
     materialize_execution_proposed,
     materialize_inventory_operations,
     merge_structured_product,
@@ -28,6 +29,15 @@ from application.domain.extraction_quality import (
     QUALITY_STATUS_READY,
     build_quality_report,
     issues_for_product,
+)
+from application.domain.sku_autocorrection import (
+    carry_forward_required_live_values,
+    generate_missing_skus,
+    variant_option_pairs,
+)
+from application.domain.review_value_paths import (
+    canonical_value_path,
+    normalized_path_part,
 )
 from shopify import SHOPIFY_REAUTH_REQUIRED, ShopifyClient
 from .utils import require_authenticated_shop_domain
@@ -227,6 +237,173 @@ def _save_quality_state(
     )
 
 
+def _save_corrected_products(
+    ctx: AppContext, draft: dict[str, Any], products: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Persist one atomic autocorrection revision, preserving draft metadata."""
+    return ctx.supabase.drafts.save_product_draft(
+        draft_id=str(draft["draft_id"]),
+        run_id=draft.get("run_id"),
+        import_mode=str(draft.get("import_mode") or "auto"),
+        draft_name=draft.get("draft_name"),
+        shop_domain=draft.get("shop_domain"),
+        input_file_id=draft.get("input_file_id"),
+        input_filename=draft.get("input_filename"),
+        output_file_id=draft.get("output_file_id"),
+        output_filename=draft.get("output_filename"),
+        extraction_status=draft.get("extraction_status"),
+        extraction_run_id=draft.get("extraction_run_id"),
+        extraction_error=draft.get("extraction_error"),
+        quality_gate_status=QUALITY_STATUS_LIVE_PENDING,
+        quality_report=draft.get("quality_report"),
+        quality_checked_at=draft.get("quality_checked_at"),
+        submit_status=draft.get("submit_status"),
+        submit_run_id=draft.get("submit_run_id"),
+        submit_error=draft.get("submit_error"),
+        ai_enhancements_enabled=bool(draft.get("ai_enhancements_enabled", True)),
+        revision=int(draft.get("revision") or 1) + 1,
+        products=products,
+    )
+
+
+def _variants(product: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = product.get("variants")
+    if isinstance(raw, dict):
+        raw = raw.get("nodes")
+    return (
+        [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, list)
+        else []
+    )
+
+
+def _mark_derived_sku(product: dict[str, Any], variant_index: int, sku: str) -> None:
+    variants = _variants(product)
+    variant = variants[variant_index]
+    variant["sku"] = sku
+    value_path = f"variants[{variant_index}].sku"
+    pairs = variant_option_pairs(variant, [])
+    subject = " / ".join(f"{name}: {value}" for name, value in pairs)
+    canonical_path = (
+        f"variant[{normalized_path_part(subject)}].sku" if subject else value_path
+    )
+    for key in ("value_origins", "_value_origins"):
+        origins = product.get(key)
+        if not isinstance(origins, dict):
+            origins = {}
+            product[key] = origins
+        origins[value_path] = "derived"
+        origins[canonical_path] = "derived"
+    refs = product.get("source_refs")
+    if isinstance(refs, list):
+        product["source_refs"] = [
+            ref
+            for ref in refs
+            if not (
+                isinstance(ref, dict)
+                and canonical_value_path(ref.get("value_path") or ref.get("field"))
+                in {
+                    canonical_value_path(value_path),
+                    canonical_value_path(canonical_path),
+                }
+            )
+        ]
+
+
+async def _resolve_live_product(
+    client: ShopifyClient,
+    product: dict[str, Any],
+    selected_location: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    handle = str(product.get("handle") or "").strip().lower()
+    if not handle:
+        return None
+    result = await client.graphql(
+        PRODUCT_BY_HANDLE_QUERY, {"query": f"handle:{handle}"}
+    )
+    raw_nodes = result.get("data", {}).get("products", {}).get("nodes", [])
+    nodes = [
+        item
+        for item in raw_nodes
+        if isinstance(item, dict)
+        and str(item.get("handle") or "").strip().lower() == handle
+    ]
+    if len(nodes) != 1:
+        return None
+    live = nodes[0]
+    connection = live.get("variants") if isinstance(live.get("variants"), dict) else {}
+    variant_nodes = [
+        item for item in connection.get("nodes", []) if isinstance(item, dict)
+    ]
+    page_info = (
+        connection.get("pageInfo")
+        if isinstance(connection.get("pageInfo"), dict)
+        else {}
+    )
+    while (
+        page_info.get("hasNextPage")
+        and page_info.get("endCursor")
+        and len(variant_nodes) <= 2048
+    ):
+        page_result = await client.graphql(
+            PRODUCT_VARIANTS_PAGE_QUERY,
+            {"id": live["id"], "after": page_info["endCursor"]},
+        )
+        page = page_result.get("data", {}).get("product", {}).get("variants", {})
+        variant_nodes.extend(
+            item for item in page.get("nodes", []) if isinstance(item, dict)
+        )
+        page_info = (
+            page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {}
+        )
+    live["variants"] = {"nodes": variant_nodes}
+    if not selected_location:
+        return live
+    inventory_result = await client.graphql(
+        INVENTORY_SNAPSHOT_QUERY,
+        {"id": live["id"], "locationId": selected_location["id"]},
+    )
+    inventory_product = inventory_result.get("data", {}).get("product")
+    if not isinstance(inventory_product, dict):
+        return live
+    inventory_connection = (
+        inventory_product.get("variants")
+        if isinstance(inventory_product.get("variants"), dict)
+        else {}
+    )
+    inventory_nodes = [
+        item for item in inventory_connection.get("nodes", []) if isinstance(item, dict)
+    ]
+    inventory_page_info = (
+        inventory_connection.get("pageInfo")
+        if isinstance(inventory_connection.get("pageInfo"), dict)
+        else {}
+    )
+    while (
+        inventory_page_info.get("hasNextPage")
+        and inventory_page_info.get("endCursor")
+        and len(inventory_nodes) <= 2048
+    ):
+        page_result = await client.graphql(
+            INVENTORY_SNAPSHOT_PAGE_QUERY,
+            {
+                "id": live["id"],
+                "locationId": selected_location["id"],
+                "after": inventory_page_info["endCursor"],
+            },
+        )
+        page = page_result.get("data", {}).get("product", {}).get("variants", {})
+        inventory_nodes.extend(
+            item for item in page.get("nodes", []) if isinstance(item, dict)
+        )
+        inventory_page_info = (
+            page.get("pageInfo") if isinstance(page.get("pageInfo"), dict) else {}
+        )
+    inventory_product["variants"] = {"nodes": inventory_nodes}
+    _apply_inventory_snapshot(live, inventory_product)
+    return live
+
+
 async def _repair_legacy_review_evidence(
     draft: dict[str, Any], previous: dict[str, Any] | None, tenant: str, ctx: AppContext
 ) -> dict[str, Any]:
@@ -370,12 +547,6 @@ async def create_mutation_plan(
         for item in (previous or {}).get("items", [])
         if isinstance(item, dict) and isinstance(item.get("source_index"), int)
     }
-    quality_report = build_quality_report(
-        _products(draft), status=QUALITY_STATUS_LIVE_PENDING
-    )
-    _save_quality_state(
-        ctx, draft, status=QUALITY_STATUS_LIVE_PENDING, report=quality_report
-    )
     client = await _offline_client(tenant)
     try:
         scopes_result = await client.graphql(ACCESS_SCOPES_QUERY)
@@ -479,101 +650,75 @@ async def create_mutation_plan(
             "selected_location": selected_location,
             "auto_selected": auto_selected,
         }
-        items: list[dict[str, Any]] = []
+        # Resolve every live product before deciding which extracted blanks are
+        # truly missing. This makes the quality report describe mutation values,
+        # not unsafe blank-overwrite attempts.
+        persisted_products = deepcopy(_products(draft))
+        inferred_any = False
+        for product in persisted_products:
+            inferred_any = infer_positional_option_dimensions(product) or inferred_any
+        effective_products = deepcopy(persisted_products)
+        live_products = [
+            await _resolve_live_product(client, product, selected_location)
+            for product in effective_products
+        ]
+        for product, live in zip(effective_products, live_products, strict=True):
+            carry_forward_required_live_values(product, live)
+
         sku_lookup_cache: dict[str, list[dict[str, Any]]] = {}
-        for index, product in enumerate(_products(draft)):
-            handle = str(product.get("handle") or "").strip().lower()
-            nodes: list[dict[str, Any]] = []
-            if handle:
-                result = await client.graphql(
-                    PRODUCT_BY_HANDLE_QUERY, {"query": f"handle:{handle}"}
+        reserved_skus = {
+            str(variant.get("sku") or "").strip().casefold()
+            for product in persisted_products
+            for variant in _variants(product)
+            if str(variant.get("sku") or "").strip()
+        }
+        generated_any = inferred_any
+        generated_skus: dict[tuple[int, int], str] = {}
+        for product_index, (persisted, effective, live) in enumerate(
+            zip(persisted_products, effective_products, live_products, strict=True)
+        ):
+            for variant_index, candidate in generate_missing_skus(
+                effective, live
+            ).items():
+                folded = candidate.casefold()
+                if folded in reserved_skus:
+                    continue
+                sku_result = await client.graphql(
+                    VARIANTS_BY_SKU_QUERY, {"query": f'sku:"{candidate}"'}
                 )
-                raw_nodes = result.get("data", {}).get("products", {}).get("nodes", [])
-                nodes = [
-                    x
-                    for x in raw_nodes
-                    if isinstance(x, dict)
-                    and str(x.get("handle") or "").lower() == handle
+                raw_nodes = (
+                    sku_result.get("data", {})
+                    .get("productVariants", {})
+                    .get("nodes", [])
+                )
+                exact_collision = any(
+                    isinstance(node, dict)
+                    and str(node.get("sku") or "").strip().casefold() == folded
+                    for node in raw_nodes
+                )
+                sku_lookup_cache[folded] = [
+                    node for node in raw_nodes if isinstance(node, dict)
                 ]
-            live = nodes[0] if len(nodes) == 1 else None
-            if live:
-                variants_connection = (
-                    live.get("variants")
-                    if isinstance(live.get("variants"), dict)
-                    else {}
-                )
-                variant_nodes = list(variants_connection.get("nodes") or [])
-                page_info = (
-                    variants_connection.get("pageInfo")
-                    if isinstance(variants_connection.get("pageInfo"), dict)
-                    else {}
-                )
-                while (
-                    page_info.get("hasNextPage")
-                    and page_info.get("endCursor")
-                    and len(variant_nodes) <= 2048
-                ):
-                    page_result = await client.graphql(
-                        PRODUCT_VARIANTS_PAGE_QUERY,
-                        {
-                            "id": live["id"],
-                            "after": page_info["endCursor"],
-                        },
-                    )
-                    page = (
-                        page_result.get("data", {})
-                        .get("product", {})
-                        .get("variants", {})
-                    )
-                    variant_nodes.extend(
-                        x for x in page.get("nodes", []) if isinstance(x, dict)
-                    )
-                    page_info = (
-                        page.get("pageInfo")
-                        if isinstance(page.get("pageInfo"), dict)
-                        else {}
-                    )
-                live["variants"] = {"nodes": variant_nodes}
-                if selected_location:
-                    inventory_result = await client.graphql(
-                        INVENTORY_SNAPSHOT_QUERY,
-                        {"id": live["id"], "locationId": selected_location["id"]},
-                    )
-                    inventory_product = inventory_result.get("data", {}).get("product")
-                    if isinstance(inventory_product, dict):
-                        inventory_connection = (
-                            inventory_product.get("variants")
-                            if isinstance(inventory_product.get("variants"), dict)
-                            else {}
-                        )
-                        inventory_nodes = list(inventory_connection.get("nodes") or [])
-                        inventory_page_info = inventory_connection.get("pageInfo") or {}
-                        while (
-                            inventory_page_info.get("hasNextPage")
-                            and inventory_page_info.get("endCursor")
-                            and len(inventory_nodes) <= 2048
-                        ):
-                            inventory_page_result = await client.graphql(
-                                INVENTORY_SNAPSHOT_PAGE_QUERY,
-                                {
-                                    "id": live["id"],
-                                    "locationId": selected_location["id"],
-                                    "after": inventory_page_info["endCursor"],
-                                },
-                            )
-                            inventory_page = (
-                                inventory_page_result.get("data", {})
-                                .get("product", {})
-                                .get("variants", {})
-                            )
-                            inventory_nodes.extend(
-                                node
-                                for node in inventory_page.get("nodes", [])
-                                if isinstance(node, dict)
-                            )
-                            inventory_page_info = inventory_page.get("pageInfo") or {}
-                        inventory_product["variants"] = {"nodes": inventory_nodes}
-                        _apply_inventory_snapshot(live, inventory_product)
+                if exact_collision:
+                    continue
+                _mark_derived_sku(persisted, variant_index, candidate)
+                _mark_derived_sku(effective, variant_index, candidate)
+                reserved_skus.add(folded)
+                generated_any = True
+                generated_skus[(product_index, variant_index)] = candidate
+        if generated_any:
+            draft = _save_corrected_products(ctx, draft, persisted_products)
+
+        quality_report = build_quality_report(
+            effective_products, status=QUALITY_STATUS_LIVE_PENDING
+        )
+        _save_quality_state(
+            ctx, draft, status=QUALITY_STATUS_LIVE_PENDING, report=quality_report
+        )
+
+        items: list[dict[str, Any]] = []
+        for index, product in enumerate(effective_products):
+            live = live_products[index]
             operation = "update" if live else "create"
             blockers, unapplied = validate_product(
                 product, creating=operation == "create"
@@ -708,9 +853,31 @@ async def create_mutation_plan(
                 unapplied=unapplied,
                 prior_item=prior_item,
             )
+            generated_for_product = {
+                sku
+                for (product_index, _), sku in generated_skus.items()
+                if product_index == index
+            }
+            for row in plan_item.get("review_changes", []):
+                if (
+                    isinstance(row, dict)
+                    and row.get("scope") == "variant"
+                    and row.get("field") == "sku"
+                    and str(row.get("proposed") or "") in generated_for_product
+                ):
+                    row["origin"] = "derived"
+                    row["source_ref"] = None
+                    row["source_refs"] = []
+                    row["required"] = True
+                    row["selectable"] = False
+                    row["included"] = True
             if operation == "create" and not str(product.get("status") or "").strip():
                 for row in plan_item.get("review_changes", []):
-                    if isinstance(row, dict) and row.get("scope") == "product" and row.get("field") == "status":
+                    if (
+                        isinstance(row, dict)
+                        and row.get("scope") == "product"
+                        and row.get("field") == "status"
+                    ):
                         row["origin"] = "defaulted"
             plan_item["quality_issues"] = product_quality_issues
             for row in plan_item.get("review_changes", []):

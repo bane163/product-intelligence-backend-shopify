@@ -29,11 +29,22 @@ from application.domain.shopify_mutation_plan import (
     _variants,
     apply_option_value_operation,
     build_review_plan_item,
+    infer_positional_option_dimensions,
+    merge_structured_product,
     normalize_review_plan_rows,
+    preserve_blank_fields,
+    validate_product,
+)
+from application.domain.extraction_quality import (
+    QUALITY_STATUS_LIVE_PENDING,
+    build_quality_report,
+    issues_for_product,
 )
 from .mutation_plans import (
     REVIEW_REQUIRED,
     UNSUPPORTED_REVIEW_CONTRACT,
+    VARIANTS_BY_SKU_QUERY,
+    _offline_client,
     create_mutation_plan,
 )
 from .utils import require_authenticated_shop_domain
@@ -103,6 +114,30 @@ def _workbook_model(products: list[dict[str, Any]]) -> ProductsList:
             product.get("value_origins"), dict
         ):
             product["value_origins"] = product["_value_origins"]
+        raw_options = product.get("productOptions")
+        if isinstance(raw_options, list):
+            product["options"] = [
+                {
+                    "name": str(option.get("name") or ""),
+                    "position": option.get("position", index + 1),
+                    "values": [
+                        str(value.get("name") if isinstance(value, dict) else value)
+                        for value in option.get("values", [])
+                    ],
+                }
+                for index, option in enumerate(raw_options)
+                if isinstance(option, dict)
+            ]
+        option_names = [
+            str(option.get("name") or "")
+            for option in product.get("options", [])
+            if isinstance(option, dict)
+        ]
+        for variant in _variants(product):
+            values = _variant_option_map(variant)
+            for index, name in enumerate(option_names[:3], start=1):
+                if not variant.get(f"option{index}"):
+                    variant[f"option{index}"] = values.get(name.casefold())
     return ProductsList.model_validate({"products": normalized})
 
 
@@ -530,7 +565,19 @@ def _set_product_value(
             )
         product[resolved] = value
     elif scope in {"variant", "inventory"}:
-        target = _unique_variant_target(product, row)
+        identity = row.get("subject_identity")
+        source_variant_index = (
+            identity.get("source_variant_index")
+            if isinstance(identity, dict)
+            else None
+        )
+        variants = _variants(product)
+        target = (
+            variants[source_variant_index]
+            if isinstance(source_variant_index, int)
+            and 0 <= source_variant_index < len(variants)
+            else _unique_variant_target(product, row)
+        )
         if target is None:
             raise HTTPException(
                 status_code=422,
@@ -875,6 +922,7 @@ def _working_items(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def _selection_state(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "selected": bool(item.get("selected")),
+        "selection_intent": str(item.get("selection_intent") or "include"),
         "included_change_ids": [
             str(row["change_id"])
             for row in item.get("review_changes", [])
@@ -886,6 +934,9 @@ def _selection_state(item: dict[str, Any]) -> dict[str, Any]:
 def _set_selection_state(item: dict[str, Any], state: dict[str, Any]) -> None:
     included_ids = set(state.get("included_change_ids") or [])
     item["selected"] = bool(state.get("selected"))
+    intent = str(state.get("selection_intent") or "")
+    if intent in {"include", "exclude"}:
+        item["selection_intent"] = intent
     for row in item.get("review_changes", []):
         if isinstance(row, dict) and row.get("change_id"):
             row["included"] = str(row["change_id"]) in included_ids
@@ -924,6 +975,267 @@ def _preserve_working_selection(
                     or str(row.get("change_id") or "") in included_ids
                 )
             )
+    return result
+
+
+def _value_at_path(product: dict[str, Any], path: str) -> Any:
+    match = re.fullmatch(r"variants\[(\d+)\]\.(.+)", path)
+    if not match:
+        return product.get(path)
+    variants = _variants(product)
+    index = int(match.group(1))
+    if index >= len(variants):
+        return None
+    field = match.group(2)
+    aliases = {
+        "compareAtPrice": "compare_at_price",
+        "inventoryPolicy": "inventory_policy",
+        "taxCode": "tax_code",
+    }
+    return variants[index].get(field, variants[index].get(aliases.get(field, field)))
+
+
+def _rebuild_working_preflight(
+    products: list[dict[str, Any]], working_plan: dict[str, Any]
+) -> dict[str, Any]:
+    """Recompute repair authority from effective pending products.
+
+    This deliberately never copies structural/quality blockers.  The only
+    remote issue retained is an unchanged exact live-SKU collision; async route
+    preflight refreshes those checks before apply.
+    """
+    if working_plan.get("review_contract_version") != 5:
+        return deepcopy(working_plan)
+    previous_by_source = {
+        int(item["source_index"]): item
+        for item in working_plan.get("items", [])
+        if isinstance(item, dict) and isinstance(item.get("source_index"), int)
+    }
+    for product in products:
+        infer_positional_option_dimensions(product)
+    quality_report = build_quality_report(
+        products, status=QUALITY_STATUS_LIVE_PENDING
+    )
+    rebuilt_items: list[dict[str, Any]] = []
+    for index, product in enumerate(products):
+        prior = previous_by_source.get(index, {})
+        live = prior.get("live_snapshot") if isinstance(prior.get("live_snapshot"), dict) else None
+        operation = "update" if live else "create"
+        blockers, unapplied = validate_product(product, creating=not bool(live))
+        proposed = preserve_blank_fields(live or {}, product)
+        proposed.pop("shopify_gid", None)
+        proposed.pop("id", None)
+        if live:
+            proposed["id"] = live.get("id")
+        elif not proposed.get("status"):
+            proposed["status"] = "DRAFT"
+        proposed, structural_blockers, structural_unapplied = merge_structured_product(
+            live, product, proposed
+        )
+        blockers.extend(structural_blockers)
+        unapplied.extend(structural_unapplied)
+        quality_issues = issues_for_product(quality_report, index)
+        blockers.extend(
+            {
+                "code": str(issue.get("code")),
+                "field": issue.get("value_path"),
+                "message": issue.get("message"),
+                "remedies": [issue.get("remedy")],
+            }
+            for issue in quality_issues
+            if issue.get("severity") == "blocker"
+            and not any(
+                existing.get("code") == issue.get("code")
+                and existing.get("field") == issue.get("value_path")
+                for existing in blockers if isinstance(existing, dict)
+            )
+        )
+        # Keep an authoritative remote collision only while its exact SKU has
+        # not changed.  A final async preflight is still required before apply.
+        for issue in prior.get("quality_issues", []):
+            if not isinstance(issue, dict) or issue.get("code") != "LIVE_SKU_COLLISION":
+                continue
+            path = str(issue.get("value_path") or "")
+            preview = prior.get("review_preview") if isinstance(prior.get("review_preview"), dict) else {}
+            prior_value = next(
+                (
+                    cell.get("proposed")
+                    for variant in preview.get("variants", [])
+                    if isinstance(variant, dict)
+                    for cell in variant.get("cells", [])
+                    if isinstance(cell, dict) and cell.get("value_path") == path
+                ),
+                None,
+            )
+            if prior_value is not None and _value_at_path(product, path) == prior_value:
+                quality_issues.append(deepcopy(issue))
+                blockers.append(
+                    {
+                        "code": "LIVE_SKU_COLLISION",
+                        "field": path,
+                        "message": issue.get("message"),
+                        "remedies": ["edit", "skip"],
+                    }
+                )
+        rebuilt = build_review_plan_item(
+            item_id=str(prior.get("item_id") or uuid.uuid4()),
+            currency_code=str(prior.get("currency_code") or working_plan.get("currency_code") or "USD"),
+            source_index=index,
+            source_product=product,
+            live_snapshot=live,
+            proposed=proposed,
+            operation=operation,
+            blockers=blockers,
+            unapplied=unapplied,
+            prior_item=prior,
+        )
+        rebuilt["quality_issues"] = quality_issues
+        rebuilt_items.append(rebuilt)
+    blocked = sum(bool(item.get("blockers")) for item in rebuilt_items)
+    result = {
+        **deepcopy(working_plan),
+        "items": rebuilt_items,
+        "quality_summary": {
+            "product_count": len(rebuilt_items),
+            "valid_product_count": len(rebuilt_items) - blocked,
+            "blocked_product_count": blocked,
+            "blocker_count": sum(len(item.get("blockers") or []) for item in rebuilt_items),
+            "warning_count": sum(
+                issue.get("severity") == "warning"
+                for item in rebuilt_items
+                for issue in item.get("quality_issues", [])
+                if isinstance(issue, dict)
+            ),
+        },
+    }
+    return normalize_review_plan_rows(result)
+
+
+def _blocking_field_errors(plan: dict[str, Any]) -> list[dict[str, str]]:
+    errors: list[dict[str, str]] = []
+    for item in plan.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        preview = item.get("review_preview") if isinstance(item.get("review_preview"), dict) else {}
+        cells = [
+            cell
+            for variant in preview.get("variants", [])
+            if isinstance(variant, dict)
+            for cell in variant.get("cells", [])
+            if isinstance(cell, dict)
+        ]
+        cells.extend(
+            cell
+            for cell in (preview.get("product") or {}).get("cells", [])
+            if isinstance(cell, dict)
+        )
+        for blocker in item.get("blockers", []):
+            if not isinstance(blocker, dict):
+                continue
+            path = str(blocker.get("field") or "productOptions")
+            cell = next((candidate for candidate in cells if candidate.get("value_path") == path), None)
+            errors.append(
+                {
+                    "change_id": str((cell or {}).get("change_id") or ""),
+                    "value_path": path,
+                    "code": str(blocker.get("code") or "REVIEW_BLOCKER"),
+                    "message": str(
+                        blocker.get("message")
+                        or "Correct this field before saving your changes."
+                    ),
+                }
+            )
+    unique: dict[tuple[str, str], dict[str, str]] = {}
+    for error in errors:
+        unique.setdefault((error["code"], error["value_path"]), error)
+    return list(unique.values())
+
+
+async def _refresh_live_sku_collisions(
+    products: list[dict[str, Any]], plan: dict[str, Any], tenant: str
+) -> dict[str, Any]:
+    """Refresh exact Shopify SKU conflicts for a real v5 server-authored plan."""
+    if plan.get("review_contract_version") != 5 or not plan.get("shop_domain"):
+        return plan
+    result = deepcopy(plan)
+    client = await _offline_client(tenant)
+    cache: dict[str, list[dict[str, Any]]] = {}
+    try:
+        for item in result.get("items", []):
+            if not isinstance(item, dict) or not isinstance(item.get("source_index"), int):
+                continue
+            source_index = int(item["source_index"])
+            if source_index >= len(products):
+                continue
+            live = item.get("live_snapshot") if isinstance(item.get("live_snapshot"), dict) else None
+            for variant_index, variant in enumerate(_variants(products[source_index])):
+                sku = str(variant.get("sku") or "").strip()
+                if not sku:
+                    continue
+                folded = sku.casefold()
+                if folded not in cache:
+                    response = await client.graphql(
+                        VARIANTS_BY_SKU_QUERY, {"query": f'sku:"{sku}"'}
+                    )
+                    cache[folded] = [
+                        node
+                        for node in response.get("data", {}).get("productVariants", {}).get("nodes", [])
+                        if isinstance(node, dict)
+                    ]
+                collision = any(
+                    str(node.get("sku") or "").strip().casefold() == folded
+                    and (
+                        not live
+                        or not isinstance(node.get("product"), dict)
+                        or node["product"].get("id") != live.get("id")
+                    )
+                    for node in cache[folded]
+                )
+                if not collision:
+                    continue
+                path = f"variants[{variant_index}].sku"
+                issue = {
+                    "issue_id": f"live_sku_collision:product-{source_index}-{path}",
+                    "severity": "blocker",
+                    "code": "LIVE_SKU_COLLISION",
+                    "product_index": source_index,
+                    "value_path": path,
+                    "message": "This SKU is already used by another Shopify product.",
+                    "remedy": "edit",
+                }
+                item.setdefault("quality_issues", []).append(issue)
+                item.setdefault("blockers", []).append(
+                    {
+                        "code": "LIVE_SKU_COLLISION",
+                        "field": path,
+                        "message": issue["message"],
+                        "remedies": ["edit", "skip"],
+                    }
+                )
+                item["operation"] = "blocked"
+                item["selectable"] = False
+                item["selected"] = False
+                for preview_variant in (item.get("review_preview") or {}).get("variants", []):
+                    for cell in preview_variant.get("cells", []) if isinstance(preview_variant, dict) else []:
+                        if isinstance(cell, dict) and cell.get("value_path") == path:
+                            cell["disposition"] = "blocked"
+                            cell.setdefault("quality_issues", []).append(issue)
+    finally:
+        await client.close()
+    blocked = sum(bool(item.get("blockers")) for item in result.get("items", []) if isinstance(item, dict))
+    summary = result.get("quality_summary") if isinstance(result.get("quality_summary"), dict) else {}
+    summary.update(
+        {
+            "product_count": len(result.get("items", [])),
+            "valid_product_count": len(result.get("items", [])) - blocked,
+            "blocked_product_count": blocked,
+            "blocker_count": sum(
+                len(item.get("blockers") or [])
+                for item in result.get("items", []) if isinstance(item, dict)
+            ),
+        }
+    )
+    result["quality_summary"] = summary
     return result
 
 
@@ -1559,17 +1871,66 @@ def _transform_structure(product: dict[str, Any], item: dict[str, Any], operatio
             values[name.casefold()] = value
             _set_variant_options(variant, options, values)
     elif operation_type == "option_dimension_rename":
-        if option_index is None:
-            raise ValueError("This option changed. Refresh before editing it.")
         name = str(operation.get("name") or "").strip()
-        if not name or any(index != option_index and str(option.get("name") or "").casefold() == name.casefold() for index, option in enumerate(options)):
-            raise ValueError("Option names must be nonblank and unique.")
-        old = str(options[option_index].get("name") or "")
-        options[option_index]["name"] = name
-        for variant in variants:
-            values = _variant_option_map(variant)
-            values[name.casefold()] = values.pop(old.casefold(), "")
-            _set_variant_options(variant, options, values)
+        repair_dimensions = (
+            result.get("_review_option_dimensions")
+            if isinstance(result.get("_review_option_dimensions"), list)
+            else []
+        )
+        unresolved_index = next(
+            (
+                index for index, dimension in enumerate(repair_dimensions)
+                if isinstance(dimension, dict)
+                and str(dimension.get("dimension_id") or "") == dimension_id
+            ),
+            None,
+        )
+        if option_index is None and unresolved_index is None:
+            raise ValueError("This option changed. Refresh before editing it.")
+        if unresolved_index is not None:
+            other_names = {
+                str(dimension.get("name") or "").strip().casefold()
+                for index, dimension in enumerate(repair_dimensions)
+                if isinstance(dimension, dict) and index != unresolved_index
+            }
+            if not name or name.casefold() in other_names:
+                raise ValueError("Option names must be nonblank and unique.")
+            repair_dimensions[unresolved_index]["name"] = name
+            repair_dimensions[unresolved_index]["origin"] = "merchant_edited"
+            repair_dimensions[unresolved_index]["requires_name"] = False
+            result["_review_option_dimensions"] = repair_dimensions
+            if any(
+                not str(dimension.get("name") or "").strip()
+                for dimension in repair_dimensions if isinstance(dimension, dict)
+            ):
+                return result
+            options = [
+                {
+                    "name": str(dimension["name"]),
+                    "position": int(dimension.get("position") or index + 1),
+                    "values": [{"name": str(value)} for value in dimension.get("values", [])],
+                }
+                for index, dimension in enumerate(repair_dimensions)
+                if isinstance(dimension, dict)
+            ]
+            for variant in variants:
+                positional = {
+                    str(option["name"]).casefold(): str(
+                        variant.get(f"option{position + 1}") or ""
+                    ).strip()
+                    for position, option in enumerate(options)
+                }
+                _set_variant_options(variant, options, positional)
+        else:
+            assert option_index is not None
+            if not name or any(index != option_index and str(option.get("name") or "").casefold() == name.casefold() for index, option in enumerate(options)):
+                raise ValueError("Option names must be nonblank and unique.")
+            old = str(options[option_index].get("name") or "")
+            options[option_index]["name"] = name
+            for variant in variants:
+                values = _variant_option_map(variant)
+                values[name.casefold()] = values.pop(old.casefold(), "")
+                _set_variant_options(variant, options, values)
     elif operation_type == "option_dimension_reorder":
         ids = operation.get("dimension_ids")
         if not isinstance(ids, list) or len(ids) != len(options) or set(map(str, ids)) != {str(_dimension_id(item, option)) for option in options}:
@@ -1647,7 +2008,9 @@ def _apply_structure_operation(
     before = _structural_state(products[product_index], item)
     try:
         edited_product = _transform_structure(products[product_index], item, operation)
-        edited_proposed = _transform_structure(item.get("proposed") if isinstance(item.get("proposed"), dict) else {}, item, operation)
+        edited_proposed = deepcopy(
+            item.get("proposed") if isinstance(item.get("proposed"), dict) else {}
+        )
     except ValueError as exc:
         raise _validation_failure([{"change_id": "", "value_path": "productOptions", "code": "INVALID_PRODUCT_STRUCTURE", "message": str(exc)}]) from None
     rebuilt = build_review_plan_item(
@@ -1691,7 +2054,12 @@ def _apply_cell_operation(
     edited_proposed = deepcopy(item.get("proposed") if isinstance(item.get("proposed"), dict) else {})
     try:
         _set_product_value(edited_product, cell, value, origin="merchant_edited")
-        _set_product_value(edited_proposed, cell, value, origin="merchant_edited")
+        identity = cell.get("subject_identity")
+        if not (
+            isinstance(identity, dict)
+            and isinstance(identity.get("source_variant_index"), int)
+        ):
+            _set_product_value(edited_proposed, cell, value, origin="merchant_edited")
     except (ValueError, HTTPException):
         raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "STALE_CELL_IDENTITY", "message": "This preview cell no longer has a unique target."}]) from None
     rebuilt = build_review_plan_item(
@@ -1774,7 +2142,11 @@ def _apply_ui_operation(
                 detail="Blocked or deferred changes cannot be included",
             )
         before = _selection_state(item)
-        after = {"selected": selected, "included_change_ids": included_ids}
+        after = {
+            "selected": selected,
+            "selection_intent": "include" if selected else "exclude",
+            "included_change_ids": included_ids,
+        }
         _set_selection_state(item, after)
         return _history_entry("selection", before, after, item_id=item_id)
 
@@ -2251,6 +2623,16 @@ async def patch_review_edit_session(
                 ),
             )
         raise
+    if any(
+        (operation.get("operation") or operation.get("type"))
+        in CONTENT_HISTORY_OPERATIONS - {"selection"}
+        for operation in operations
+        if isinstance(operation, dict)
+    ):
+        working_plan = _rebuild_working_preflight(pending, working_plan)
+        working_plan = await _refresh_live_sku_collisions(
+            pending, working_plan, tenant
+        )
     saved = _service(ctx).save_review_edit_session(
         {
             **session,
@@ -2259,6 +2641,11 @@ async def patch_review_edit_session(
             "grid_state": grid_state,
             "history": history,
             "history_cursor": history_cursor,
+            "field_errors": (
+                _blocking_field_errors(working_plan)
+                if working_plan.get("review_contract_version") == 5
+                else []
+            ),
             "edit_revision": current + 1,
             "updated_at": _now(),
         }
@@ -2308,6 +2695,11 @@ def _save_history_action(
             "grid_state": grid_state,
             "history": history,
             "history_cursor": cursor,
+            "field_errors": (
+                _blocking_field_errors(working_plan)
+                if working_plan.get("review_contract_version") == 5
+                else []
+            ),
             "edit_revision": current + 1,
             "updated_at": _now(),
         }
@@ -2336,6 +2728,8 @@ async def undo_review_edit_session(
     _replay_history_entry(
         pending, working_plan, grid_state, history[cursor - 1], direction="before"
     )
+    working_plan = _rebuild_working_preflight(pending, working_plan)
+    working_plan = await _refresh_live_sku_collisions(pending, working_plan, tenant)
     saved = _save_history_action(
         session,
         current,
@@ -2371,6 +2765,8 @@ async def redo_review_edit_session(
     _replay_history_entry(
         pending, working_plan, grid_state, history[cursor], direction="after"
     )
+    working_plan = _rebuild_working_preflight(pending, working_plan)
+    working_plan = await _refresh_live_sku_collisions(pending, working_plan, tenant)
     saved = _save_history_action(
         session,
         current,
@@ -2407,6 +2803,8 @@ async def reset_review_edit_session(
         )
     working_plan.pop("_option_edit_bases", None)
     working_plan.pop("_option_edit_initials", None)
+    working_plan = _rebuild_working_preflight(pending, working_plan)
+    working_plan = await _refresh_live_sku_collisions(pending, working_plan, tenant)
     saved = _save_history_action(
         session,
         current,
@@ -2487,6 +2885,24 @@ async def apply_review_edit_session(
         if isinstance(session.get("working_plan"), dict)
         else {}
     )
+    working_plan = _rebuild_working_preflight(products, working_plan)
+    working_plan = await _refresh_live_sku_collisions(products, working_plan, tenant)
+    blocker_errors = (
+        _blocking_field_errors(working_plan)
+        if working_plan.get("review_contract_version") == 5
+        else []
+    )
+    if blocker_errors:
+        _service(ctx).save_review_edit_session(
+            {
+                **session,
+                "pending_products": products,
+                "working_plan": working_plan,
+                "field_errors": blocker_errors,
+                "updated_at": _now(),
+            }
+        )
+        raise _validation_failure(blocker_errors)
     try:
         workbook_model = _workbook_model(products)
         workbook = create_excel_bytes(workbook_model)

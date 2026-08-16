@@ -848,3 +848,299 @@ async def test_approval_ignores_legacy_acknowledgement_and_omits_deferred_values
     execution = response.json()["plan"]["items"][0]["execution_proposed"]
     assert execution["variants"] == [{"sku": "SAFE-SKU"}]
     assert "inventory_quantity" not in execution["variants"][0]
+
+
+def _sku_pattern_product(*, missing_sku: bool = True):
+    return {
+        "title": "Pattern Tee",
+        "vendor": "Acme",
+        "image_src": "https://example.com/tee.jpg",
+        "options": [{"name": "Color", "values": ["Black", "White"]}],
+        "variants": [
+            {
+                "option_values": [{"option_name": "Color", "name": "Black"}],
+                "sku": "TEE-BLACK",
+                "price": "20",
+            },
+            {
+                "option_values": [{"option_name": "Color", "name": "White"}],
+                "sku": "" if missing_sku else "TEE-WHITE",
+                "price": "20",
+            },
+        ],
+        "source_refs": [
+            {"value_path": "title", "cell": "A2"},
+            {"value_path": "variants[1].sku", "cell": "D3"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_preflight_persists_generated_sku_once_with_required_derived_authority(
+    monkeypatch,
+):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "derived-sku-preflight"
+    shop_domain = "derived-sku.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [_sku_pattern_product()],
+    }
+
+    class FakeShopifyClient:
+        async def graphql(self, query, variables=None):
+            if query == mutation_plans_api.ACCESS_SCOPES_QUERY:
+                return {
+                    "data": {
+                        "currentAppInstallation": {
+                            "accessScopes": [{"handle": "write_products"}]
+                        },
+                        "shop": {"currencyCode": "USD"},
+                    }
+                }
+            assert query == mutation_plans_api.VARIANTS_BY_SKU_QUERY
+            return {"data": {"productVariants": {"nodes": []}}}
+
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        assert shop == shop_domain
+        return FakeShopifyClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    headers = {"x-shop-domain": shop_domain}
+    url = f"/agents/product-drafts/{draft_id}/mutation-plan"
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", headers=headers
+    ) as client:
+        first = await client.post(url)
+        second = await client.post(url)
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["plan"]["draft_revision"] == 2
+    assert second.json()["plan"]["draft_revision"] == 2
+    saved = service.product_drafts[draft_id]
+    assert saved["revision"] == 2
+    assert saved["products"][0]["variants"][1]["sku"] == "TEE-WHITE"
+    assert saved["products"][0]["value_origins"]["variants[1].sku"] == "derived"
+    assert all(
+        ref.get("value_path") != "variants[1].sku"
+        for ref in saved["products"][0]["source_refs"]
+    )
+    derived_row = next(
+        row
+        for row in first.json()["plan"]["items"][0]["review_changes"]
+        if row["field"] == "sku" and row.get("proposed") == "TEE-WHITE"
+    )
+    assert derived_row["origin"] == "derived"
+    assert derived_row["required"] is True
+    assert derived_row["selectable"] is False
+    assert derived_row["included"] is True
+    regenerated_row = next(
+        row
+        for row in second.json()["plan"]["items"][0]["review_changes"]
+        if row["field"] == "sku" and row.get("proposed") == "TEE-WHITE"
+    )
+    assert regenerated_row["origin"] == "derived"
+    assert all(
+        issue["code"] != "SKU_REQUIRED"
+        for issue in first.json()["plan"]["items"][0]["quality_issues"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collision_kind", ["import", "live"])
+async def test_generated_sku_collisions_remain_blocked_without_suffixes(
+    monkeypatch, collision_kind
+):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = f"generated-sku-{collision_kind}-collision"
+    shop_domain = f"{collision_kind}-collision.myshopify.com"
+    products = [_sku_pattern_product()]
+    if collision_kind == "import":
+        products.append(
+            {
+                "title": "Other",
+                "vendor": "Acme",
+                "image_src": "https://example.com/other.jpg",
+                "variants": [{"sku": "TEE-WHITE", "price": "10"}],
+                "source_refs": [{"value_path": "title", "cell": "A5"}],
+            }
+        )
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": products,
+    }
+
+    class FakeShopifyClient:
+        async def graphql(self, query, variables=None):
+            if query == mutation_plans_api.ACCESS_SCOPES_QUERY:
+                return {
+                    "data": {
+                        "currentAppInstallation": {
+                            "accessScopes": [{"handle": "write_products"}]
+                        }
+                    }
+                }
+            assert query == mutation_plans_api.VARIANTS_BY_SKU_QUERY
+            sku = (
+                str((variables or {}).get("query") or "")
+                .removeprefix('sku:"')
+                .removesuffix('"')
+            )
+            nodes = (
+                [
+                    {
+                        "id": "gid://shopify/ProductVariant/9",
+                        "sku": "TEE-WHITE",
+                        "product": {"id": "gid://shopify/Product/9"},
+                    }
+                ]
+                if collision_kind == "live" and sku == "TEE-WHITE"
+                else []
+            )
+            return {"data": {"productVariants": {"nodes": nodes}}}
+
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        return FakeShopifyClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        response = await client.post(f"/agents/product-drafts/{draft_id}/mutation-plan")
+
+    assert response.status_code == 200
+    assert response.json()["plan"]["draft_revision"] == 1
+    first = response.json()["plan"]["items"][0]
+    assert any(issue["code"] == "SKU_REQUIRED" for issue in first["quality_issues"])
+    assert first["proposed"]["variants"][1].get("sku") in (None, "")
+    assert "TEE-WHITE-2" not in str(first)
+
+
+@pytest.mark.asyncio
+async def test_update_blanks_keep_live_required_values_but_explicit_invalid_price_blocks(
+    monkeypatch,
+):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "live-required-carry-forward"
+    shop_domain = "live-required.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [
+            {
+                "title": "",
+                "handle": "live-tee",
+                "options": [{"name": "Color", "values": ["Black", "White"]}],
+                "variants": [
+                    {
+                        "option_values": [{"option_name": "Color", "name": "Black"}],
+                        "sku": "",
+                        "price": "",
+                    },
+                    {
+                        "option_values": [{"option_name": "Color", "name": "White"}],
+                        "sku": "NEW-WHITE",
+                        "price": "not-a-price",
+                    },
+                ],
+            }
+        ],
+    }
+    live = {
+        "id": "gid://shopify/Product/1",
+        "title": "Live Tee",
+        "handle": "live-tee",
+        "status": "ACTIVE",
+        "tags": [],
+        "seo": {},
+        "options": [
+            {
+                "name": "Color",
+                "position": 1,
+                "optionValues": [{"name": "Black"}, {"name": "White"}],
+            }
+        ],
+        "variants": {
+            "nodes": [
+                {
+                    "id": "gid://shopify/ProductVariant/1",
+                    "selectedOptions": [{"name": "Color", "value": "Black"}],
+                    "sku": "LIVE-BLACK",
+                    "price": "25",
+                },
+                {
+                    "id": "gid://shopify/ProductVariant/2",
+                    "selectedOptions": [{"name": "Color", "value": "White"}],
+                    "sku": "LIVE-WHITE",
+                    "price": "30",
+                },
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+        "metafields": {"nodes": []},
+    }
+
+    class FakeShopifyClient:
+        async def graphql(self, query, variables=None):
+            if query == mutation_plans_api.ACCESS_SCOPES_QUERY:
+                return {
+                    "data": {
+                        "currentAppInstallation": {
+                            "accessScopes": [{"handle": "write_products"}]
+                        }
+                    }
+                }
+            if query == mutation_plans_api.PRODUCT_BY_HANDLE_QUERY:
+                return {"data": {"products": {"nodes": [live]}}}
+            assert query == mutation_plans_api.VARIANTS_BY_SKU_QUERY
+            return {"data": {"productVariants": {"nodes": []}}}
+
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        return FakeShopifyClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        response = await client.post(f"/agents/product-drafts/{draft_id}/mutation-plan")
+
+    assert response.status_code == 200
+    item = response.json()["plan"]["items"][0]
+    assert item["proposed"]["title"] == "Live Tee"
+    assert item["proposed"]["variants"][0]["sku"] == "LIVE-BLACK"
+    assert item["proposed"]["variants"][0]["price"] == "25"
+    blocker_paths = {
+        issue["value_path"]
+        for issue in item["quality_issues"]
+        if issue["severity"] == "blocker"
+    }
+    assert "variants[0].sku" not in blocker_paths
+    assert "variants[0].price" not in blocker_paths
+    assert "variants[1].price" in blocker_paths

@@ -22,6 +22,7 @@ from application.domain.shopify_mutation_plan import (
     merge_structured_product,
     normalize_review_plan_rows,
     preserve_blank_fields,
+    validate_inventory_quantity,
     validate_product,
 )
 from application.domain.extraction_quality import (
@@ -105,9 +106,15 @@ def _has_inventory(products: list[dict[str, Any]]) -> bool:
         if isinstance(raw, dict):
             raw = raw.get("nodes")
         for variant in raw if isinstance(raw, list) else []:
-            if isinstance(variant, dict) and any(
-                key in variant for key in ("inventory_quantity", "inventoryQuantity")
-            ):
+            if not isinstance(variant, dict):
+                continue
+            for key in ("inventory_quantity", "inventoryQuantity"):
+                if key not in variant or variant.get(key) in (None, ""):
+                    continue
+                try:
+                    validate_inventory_quantity(variant.get(key))
+                except ValueError:
+                    continue
                 return True
     return False
 
@@ -885,6 +892,12 @@ async def create_mutation_plan(
             for row in plan_item.get("review_changes", []):
                 if not isinstance(row, dict) or row.get("scope") != "inventory":
                     continue
+                # Blank inventory means no inventory mutation. Numeric values
+                # become required operations only once a location is available.
+                if row.get("proposed") in (None, ""):
+                    row["required"] = False
+                    row["included"] = False
+                    continue
                 row["required"] = True
                 row["selectable"] = False
                 if inventory_status != "ready":
@@ -1045,6 +1058,7 @@ async def patch_mutation_plan_selection(
             if requested_change_ids & disallowed:
                 raise _review_error("Blocked or deferred changes cannot be included")
             item["selected"] = bool(included)
+            item["selection_intent"] = "include" if included else "exclude"
             for row in rows:
                 row["included"] = bool(
                     included
@@ -1069,6 +1083,7 @@ async def patch_mutation_plan_selection(
                 item.get("selectable") and item.get("item_id") in selected_ids
             )
             item["selected"] = selected
+            item["selection_intent"] = "include" if selected else "exclude"
             for row in item.get("review_changes", []):
                 if isinstance(row, dict):
                     row["included"] = bool(

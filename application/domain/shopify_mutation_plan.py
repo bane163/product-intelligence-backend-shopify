@@ -446,7 +446,7 @@ def _normalized_variant(
     quantity_present, quantity = _first_present(
         variant, ("inventory_quantity", "inventoryQuantity")
     )
-    if quantity_present:
+    if quantity_present and quantity not in (None, ""):
         try:
             payload["inventory_quantity"] = validate_inventory_quantity(quantity)
         except ValueError:
@@ -563,6 +563,9 @@ def merge_structured_product(
     live_variants = _variants(current)
     imported_names = _schema_from_product(imported)
     live_names = _schema_from_product(current)
+    singleton_match = bool(
+        current and len(imported_variants) == 1 and len(live_variants) == 1
+    )
 
     has_imported_structure = bool(_raw_options(imported) or imported_variants)
     if has_imported_structure:
@@ -596,12 +599,28 @@ def merge_structured_product(
             blockers.append(
                 {"code": "VARIANTS_REQUIRED_FOR_OPTIONS", "field": "variants"}
             )
-        if (
+        incompatible_option_schema = (
             live_names
             and not live_placeholder
             and [_fold(x) for x in live_names] != [_fold(x) for x in imported_names]
-        ):
-            blockers.append({"code": "INCOMPATIBLE_OPTION_SCHEMA", "field": "options"})
+        )
+        if incompatible_option_schema and not singleton_match:
+            blockers.append(
+                {
+                    "code": "INCOMPATIBLE_OPTION_SCHEMA",
+                    "field": "options",
+                    "message": (
+                        "The imported option schema "
+                        f"({', '.join(imported_names) or 'none'}) does not uniquely match "
+                        f"the Shopify option schema ({', '.join(live_names) or 'none'})."
+                    ),
+                    "context": {
+                        "imported_option_names": imported_names,
+                        "live_option_names": live_names,
+                    },
+                    "remedies": ["manage_options_variants", "exclude_product"],
+                }
+            )
         option_names = (
             live_names if live_names and not live_placeholder else imported_names
         )
@@ -627,7 +646,7 @@ def merge_structured_product(
                         }
                     )
             for key in ("inventory_quantity", "inventoryQuantity"):
-                if key in variant:
+                if key in variant and variant.get(key) not in (None, ""):
                     try:
                         validate_inventory_quantity(variant.get(key))
                     except ValueError:
@@ -638,7 +657,15 @@ def merge_structured_product(
                                 "message": "Inventory must be a whole number from 0 to 1,000,000,000.",
                             }
                         )
-            if imported_placeholder and not _variant_pairs(variant, imported_names):
+            if singleton_match and live_names:
+                live_variant = _normalized_variant(
+                    live_variants[0], live_names, live=True
+                )
+                variant = {
+                    **variant,
+                    "optionValues": deepcopy(live_variant.get("optionValues") or []),
+                }
+            elif imported_placeholder and not _variant_pairs(variant, imported_names):
                 variant = {
                     **variant,
                     "optionValues": [{"optionName": "Title", "name": "Default Title"}],
@@ -715,6 +742,15 @@ def merge_structured_product(
                 live_by_combo[combo] = _normalized_variant(
                     variant, option_names, live=True
                 )
+
+        if singleton_match and live_names:
+            proposed["_review_single_variant_match"] = {
+                "matched": True,
+                "message": "Safely matched the single imported variant to the single Shopify variant.",
+                "imported_option_names": imported_names,
+                "live_option_names": live_names,
+                "live_variant_id": live_variants[0].get("id"),
+            }
 
         merged_variants: list[dict[str, Any]] = []
         for combo, live_variant in live_by_combo.items():
@@ -1480,7 +1516,24 @@ def _preview_cell(
         if isinstance(issue, dict)
         and issue.get("value_path") in {None, "", value_path}
     ]
+    actual_change_ids = {
+        str(candidate.get("change_id"))
+        for candidate in item.get("review_changes", [])
+        if isinstance(candidate, dict) and candidate.get("change_id")
+    }
+    editable = bool(
+        source.get(
+            "editable", scope in {"product", "variant", "inventory", "metafield"}
+        )
+    )
+    change_id = source.get("change_id")
+    edit_target = (
+        "review_change"
+        if editable and change_id and str(change_id) in actual_change_ids
+        else "preview_cell" if editable else None
+    )
     cell = {
+        "item_id": str(item.get("item_id") or ""),
         "cell_id": _preview_cell_id(item, scope, identity, column),
         "column_key": column,
         "field": field,
@@ -1490,10 +1543,11 @@ def _preview_cell(
         "current": deepcopy(current),
         "proposed": deepcopy(proposed),
         "original_proposed": deepcopy(source.get("original_proposed", proposed)),
-        "change_id": source.get("change_id"),
+        "change_id": change_id,
+        "edit_target": edit_target,
         "included": bool(source.get("included", item.get("selected", False))),
         "disposition": source.get("disposition", "unchanged"),
-        "editable": bool(source.get("editable", scope in {"product", "variant", "inventory", "metafield"})),
+        "editable": editable,
         "required": bool(required or source.get("required")),
         "edit_schema": deepcopy(
             source.get("edit_schema")
@@ -1503,6 +1557,15 @@ def _preview_cell(
         "origin": source.get("origin", "unknown"),
         "quality_issues": quality,
     }
+    if not editable:
+        cell["read_only_reason"] = (
+            "This Stockpile-managed field is shown for context and cannot be edited here."
+            if _technical_review_row(source)
+            else "This field cannot be edited until its product structure is resolved."
+        )
+    single_variant_match = item.get("single_variant_match")
+    if isinstance(single_variant_match, dict) and scope in {"variant", "inventory"}:
+        cell["single_variant_match"] = deepcopy(single_variant_match)
     if isinstance(subject_identity, dict):
         cell["subject_identity"] = deepcopy(subject_identity)
     for key in ("source_ref", "source_refs"):
@@ -1648,9 +1711,20 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
             )
         )
         subject = _variant_subject(variant, option_names)
-        live_variant = next(
-            (candidate for candidate in live_variants if _canonical_combo(candidate, live_option_names) == _canonical_combo(variant, option_names)),
-            None,
+        live_variant = (
+            live_variants[0]
+            if isinstance(item.get("single_variant_match"), dict)
+            and len(preview_variants) == 1
+            and len(live_variants) == 1
+            else next(
+                (
+                    candidate
+                    for candidate in live_variants
+                    if _canonical_combo(candidate, live_option_names)
+                    == _canonical_combo(variant, option_names)
+                ),
+                None,
+            )
         )
         flat = _flatten_variant(variant)
         live_flat = _flatten_variant(live_variant) if isinstance(live_variant, dict) else {}
@@ -1784,6 +1858,7 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            row["item_id"] = str(item.get("item_id") or "")
             if row.get("scope") in {"variant", "inventory"} and not isinstance(
                 row.get("subject_identity"), dict
             ):
@@ -1828,8 +1903,7 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
                 and target_exists
             )
         if normalized.get("review_contract_version") == 5:
-            if "_repair_source" in item or not isinstance(item.get("review_preview"), dict):
-                item["review_preview"] = build_review_preview(item)
+            item["review_preview"] = build_review_preview(item)
             item.pop("_repair_source", None)
     return normalized
 
@@ -2972,6 +3046,28 @@ def build_review_plan_item(
     proposed_copy = deepcopy(proposed)
     blockers_copy = deepcopy(blockers or [])
     unapplied_copy = deepcopy(unapplied or [])
+    blocker_messages = {
+        "TITLE_REQUIRED": "Enter a product title.",
+        "SKU_REQUIRED": "Enter a SKU for every variant.",
+        "PRICE_REQUIRED": "Enter a price for every variant.",
+        "VARIANT_OPTIONS_REQUIRED": "Add option names so each imported variant can be identified.",
+        "INCOMPLETE_VARIANT_COMBINATION": "Complete this variant's option values before applying it.",
+        "DUPLICATE_VARIANT_COMBINATION": "Each variant needs a unique combination of option values.",
+        "INVALID_LIVE_VARIANT_COMBINATIONS": "The Shopify variants cannot be matched safely from the imported option values.",
+    }
+    for blocker in blockers_copy:
+        if not isinstance(blocker, dict):
+            continue
+        code = str(blocker.get("code") or "REVIEW_BLOCKER")
+        blocker.setdefault(
+            "message",
+            blocker_messages.get(
+                code,
+                "Review this product field before applying the import.",
+            ),
+        )
+        blocker.setdefault("context", {"field": blocker.get("field")})
+        blocker.setdefault("remedies", ["edit", "exclude_product"])
     changes = applicable_changes(live, proposed_copy)
     exact_review = review_changes(
         live,
@@ -3257,6 +3353,17 @@ def build_review_plan_item(
             if previous.get("selectable") is True and previous.get("selected") is False
             else "include"
         )
+    for blocker in blockers_copy:
+        if not isinstance(blocker, dict):
+            continue
+        code = str(blocker.get("code") or "REVIEW_BLOCKER")
+        blocker.setdefault(
+            "message",
+            blocker_messages.get(code, "Review this product field before applying the import."),
+        )
+        blocker.setdefault("context", {"field": blocker.get("field")})
+        blocker.setdefault("remedies", ["edit", "exclude_product"])
+    single_variant_match = proposed_copy.pop("_review_single_variant_match", None)
     item = {
         "item_id": str(item_id),
         "currency_code": str(currency_code),
@@ -3277,6 +3384,8 @@ def build_review_plan_item(
         "execution": None,
         "_repair_source": imported,
     }
+    if isinstance(single_variant_match, dict):
+        item["single_variant_match"] = single_variant_match
     return normalize_review_plan_rows({"review_contract_version": 2, "items": [item]})[
         "items"
     ][0]

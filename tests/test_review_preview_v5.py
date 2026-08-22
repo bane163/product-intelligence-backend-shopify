@@ -2,7 +2,13 @@ from copy import deepcopy
 
 import pytest
 
-from api.agents.review_edit_sessions import _apply_cell_operation, _transform_structure
+from api.agents.review_edit_sessions import (
+    _apply_cell_operation,
+    _blocking_field_errors,
+    _canonical_review_value,
+    _apply_ui_operation,
+    _transform_structure,
+)
 from application.domain.shopify_mutation_plan import (
     build_review_plan_item,
     infer_positional_option_dimensions,
@@ -247,6 +253,7 @@ def test_cell_edit_creates_an_effective_change_for_an_unchanged_preview_cell():
         for cell in item["review_preview"]["product"]["cells"]
         if cell["column_key"] == "vendor"
     )
+    assert vendor["edit_target"] == "preview_cell"
 
     products, history, cursor = _apply_cell_operation(
         [{}, {}, {}, deepcopy(product)],
@@ -268,6 +275,100 @@ def test_cell_edit_creates_an_effective_change_for_an_unchanged_preview_cell():
         row["field"] == "vendor" and row["proposed"] == "Northwind"
         for row in rebuilt["review_changes"]
     )
+
+
+def test_single_imported_variant_safely_matches_single_live_custom_variant():
+    imported = {
+        "title": "Aurora",
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [{"option1": "Default Title", "sku": "AUR-NEW", "price": 29}],
+    }
+    live = {
+        "id": "gid://shopify/Product/1",
+        "title": "Aurora",
+        "options": [{"name": "Material", "values": ["Canvas"]}],
+        "variants": [{
+            "id": "gid://shopify/ProductVariant/1",
+            "selectedOptions": [{"name": "Material", "value": "Canvas"}],
+            "sku": "AUR-OLD",
+            "price": "20",
+        }],
+    }
+
+    proposed, blockers, _ = merge_structured_product(live, imported, {"title": "Aurora"})
+
+    assert blockers == []
+    assert len(proposed["variants"]) == 1
+    assert proposed["variants"][0]["id"] == "gid://shopify/ProductVariant/1"
+    assert proposed["variants"][0]["optionValues"] == [
+        {"optionName": "Material", "name": "Canvas"}
+    ]
+    assert proposed["variants"][0]["sku"] == "AUR-NEW"
+    assert proposed["variants"][0]["price"] == "29"
+    assert proposed["_review_single_variant_match"]["matched"] is True
+
+
+def test_ambiguous_multi_variant_schema_keeps_specific_supported_remedies():
+    imported = {
+        "title": "Heritage",
+        "options": [{"name": "Size", "values": ["S", "M"]}],
+        "variants": [
+            {"option1": "S", "sku": "HER-S", "price": 20},
+            {"option1": "M", "sku": "HER-M", "price": 20},
+        ],
+    }
+    live = {
+        "options": [{"name": "Material", "values": ["Canvas", "Leather"]}],
+        "variants": [
+            {"selectedOptions": [{"name": "Material", "value": "Canvas"}]},
+            {"selectedOptions": [{"name": "Material", "value": "Leather"}]},
+        ],
+    }
+
+    _, blockers, _ = merge_structured_product(live, imported, {"title": "Heritage"})
+    mismatch = next(
+        blocker for blocker in blockers if blocker["code"] == "INCOMPATIBLE_OPTION_SCHEMA"
+    )
+    assert mismatch["context"] == {
+        "imported_option_names": ["Size"],
+        "live_option_names": ["Material"],
+    }
+    assert mismatch["remedies"] == ["manage_options_variants", "exclude_product"]
+    assert "Size" in mismatch["message"] and "Material" in mismatch["message"]
+
+
+def test_blank_optional_inventory_is_no_operation_and_whole_numbers_are_valid():
+    schema = {"editor": "integer", "required": False}
+    assert _canonical_review_value({"edit_schema": schema}, "") is None
+    assert _canonical_review_value({"edit_schema": schema}, None) is None
+    assert _canonical_review_value({"edit_schema": schema}, "12") == 12
+    with pytest.raises(ValueError, match="whole number"):
+        _canonical_review_value({"edit_schema": schema}, "1.5")
+
+
+def test_excluded_blocked_product_does_not_emit_blocking_field_errors():
+    item = _item({"title": "Blocked", "variants": [{"sku": "", "price": 10}]})
+    item["selection_intent"] = "exclude"
+    assert _blocking_field_errors({"review_contract_version": 5, "items": [item]}) == []
+
+
+def test_blocked_product_can_persist_an_explicit_exclusion():
+    item = _item({"title": "Blocked", "variants": [{"sku": "", "price": 10}]})
+    item.update({"operation": "blocked", "selectable": False, "selected": False, "selection_intent": "include"})
+    plan = {"review_contract_version": 5, "items": [item]}
+
+    _apply_ui_operation(
+        plan,
+        {},
+        {
+            "operation": "selection",
+            "item_id": item["item_id"],
+            "selected": False,
+            "included_change_ids": [],
+        },
+    )
+
+    assert item["selection_intent"] == "exclude"
 
 
 def test_positional_size_and_color_are_derived_with_three_source_rows():

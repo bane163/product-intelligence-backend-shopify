@@ -853,10 +853,13 @@ async def test_missing_required_sku_and_price_can_be_edited_and_applied(monkeypa
     assert blank_price.status_code == 422
     blank_error = blank_price.json()["detail"]["field_errors"][0]
     assert blank_error == {
+        "item_id": "required-item",
         "change_id": required_rows["price"]["change_id"],
+        "cell_id": "",
         "value_path": required_rows["price"]["value_path"],
         "code": "INVALID_REVIEW_VALUE",
         "message": "This field is required.",
+        "remedy": "edit",
     }
     assert edited.status_code == 200, edited.text
     assert applied.status_code == 200, applied.text
@@ -1118,10 +1121,13 @@ async def test_invalid_value_operations_return_atomic_structured_422():
     detail = rejected.json()["detail"]
     assert detail["code"] == "REVIEW_FIELD_VALIDATION_FAILED"
     assert detail["field_errors"] == [{
+        "item_id": "item-1",
         "change_id": "title-change",
+        "cell_id": "",
         "value_path": "title",
         "code": "INVALID_REVIEW_VALUE",
         "message": "This field is required.",
+        "remedy": "edit",
     }]
     active = resumed.json()["session"]
     assert active["edit_revision"] == 1

@@ -143,10 +143,27 @@ def _workbook_model(products: list[dict[str, Any]]) -> ProductsList:
 
 def _field_error(row: dict[str, Any], code: str, message: str) -> dict[str, str]:
     return {
+        "item_id": str(row.get("item_id") or ""),
         "change_id": str(row.get("change_id") or ""),
+        "cell_id": str(row.get("cell_id") or ""),
         "value_path": str(row.get("value_path") or ""),
         "code": code,
         "message": message,
+        "remedy": "edit",
+    }
+
+
+def _cell_field_error(
+    item: dict[str, Any], cell: dict[str, Any], code: str, message: str
+) -> dict[str, str]:
+    return {
+        "item_id": str(item.get("item_id") or cell.get("item_id") or ""),
+        "change_id": str(cell.get("change_id") or ""),
+        "cell_id": str(cell.get("cell_id") or ""),
+        "value_path": str(cell.get("value_path") or ""),
+        "code": code,
+        "message": message,
+        "remedy": "edit",
     }
 
 
@@ -250,6 +267,10 @@ def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
     if editor == "integer":
         from application.domain.shopify_mutation_plan import validate_inventory_quantity
 
+        if value is None or (isinstance(value, str) and not value.strip()):
+            if schema.get("required"):
+                raise ValueError("This field is required.")
+            return None
         return validate_inventory_quantity(value)
     if editor == "boolean":
         if isinstance(value, bool):
@@ -593,7 +614,12 @@ def _set_product_value(
             "inventoryItem.weight.value": "weight",
             "inventoryItem.weight.unit": "weight_unit",
         }
-        target[aliases.get(field, field)] = value
+        target_field = aliases.get(field, field)
+        if field == "inventory_quantity" and value is None:
+            target.pop("inventory_quantity", None)
+            target.pop("inventoryQuantity", None)
+        else:
+            target[target_field] = value
     elif scope == "option":
         options = (
             product.get("options") if isinstance(product.get("options"), list) else []
@@ -962,6 +988,7 @@ def _preserve_working_selection(
         preserved = preserved_by_source_index.get(int(item["source_index"]))
         if preserved is None:
             continue
+        item["selection_intent"] = preserved["selection_intent"]
         item["selected"] = bool(item.get("selectable") and preserved["selected"])
         included_ids = set(preserved["included_change_ids"])
         for row in item.get("review_changes", []):
@@ -1116,6 +1143,8 @@ def _blocking_field_errors(plan: dict[str, Any]) -> list[dict[str, str]]:
     for item in plan.get("items", []):
         if not isinstance(item, dict):
             continue
+        if item.get("selection_intent") == "exclude":
+            continue
         preview = item.get("review_preview") if isinstance(item.get("review_preview"), dict) else {}
         cells = [
             cell
@@ -1136,18 +1165,25 @@ def _blocking_field_errors(plan: dict[str, Any]) -> list[dict[str, str]]:
             cell = next((candidate for candidate in cells if candidate.get("value_path") == path), None)
             errors.append(
                 {
+                    "item_id": str(item.get("item_id") or ""),
                     "change_id": str((cell or {}).get("change_id") or ""),
+                    "cell_id": str((cell or {}).get("cell_id") or ""),
                     "value_path": path,
                     "code": str(blocker.get("code") or "REVIEW_BLOCKER"),
                     "message": str(
                         blocker.get("message")
                         or "Correct this field before saving your changes."
                     ),
+                    "remedy": str(
+                        next(iter(blocker.get("remedies") or []), "edit")
+                    ),
                 }
             )
-    unique: dict[tuple[str, str], dict[str, str]] = {}
+    unique: dict[tuple[str, str, str], dict[str, str]] = {}
     for error in errors:
-        unique.setdefault((error["code"], error["value_path"]), error)
+        unique.setdefault(
+            (error["item_id"], error["code"], error["value_path"]), error
+        )
     return list(unique.values())
 
 
@@ -2042,13 +2078,13 @@ def _apply_cell_operation(
     cell_id = str(operation.get("cell_id") or "")
     product_index, item, cell = _working_cell_match(working_plan, cell_id)
     if str(operation.get("value_path") or "") != str(cell.get("value_path") or ""):
-        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "STALE_VALUE_PATH", "message": "This preview cell changed. Refresh and try again."}])
+        raise _validation_failure([_cell_field_error(item, cell, "STALE_VALUE_PATH", "This preview cell changed. Refresh and try again.")])
     if cell.get("editable") is not True or product_index >= len(products):
-        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "REVIEW_FIELD_READ_ONLY", "message": "This preview cell is read-only."}])
+        raise _validation_failure([_cell_field_error(item, cell, "REVIEW_FIELD_READ_ONLY", str(cell.get("read_only_reason") or "This preview cell is read-only."))])
     try:
         value = deepcopy(cell.get("original_proposed")) if operation_type == "cell_revert" else _canonical_review_value(cell, operation.get("value"))
     except ValueError as exc:
-        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "INVALID_REVIEW_VALUE", "message": str(exc)}]) from None
+        raise _validation_failure([_cell_field_error(item, cell, "INVALID_REVIEW_VALUE", str(exc))]) from None
     before = _structural_state(products[product_index], item)
     prior_row = next(
         (
@@ -2092,7 +2128,7 @@ def _apply_cell_operation(
         ):
             _set_product_value(edited_proposed, cell, value, origin=edit_origin)
     except (ValueError, HTTPException):
-        raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "STALE_CELL_IDENTITY", "message": "This preview cell no longer has a unique target."}]) from None
+        raise _validation_failure([_cell_field_error(item, cell, "STALE_CELL_IDENTITY", "This preview cell no longer has a unique target.")]) from None
     rebuilt = build_review_plan_item(
         item_id=str(item.get("item_id") or ""), currency_code=str(item.get("currency_code") or "USD"),
         source_index=product_index, source_product=edited_product,

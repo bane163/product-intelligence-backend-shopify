@@ -302,18 +302,50 @@ async def execute(
             for product in candidate_products:
                 apply_server_owned_origins(product)
             cleared_optional_paths: tuple[str, ...] = ()
+            sanitation_diagnostics: list[dict[str, Any]] = []
             if evidence_attempt + 1 >= max_evidence_attempts:
                 cleared_optional_paths = blank_unverified_optional_pdf_values(
-                    candidate_products, evidence_catalog
+                    candidate_products,
+                    evidence_catalog,
+                    diagnostics=sanitation_diagnostics,
                 )
             if cleared_optional_paths:
                 emit_and_persist(
                     phase="pdf_unverified_optional_values_cleared",
                     message="Left optional PDF fields blank when no indexed evidence exists",
-                    payload_preview={"value_paths": list(cleared_optional_paths)},
+                    payload_preview={
+                        "value_paths": list(cleared_optional_paths),
+                        "products": sanitation_diagnostics,
+                    },
                 )
             validation = validate_indexed_pdf_evidence(candidate_products, evidence_catalog)
             if validation.valid:
+                # Sanitation mutates the model-dumped dictionaries. Verify that
+                # pruning optional leaves did not invalidate the ProductsList
+                # contract before source-reference resolution mutates them again.
+                try:
+                    ProductsList.model_validate({"products": candidate_products})
+                except Exception as exc:
+                    schema_paths = tuple(
+                        ".".join(str(part) for part in error.get("loc", ()))
+                        for error in getattr(exc, "errors", lambda: [])()
+                    ) or ("products",)
+                    feedback = (
+                        "Sanitized PDF payload failed ProductsList validation: "
+                        + ", ".join(schema_paths)
+                    )
+                    emit_and_persist(
+                        phase="pdf_evidence_validation_failed",
+                        message="Sanitized PDF payload is not a complete ProductsList",
+                        level="error",
+                        payload_preview={
+                            "attempts": evidence_attempt + 1,
+                            "affected_paths": list(schema_paths),
+                            "products": sanitation_diagnostics,
+                        },
+                        error=feedback,
+                    )
+                    raise SourceEvidenceValidationFailed(schema_paths, feedback) from exc
                 resolution_stats: dict[str, int] = {}
                 resolved = resolve_indexed_pdf_source_refs(
                     candidate_products,

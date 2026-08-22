@@ -683,3 +683,78 @@ async def test_pdf_evidence_gets_exactly_two_corrections_then_fails_without_outp
     phases = [event["phase"] for event in tracing.events]
     assert phases.count("pdf_evidence_correction_attempt") == 2
     assert phases.count("pdf_evidence_validation_failed") == 1
+
+
+@pytest.mark.asyncio
+async def test_pdf_third_response_sanitizes_optional_fields_and_keeps_all_products(monkeypatch):
+    pdf = _minimal_pdf_bytes()
+    _patch_canonical_pdf(monkeypatch, pdf)
+
+    def payload(suffix: str) -> dict:
+        return {
+            "products": [
+                {
+                    "title": "Classic Cotton T-Shirt",
+                    "seo_title": f"Unsupported SEO A {suffix}",
+                    "source_refs": [
+                        {"value_path": "title", "evidence_index": 1}
+                    ],
+                },
+                {
+                    "title": "Second Catalog Product",
+                    "seo_description": f"Unsupported SEO B {suffix}",
+                    "source_refs": [
+                        {"value_path": "title", "evidence_index": 1}
+                    ],
+                },
+            ]
+        }
+
+    llm = _SequenceLLM([payload("one"), payload("two"), payload("three")])
+    tracing = _FakeTracing()
+
+    result = await process_document_uc.execute(
+        supabase=_FakeSupabase(),
+        llm=llm,
+        tracing=tracing,
+        ctx=SimpleNamespace(
+            services=SimpleNamespace(
+                document_layout=_PdfLayoutService(), collabora=None
+            )
+        ),
+        file_bytes=pdf,
+        input_name="source.pdf",
+        input_content_type="application/pdf",
+        source_file_id="uploaded-file",
+        shop_domain="store.myshopify.com",
+        enable_ai_enhancements=False,
+    )
+
+    assert len(llm.calls) == 3
+    products = result["result"]["products"]
+    assert [product["title"] for product in products] == [
+        "Classic Cotton T-Shirt",
+        "Second Catalog Product",
+    ]
+    assert all("seo_title" not in product for product in products)
+    assert all("seo_description" not in product for product in products)
+    cleared = next(
+        event
+        for event in tracing.events
+        if event["phase"] == "pdf_unverified_optional_values_cleared"
+    )
+    assert cleared["payload_preview"]["products"] == [
+        {
+            "product_index": 0,
+            "product_title": "Classic Cotton T-Shirt",
+            "value_paths": ["seo.title"],
+        },
+        {
+            "product_index": 1,
+            "product_title": "Second Catalog Product",
+            "value_paths": ["seo.description"],
+        },
+    ]
+    phases = [event["phase"] for event in tracing.events]
+    assert phases.count("pdf_evidence_correction_attempt") == 2
+    assert phases.count("pdf_evidence_validation_success") == 1

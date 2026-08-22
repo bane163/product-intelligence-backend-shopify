@@ -66,6 +66,26 @@ def test_prompt_uses_numbered_catalog_and_canonical_correction_rules():
     assert "never return page, bbox" in prompt.casefold()
 
 
+def test_prompt_preserves_main_branch_detailed_extraction_rules():
+    prompt = build_pdf_workflow_prompt(_request()).casefold()
+
+    for rule in (
+        "seo title and description",
+        "google shopping fields",
+        "booleans",
+        "lists such as tags and option values",
+        "json values",
+        "every variant field",
+        "inventory",
+        "metafield value and type",
+        "seo.title",
+        "option[color].values",
+        "variant[color-red].taxable",
+        "complete productslist with every product again",
+    ):
+        assert rule in prompt
+
+
 def test_canonical_pdf_rendering_produces_visual_pages():
     pages = render_pdf_pages(_pdf())
 

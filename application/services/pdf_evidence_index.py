@@ -46,6 +46,13 @@ PROTECTED_VARIANT_ALIASES = {
     ),
 }
 
+VARIANT_VALUE_ALIASES = {
+    **PROTECTED_VARIANT_ALIASES,
+    "variant_image": ("variant_image", "image"),
+    "status": ("status",),
+    "title": ("title",),
+}
+
 
 class SourceEvidenceValidationFailed(RuntimeError):
     code = "SOURCE_EVIDENCE_VALIDATION_FAILED"
@@ -262,9 +269,21 @@ def validate_indexed_pdf_evidence(
         affected.add(normalized)
         reasons.setdefault(normalized, set()).add(reason)
 
-    for product in products:
+    for product_index, product in enumerate(products):
         items = list(iter_review_values(product))
         incoming = product.get("source_refs")
+        if incoming not in (None, []) and not isinstance(incoming, list):
+            add(
+                f"product[{product_index}].source_refs",
+                "is malformed and must be a list",
+            )
+        elif isinstance(incoming, list):
+            for ref_index, ref in enumerate(incoming):
+                if not isinstance(ref, dict):
+                    add(
+                        f"product[{product_index}].source_refs[{ref_index}]",
+                        "is malformed and cannot be associated with an optional value",
+                    )
         refs = (
             [ref for ref in incoming if isinstance(ref, dict)]
             if isinstance(incoming, list)
@@ -295,12 +314,18 @@ def validate_indexed_pdf_evidence(
             path = canonical_value_path(item.value_path)
             origin = _origin_for(product, item.value_path)
             candidates = refs_by_path.get(path, [])
-            if origin in NON_SOURCE_ORIGINS and not is_protected_field(
+            requires_source = path == "title" or is_protected_field(
                 item.value_path, item.field
-            ):
+            )
+            if origin in NON_SOURCE_ORIGINS and not requires_source:
                 continue
             if origin in NON_SOURCE_ORIGINS:
-                add(path, "is commerce-sensitive and requires indexed source evidence")
+                reason = (
+                    "is the required product title and requires indexed source evidence"
+                    if path == "title"
+                    else "is commerce-sensitive and requires indexed source evidence"
+                )
+                add(path, reason)
                 continue
             if origin in {"merchant_edited", "unknown"}:
                 add(path, f"uses invalid new-extraction origin '{origin}'")
@@ -334,18 +359,29 @@ def validate_indexed_pdf_evidence(
     feedback = (
         "Source evidence validation failed for these canonical paths: "
         f"{details}. Return the complete products payload. For every source-derived value, "
-        "supply value_path plus a numeric evidence_index from the catalog. Otherwise set that "
-        "path's value_origins entry to derived, defaulted, or ai_assisted. Do not return coordinates."
+        "supply value_path plus a numeric evidence_index from the catalog. The product title and "
+        "commerce-sensitive values always require indexed evidence. Only for other optional values, "
+        "set that path's value_origins entry to derived, defaulted, or ai_assisted when appropriate. "
+        "Do not return coordinates."
     )
     return EvidenceValidationResult(False, tuple(sorted(affected)), feedback)
 
 
 def blank_unverified_optional_pdf_values(
-    products: list[dict[str, Any]], catalog: EvidenceCatalog
+    products: list[dict[str, Any]],
+    catalog: EvidenceCatalog,
+    *,
+    diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[str, ...]:
-    """Remove every protected value that has no trusted PDF evidence index."""
+    """Remove unsupported optional leaves after the final correction attempt.
+
+    A value survives only when it has a valid indexed reference, or when it is a
+    non-commerce optional value with an explicit non-source origin.  References
+    that cannot be associated unambiguously are intentionally left in place so
+    the subsequent validation remains strict.
+    """
     removed_paths: set[str] = set()
-    for product in products:
+    for product_index, product in enumerate(products):
         items = list(iter_review_values(product))
         incoming = product.get("source_refs")
         refs = (
@@ -363,12 +399,18 @@ def blank_unverified_optional_pdf_values(
                 and catalog.resolve(index) is not None
             )
         }
-        unsupported_paths = {
-            canonical_value_path(item.value_path)
-            for item in items
-            if is_protected_field(item.value_path, item.field)
-            and canonical_value_path(item.value_path) not in valid_paths
-        }
+        unsupported_paths: set[str] = set()
+        for item in items:
+            path = canonical_value_path(item.value_path)
+            if path == "title" or path in valid_paths:
+                continue
+            origin = _origin_for(product, item.value_path)
+            if (
+                origin in NON_SOURCE_ORIGINS
+                and not is_protected_field(item.value_path, item.field)
+            ):
+                continue
+            unsupported_paths.add(path)
         if not unsupported_paths:
             continue
         product_removed_paths: set[str] = set()
@@ -377,10 +419,25 @@ def blank_unverified_optional_pdf_values(
             path = canonical_value_path(item.value_path)
             if path not in unsupported_paths or item.scope != "product":
                 continue
-            for key in tuple(product):
-                if canonical_value_path(key) == canonical_value_path(item.field):
-                    product.pop(key, None)
-                    product_removed_paths.add(path)
+            if _remove_product_value(product, path, item.field):
+                product_removed_paths.add(path)
+
+        raw_options = (
+            product.get("productOptions")
+            if isinstance(product.get("productOptions"), list)
+            else product.get("options")
+        )
+        if isinstance(raw_options, list):
+            for option in raw_options:
+                if not isinstance(option, dict):
+                    continue
+                name = str(option.get("name") or "").strip()
+                path = canonical_value_path(f"option[{name}].values")
+                if path not in unsupported_paths:
+                    continue
+                option.pop("values", None)
+                option.pop("optionValues", None)
+                product_removed_paths.add(path)
 
         options = _options_for_variant_subjects(product)
         variants = product.get("variants")
@@ -392,7 +449,7 @@ def blank_unverified_optional_pdf_values(
             subject = _variant_subject_for_blanking(variant, options)
             prefix = f"variant[{subject}]"
             inventory = variant.get("inventoryItem") or variant.get("inventory_item")
-            for field, aliases in PROTECTED_VARIANT_ALIASES.items():
+            for field, aliases in VARIANT_VALUE_ALIASES.items():
                 candidate_paths = (
                     canonical_value_path(f"{prefix}.{field}"),
                     canonical_value_path(f"inventory[{subject}].{field}"),
@@ -409,21 +466,139 @@ def blank_unverified_optional_pdf_values(
                         inventory.pop(alias, None)
                 product_removed_paths.add(path)
 
-        product["source_refs"] = [
+        metafields = product.get("metafields")
+        if isinstance(metafields, dict):
+            metafields = metafields.get("nodes")
+        for metafield in metafields if isinstance(metafields, list) else []:
+            if not isinstance(metafield, dict):
+                continue
+            subject = f"{metafield.get('namespace') or ''}.{metafield.get('key') or ''}"
+            for field in ("value", "type"):
+                path = canonical_value_path(f"metafield[{subject}].{field}")
+                if path in unsupported_paths:
+                    metafield.pop(field, None)
+                    product_removed_paths.add(path)
+
+        retained_refs: list[Any] = [
             ref
             for position, ref in enumerate(refs)
             if canonical_value_path(paths_by_position.get(position))
             not in product_removed_paths
         ]
-        origins = product.get("value_origins")
-        if isinstance(origins, dict):
-            product["value_origins"] = {
-                key: value
-                for key, value in origins.items()
-                if canonical_value_path(key) not in product_removed_paths
-            }
+        if isinstance(incoming, list):
+            # Preserve malformed entries so revalidation can reject them.  They
+            # cannot be safely attributed to a removed optional value.
+            retained_refs.extend(ref for ref in incoming if not isinstance(ref, dict))
+            product["source_refs"] = retained_refs
+        elif incoming is None:
+            product["source_refs"] = retained_refs
+        for origin_key in ("value_origins", "_value_origins"):
+            origins = product.get(origin_key)
+            if isinstance(origins, dict):
+                product[origin_key] = {
+                    key: value
+                    for key, value in origins.items()
+                    if canonical_value_path(key) not in product_removed_paths
+                }
+        _prune_sanitized_containers(product)
+        if diagnostics is not None and product_removed_paths:
+            diagnostics.append(
+                {
+                    "product_index": product_index,
+                    "product_title": str(product.get("title") or ""),
+                    "value_paths": sorted(product_removed_paths),
+                }
+            )
         removed_paths.update(product_removed_paths)
     return tuple(sorted(removed_paths))
+
+
+def _remove_product_value(product: dict[str, Any], path: str, field: str) -> bool:
+    aliases = {
+        "descriptionhtml": ("descriptionHtml", "body_html", "bodyHtml", "description"),
+        "producttype": ("productType", "product_type", "product_category"),
+        "seo.title": ("seo_title", "seoTitle", "meta_title"),
+        "seo.description": (
+            "seo_description",
+            "seoDescription",
+            "meta_description",
+        ),
+    }.get(path, (field,))
+    removed = False
+    for alias in aliases:
+        if alias in product:
+            product.pop(alias, None)
+            removed = True
+    if path.startswith("seo.") and isinstance(product.get("seo"), dict):
+        seo_field = path.split(".", 1)[1]
+        if seo_field in product["seo"]:
+            product["seo"].pop(seo_field, None)
+            removed = True
+    return removed
+
+
+def _prune_sanitized_containers(product: dict[str, Any]) -> None:
+    seo = product.get("seo")
+    if isinstance(seo, dict) and not seo:
+        product.pop("seo", None)
+
+    for options_key in ("productOptions", "options"):
+        options = product.get(options_key)
+        if not isinstance(options, list):
+            continue
+        product[options_key] = [
+            option
+            for option in options
+            if isinstance(option, dict)
+            and (option.get("values") or option.get("optionValues"))
+        ]
+        if not product[options_key]:
+            product.pop(options_key, None)
+
+    variants_container = product.get("variants")
+    variants = (
+        variants_container.get("nodes")
+        if isinstance(variants_container, dict)
+        else variants_container
+    )
+    if isinstance(variants, list):
+        for variant in variants:
+            if not isinstance(variant, dict):
+                continue
+            for inventory_key in ("inventoryItem", "inventory_item"):
+                if isinstance(variant.get(inventory_key), dict) and not variant[inventory_key]:
+                    variant.pop(inventory_key, None)
+        variants[:] = [variant for variant in variants if isinstance(variant, dict) and variant]
+        if isinstance(variants_container, dict):
+            if not variants:
+                product.pop("variants", None)
+        elif not variants:
+            product.pop("variants", None)
+
+    metafields_container = product.get("metafields")
+    metafields = (
+        metafields_container.get("nodes")
+        if isinstance(metafields_container, dict)
+        else metafields_container
+    )
+    if isinstance(metafields, list):
+        metafields[:] = [
+            metafield
+            for metafield in metafields
+            if isinstance(metafield, dict)
+            and metafield.get("namespace")
+            and metafield.get("key")
+            and metafield.get("value") not in (None, "")
+        ]
+        if isinstance(metafields_container, dict):
+            if not metafields:
+                product.pop("metafields", None)
+        elif not metafields:
+            product.pop("metafields", None)
+
+    for key in ("source_refs", "value_origins", "_value_origins"):
+        if product.get(key) in ([], {}):
+            product.pop(key, None)
 
 
 def _options_for_variant_subjects(product: dict[str, Any]) -> list[str]:
@@ -447,7 +622,27 @@ def _variant_subject_for_blanking(
     variant: dict[str, Any], option_names: list[str]
 ) -> str:
     pairs: list[str] = []
+    selected = (
+        variant.get("selectedOptions")
+        or variant.get("selected_options")
+        or variant.get("optionValues")
+        or variant.get("option_values")
+    )
+    if isinstance(selected, list):
+        for index, item in enumerate(selected):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("optionName") or item.get("option_name")
+            value = item.get("name")
+            if "value" in item:
+                name, value = item.get("name") or name, item.get("value")
+            if not name and index < len(option_names):
+                name = option_names[index]
+            if name is not None and value is not None:
+                pairs.append(f"{str(name).strip()}: {str(value).strip()}")
     for index, name in enumerate(option_names[:3], start=1):
+        if pairs:
+            break
         value = variant.get(f"option{index}")
         if value not in (None, ""):
             pairs.append(f"{name}: {value}")

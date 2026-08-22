@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import openpyxl
 import pytest
+from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from app_context import get_app_context
@@ -672,7 +673,7 @@ async def test_workbook_apply_parses_saved_copy_and_rebuilds_once(monkeypatch):
         }],
     }
 
-    async def fake_create_plan(draft_id, request, ctx):
+    async def fake_create_plan(draft_id, request, payload, ctx):
         saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
         assert saved["revision"] == 2
         assert saved["products"][0]["variants"][0]["price"] == 35.0
@@ -773,7 +774,7 @@ async def test_missing_required_sku_and_price_can_be_edited_and_applied(monkeypa
         if row["field"] in {"sku", "price"}
     }
 
-    async def fake_create_plan(draft_id, request, ctx):
+    async def fake_create_plan(draft_id, request, payload, ctx):
         saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
         variant = saved["products"][0]["variants"][0]
         assert variant["sku"] == "TEE-DEFAULT"
@@ -926,7 +927,7 @@ async def test_grid_apply_replaces_canonical_workbook_and_preserves_selection(mo
         }],
     }
 
-    async def fake_create_plan(draft_id, request, ctx):
+    async def fake_create_plan(draft_id, request, payload, ctx):
         saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
         assert saved["revision"] == 2
         assert saved["products"][0]["title"] == "Grid edited"
@@ -1009,6 +1010,168 @@ async def test_grid_apply_replaces_canonical_workbook_and_preserves_selection(mo
     assert [row["included"] for row in rebuilt_item["review_changes"]] == [True, False]
     latest_item = service.get_latest_mutation_plan(draft_id, shop_domain=shop)["items"][0]
     assert [row["included"] for row in latest_item["review_changes"]] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_grid_apply_retry_resumes_exact_partial_save_without_new_revision(monkeypatch):
+    import api.agents.review_edit_sessions as sessions_api
+
+    service = get_app_context().services.supabase._service
+    shop = "grid-apply-retry.myshopify.com"
+    draft_id = "grid-apply-retry-draft"
+    location_id = "gid://shopify/Location/7"
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "products": [{"title": "Original", "vendor": "Original vendor"}],
+    }
+    service.mutation_plans["grid-apply-retry-plan"] = {
+        "plan_id": "grid-apply-retry-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "inventory_context": {
+            "selected_location": {"id": location_id, "name": "Main"}
+        },
+        "items": [{
+            "item_id": "retry-item",
+            "source_index": 0,
+            "selectable": True,
+            "selected": True,
+            "review_changes": [{
+                "change_id": "retry-title",
+                "value_path": "title",
+                "field": "title",
+                "scope": "product",
+                "disposition": "applicable",
+                "included": True,
+            }],
+        }],
+    }
+    rebuild_calls = 0
+
+    async def flaky_create_plan(draft_id, request, payload, ctx):
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
+        assert saved["revision"] == 2
+        assert saved["products"][0]["title"] == "Retry survives"
+        assert payload == {"inventory_location_id": location_id}
+        if rebuild_calls == 1:
+            raise HTTPException(status_code=503, detail="simulated rebuild failure")
+        return {"plan": {
+            "plan_id": "retry-rebuilt-plan",
+            "draft_id": draft_id,
+            "shop_domain": shop,
+            "draft_revision": 2,
+            "version": 2,
+            "status": "review",
+            "review_contract_version": 2,
+            "inventory_context": {
+                "selected_location": {"id": location_id, "name": "Main"}
+            },
+            "items": [{
+                "item_id": "retry-rebuilt-item",
+                "source_index": 0,
+                "selectable": True,
+                "selected": True,
+                "review_changes": [{
+                    "change_id": "retry-title",
+                    "disposition": "applicable",
+                    "required": False,
+                    "included": True,
+                }],
+            }],
+        }}
+
+    monkeypatch.setattr(sessions_api, "create_mutation_plan", flaky_create_plan)
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    headers = {"x-shop-domain": shop}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        session = created.json()["session"]
+        edited = await client.patch(
+            f"{base}/{session['session_id']}",
+            headers=headers,
+            json={
+                "expected_edit_revision": 1,
+                "operation": {
+                    "type": "value_edit",
+                    "change_id": "retry-title",
+                    "value_path": "title",
+                    "value": "Retry survives",
+                },
+            },
+        )
+        apply_url = f"{base}/{session['session_id']}/apply"
+        apply_body = {
+            "expected_edit_revision": edited.json()["session"]["edit_revision"]
+        }
+        failed = await client.post(apply_url, headers=headers, json=apply_body)
+        revision_after_failure = service.product_drafts[draft_id]["revision"]
+        retried = await client.post(apply_url, headers=headers, json=apply_body)
+
+    assert failed.status_code == 503
+    assert revision_after_failure == 2
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["draft"]["revision"] == 2
+    assert retried.json()["draft"]["products"][0]["title"] == "Retry survives"
+    assert retried.json()["session"]["status"] == "applied"
+    assert "_apply_checkpoint" not in retried.json()["session"]["working_plan"]
+    assert retried.json()["plan"]["inventory_context"]["selected_location"]["id"] == location_id
+    assert rebuild_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_grid_apply_keeps_unrelated_stale_draft_conflict():
+    service = get_app_context().services.supabase._service
+    shop = "grid-apply-stale.myshopify.com"
+    draft_id = "grid-apply-stale-draft"
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "revision": 1,
+        "products": [{"title": "Original"}],
+    }
+    service.mutation_plans["grid-apply-stale-plan"] = {
+        "plan_id": "grid-apply-stale-plan",
+        "draft_id": draft_id,
+        "shop_domain": shop,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 2,
+        "items": [],
+    }
+    base = f"/agents/product-drafts/{draft_id}/review-edit-sessions"
+    headers = {"x-shop-domain": shop}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post(
+            base, headers=headers, json={"surface": "grid", "base_revision": 1}
+        )
+        session = created.json()["session"]
+        service.product_drafts[draft_id] = {
+            **service.product_drafts[draft_id],
+            "revision": 2,
+            "products": [{"title": "Concurrent change"}],
+        }
+        applied = await client.post(
+            f"{base}/{session['session_id']}/apply",
+            headers=headers,
+            json={"expected_edit_revision": 1},
+        )
+
+    assert applied.status_code == 409
+    assert applied.json()["detail"] == {
+        "code": "REVIEW_REQUIRED",
+        "message": "Draft revision is stale",
+    }
 
 
 @pytest.mark.asyncio
@@ -1202,7 +1365,7 @@ async def test_option_value_rename_cascades_undoes_redoes_and_applies(monkeypatc
         }],
     }
 
-    async def fake_create_plan(draft_id, request, ctx):
+    async def fake_create_plan(draft_id, request, payload, ctx):
         saved = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=shop)
         assert saved["products"][0]["options"][0]["values"] == ["Black", "Forest Red"]
         assert saved["products"][0]["variants"][1]["option1"] == "Forest Red"

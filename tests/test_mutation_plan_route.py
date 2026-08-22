@@ -2,6 +2,7 @@ import re
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
 
 from app_context import get_app_context
 from main import app
@@ -41,6 +42,61 @@ def test_location_query_and_view_use_location_address_country_code():
         "name": "Main",
         "address": ["123 Main St", "New York, NY, 10001", "US"],
     }
+
+
+@pytest.mark.asyncio
+async def test_create_mutation_plan_direct_call_defaults_to_plain_payload(monkeypatch):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "mutation-plan-direct-call"
+    shop_domain = "direct-call.myshopify.com"
+    context = get_app_context()
+    service = context.services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [{"title": "Direct call product"}],
+    }
+
+    class FakeShopifyClient:
+        async def graphql(self, query, variables=None):
+            if query == mutation_plans_api.ACCESS_SCOPES_QUERY:
+                return {
+                    "data": {
+                        "currentAppInstallation": {
+                            "accessScopes": [{"handle": "write_products"}]
+                        },
+                        "shop": {"currencyCode": "USD"},
+                    }
+                }
+            assert query == mutation_plans_api.VARIANTS_BY_SKU_QUERY
+            return {"data": {"productVariants": {"nodes": []}}}
+
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        assert shop == shop_domain
+        return FakeShopifyClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/",
+        "query_string": b"",
+        "headers": [(b"x-shop-domain", shop_domain.encode())],
+    })
+
+    response = await mutation_plans_api.create_mutation_plan(
+        draft_id=draft_id,
+        request=request,
+        ctx=context,
+    )
+
+    assert response["plan"]["draft_revision"] == 1
 
 
 @pytest.mark.asyncio

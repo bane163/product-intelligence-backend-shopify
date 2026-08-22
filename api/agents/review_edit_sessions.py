@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import hashlib
 import json
 import re
 import uuid
@@ -67,6 +68,7 @@ CONTENT_HISTORY_OPERATIONS = {
     "variant_remove",
 }
 HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+APPLY_CHECKPOINT_KEY = "_apply_checkpoint"
 
 
 def _service(ctx: AppContext) -> Any:
@@ -90,6 +92,74 @@ def _products(draft: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(value, list)
         else []
     )
+
+
+def _products_fingerprint(products: list[dict[str, Any]]) -> str:
+    canonical = json.dumps(
+        products,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _apply_checkpoint(
+    *,
+    base_revision: int,
+    products: list[dict[str, Any]],
+    output_file_id: str,
+    output_filename: str,
+) -> dict[str, Any]:
+    return {
+        "base_draft_revision": base_revision,
+        "target_draft_revision": base_revision + 1,
+        "products_fingerprint": _products_fingerprint(products),
+        "output_file_id": output_file_id,
+        "output_filename": output_filename,
+    }
+
+
+def _is_expected_partial_apply(
+    session: dict[str, Any],
+    draft: dict[str, Any],
+    products: list[dict[str, Any]],
+    canonical_file: dict[str, Any] | None,
+) -> bool:
+    working_plan = session.get("working_plan")
+    checkpoint = (
+        working_plan.get(APPLY_CHECKPOINT_KEY)
+        if isinstance(working_plan, dict)
+        else None
+    )
+    if not isinstance(checkpoint, dict) or not isinstance(canonical_file, dict):
+        return False
+    base_revision = int(session.get("base_draft_revision") or 0)
+    return (
+        int(draft.get("revision") or 0) == base_revision + 1
+        and checkpoint.get("base_draft_revision") == base_revision
+        and checkpoint.get("target_draft_revision") == base_revision + 1
+        and checkpoint.get("products_fingerprint")
+        == _products_fingerprint(products)
+        == _products_fingerprint(_products(draft))
+        and str(checkpoint.get("output_file_id") or "")
+        == str(draft.get("output_file_id") or "")
+        and bool(canonical_file.get("content"))
+    )
+
+
+def _mutation_plan_rebuild_payload(working_plan: dict[str, Any]) -> dict[str, Any]:
+    inventory_context = working_plan.get("inventory_context")
+    selected_location = (
+        inventory_context.get("selected_location")
+        if isinstance(inventory_context, dict)
+        else None
+    )
+    location_id = (
+        selected_location.get("id") if isinstance(selected_location, dict) else None
+    )
+    return {"inventory_location_id": location_id} if location_id else {}
 
 
 def _require_review_v2(
@@ -2933,11 +3003,32 @@ async def apply_review_edit_session(
     if expected is not None and expected != int(session.get("edit_revision") or 1):
         raise _conflict("Edit revision is stale")
     draft = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=tenant)
-    if not draft or int(draft.get("revision") or 1) != int(
-        session.get("base_draft_revision") or 0
-    ):
+    if not isinstance(draft, dict):
         raise _conflict("Draft revision is stale")
     pending_before = _products({"products": session.get("pending_products")})
+    working_plan = (
+        session.get("working_plan")
+        if isinstance(session.get("working_plan"), dict)
+        else {}
+    )
+    checkpoint = working_plan.get(APPLY_CHECKPOINT_KEY)
+    checkpoint_file_id = (
+        str(checkpoint.get("output_file_id") or "")
+        if isinstance(checkpoint, dict)
+        else ""
+    )
+    canonical_checkpoint_file = (
+        ctx.supabase.file.get_file(checkpoint_file_id)
+        if checkpoint_file_id
+        else None
+    )
+    base_revision = int(session.get("base_draft_revision") or 0)
+    current_revision = int(draft.get("revision") or 1)
+    resuming_partial_apply = _is_expected_partial_apply(
+        session, draft, pending_before, canonical_checkpoint_file
+    )
+    if current_revision != base_revision and not resuming_partial_apply:
+        raise _conflict("Draft revision is stale")
     if session.get("surface") == "workbook":
         working_file_id = str(session.get("working_file_id") or "")
         working_file = ctx.supabase.file.get_file(working_file_id)
@@ -2977,11 +3068,6 @@ async def apply_review_edit_session(
         raise _validation_failure(
             [error for error in existing_field_errors if isinstance(error, dict)]
         )
-    working_plan = (
-        session.get("working_plan")
-        if isinstance(session.get("working_plan"), dict)
-        else {}
-    )
     working_plan = _rebuild_working_preflight(products, working_plan)
     working_plan = await _refresh_live_sku_collisions(products, working_plan, tenant)
     blocker_errors = (
@@ -3000,50 +3086,80 @@ async def apply_review_edit_session(
             }
         )
         raise _validation_failure(blocker_errors)
-    try:
-        workbook_model = _workbook_model(products)
-        workbook = create_excel_bytes(workbook_model)
-    except (ValidationError, WorkbookValidationError, ValueError, TypeError) as exc:
-        field_errors = _preflight_field_errors(exc, working_plan)
-        LOG.warning(
-            "import_review_apply_validation_failed draft_id=%s session_id=%s change_ids=%s",
-            draft_id,
-            session_id,
-            ",".join(error.get("change_id", "") for error in field_errors[:10]),
+    if resuming_partial_apply:
+        new_revision = current_revision
+        output_file_id = str(draft.get("output_file_id") or checkpoint_file_id)
+        output_filename = str(
+            draft.get("output_filename")
+            or (checkpoint.get("output_filename") if isinstance(checkpoint, dict) else "")
+            or "generated-import.xlsx"
         )
-        raise _validation_failure(field_errors) from None
-    new_revision = int(draft.get("revision") or 1) + 1
-    output_file_id = str(draft.get("output_file_id") or uuid.uuid4())
-    output_filename = str(draft.get("output_filename") or "generated-import.xlsx")
-    save_file(
-        supabase=ctx.supabase,
-        file_id=output_file_id,
-        name=output_filename,
-        content=workbook,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        file_origin="workflow_output",
-        shop_domain=tenant,
-    )
-    saved_draft = ctx.supabase.drafts.save_product_draft(
-        draft_id=draft_id,
-        run_id=draft.get("run_id"),
-        import_mode=str(draft.get("import_mode") or "auto"),
-        draft_name=draft.get("draft_name"),
-        shop_domain=tenant,
-        input_file_id=draft.get("input_file_id"),
-        input_filename=draft.get("input_filename"),
-        output_file_id=output_file_id,
-        output_filename=output_filename,
-        extraction_status=draft.get("extraction_status"),
-        extraction_run_id=draft.get("extraction_run_id"),
-        extraction_error=draft.get("extraction_error"),
-        products=products,
-        revision=new_revision,
-    )
-    plan_response = await create_mutation_plan(
-        draft_id=draft_id, request=request, ctx=ctx
-    )
-    rebuilt_plan = plan_response["plan"]
+        saved_draft = draft
+    else:
+        try:
+            workbook_model = _workbook_model(products)
+            workbook = create_excel_bytes(workbook_model)
+        except (ValidationError, WorkbookValidationError, ValueError, TypeError) as exc:
+            field_errors = _preflight_field_errors(exc, working_plan)
+            LOG.warning(
+                "import_review_apply_validation_failed draft_id=%s session_id=%s change_ids=%s",
+                draft_id,
+                session_id,
+                ",".join(error.get("change_id", "") for error in field_errors[:10]),
+            )
+            raise _validation_failure(field_errors) from None
+        new_revision = base_revision + 1
+        output_file_id = str(draft.get("output_file_id") or uuid.uuid4())
+        output_filename = str(draft.get("output_filename") or "generated-import.xlsx")
+        working_plan[APPLY_CHECKPOINT_KEY] = _apply_checkpoint(
+            base_revision=base_revision,
+            products=products,
+            output_file_id=output_file_id,
+            output_filename=output_filename,
+        )
+        session = _service(ctx).save_review_edit_session(
+            {**session, "working_plan": working_plan, "updated_at": _now()}
+        )
+        save_file(
+            supabase=ctx.supabase,
+            file_id=output_file_id,
+            name=output_filename,
+            content=workbook,
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_origin="workflow_output",
+            shop_domain=tenant,
+        )
+        saved_draft = ctx.supabase.drafts.save_product_draft(
+            draft_id=draft_id,
+            run_id=draft.get("run_id"),
+            import_mode=str(draft.get("import_mode") or "auto"),
+            draft_name=draft.get("draft_name"),
+            shop_domain=tenant,
+            input_file_id=draft.get("input_file_id"),
+            input_filename=draft.get("input_filename"),
+            output_file_id=output_file_id,
+            output_filename=output_filename,
+            extraction_status=draft.get("extraction_status"),
+            extraction_run_id=draft.get("extraction_run_id"),
+            extraction_error=draft.get("extraction_error"),
+            products=products,
+            revision=new_revision,
+        )
+    latest_plan = _service(ctx).get_latest_mutation_plan(draft_id, shop_domain=tenant)
+    if (
+        resuming_partial_apply
+        and isinstance(latest_plan, dict)
+        and int(latest_plan.get("draft_revision") or 0) == new_revision
+    ):
+        rebuilt_plan = latest_plan
+    else:
+        plan_response = await create_mutation_plan(
+            draft_id=draft_id,
+            request=request,
+            payload=_mutation_plan_rebuild_payload(working_plan),
+            ctx=ctx,
+        )
+        rebuilt_plan = plan_response["plan"]
     if session.get("surface") == "grid" and isinstance(
         session.get("working_plan"), dict
     ):
@@ -3112,8 +3228,15 @@ async def apply_review_edit_session(
             rebuilt_plan, session["working_plan"]
         )
         _service(ctx).save_mutation_plan(rebuilt_plan)
+    cleaned_working_plan = deepcopy(session.get("working_plan") or {})
+    cleaned_working_plan.pop(APPLY_CHECKPOINT_KEY, None)
     applied = _service(ctx).save_review_edit_session(
-        {**session, "status": "applied", "updated_at": _now()}
+        {
+            **session,
+            "working_plan": cleaned_working_plan,
+            "status": "applied",
+            "updated_at": _now(),
+        }
     )
     if isinstance(session.get("working_file_id"), str) and session["working_file_id"]:
         ctx.supabase.file.delete_file(session["working_file_id"])

@@ -1410,7 +1410,7 @@ async def test_apply_after_remove_never_reintroduces_omitted_variants(monkeypatc
     service, shop, draft_id, item = await _seed_session("apply-remove")
     row = _option_row(item)
 
-    async def fake_create_plan(draft_id, request, ctx):
+    async def fake_create_plan(draft_id, request, payload, ctx):
         saved = ctx.supabase.drafts.get_product_draft(
             draft_id, shop_domain=shop
         )

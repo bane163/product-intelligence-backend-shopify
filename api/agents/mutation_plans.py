@@ -542,9 +542,12 @@ async def update_product_draft(
 async def create_mutation_plan(
     draft_id: str,
     request: Request,
-    payload: dict[str, Any] = Body(default={}),
+    payload: dict[str, Any] | None = Body(default=None),
     ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
+    # FastAPI parameter defaults are sentinels when route handlers are invoked
+    # directly, so normalize the optional request body at the boundary.
+    payload = payload if isinstance(payload, dict) else {}
     tenant = require_authenticated_shop_domain(request)
     draft = ctx.supabase.drafts.get_product_draft(draft_id, shop_domain=tenant)
     if not isinstance(draft, dict):

@@ -1,5 +1,4 @@
 import io
-from datetime import datetime, timedelta, timezone
 
 import openpyxl
 import pytest
@@ -870,7 +869,7 @@ async def test_missing_required_sku_and_price_can_be_edited_and_applied(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_grid_apply_replaces_canonical_workbook_and_preserves_selection(monkeypatch):
+async def test_grid_apply_updates_draft_without_touching_file_storage_and_preserves_selection(monkeypatch):
     import api.agents.review_edit_sessions as sessions_api
 
     service = get_app_context().services.supabase._service
@@ -999,11 +998,11 @@ async def test_grid_apply_replaces_canonical_workbook_and_preserves_selection(mo
     assert applied.status_code == 200, applied.text
     payload = applied.json()
     canonical = service.get_file(canonical_id)
-    assert payload["output_file_id"] == canonical_id
-    assert payload["output_filename"] == "generated-import.xlsx"
-    assert payload["workbook_revision"] == canonical["content_revision"]
-    assert payload["workbook_revision"] != original_revision
-    assert canonical["content"] != b"canonical-before-grid-apply"
+    assert "output_file_id" not in payload
+    assert "output_filename" not in payload
+    assert "workbook_revision" not in payload
+    assert canonical["content_revision"] == original_revision
+    assert canonical["content"] == b"canonical-before-grid-apply"
     assert payload["draft"]["revision"] == 2
     rebuilt_item = payload["plan"]["items"][0]
     assert rebuilt_item["selected"] is True
@@ -1411,32 +1410,8 @@ async def test_option_value_rename_cascades_undoes_redoes_and_applies(monkeypatc
     assert redone.status_code == 200, redone.text
     assert redone.json()["session"]["pending_products"][0]["variants"][1]["option1"] == "Forest Red"
     assert applied.status_code == 200, applied.text
-    assert applied.json()["workbook_revision"] != previous_revision
+    assert "workbook_revision" not in applied.json()
     assert applied.json()["draft"]["revision"] == 2
-
-
-def test_expired_workbook_sessions_are_cleaned_up_with_their_working_copy():
-    service = get_app_context().services.supabase._service
-    shop = "expired-edits.myshopify.com"
-    file_id = "expired-working-copy"
-    service.save_file(file_id, "working.xlsx", b"bytes", "application/octet-stream", file_origin="review_working_copy", shop_domain=shop)
-    service.save_review_edit_session({
-        "session_id": "expired-session",
-        "draft_id": "expired-draft",
-        "shop_domain": shop,
-        "surface": "workbook",
-        "base_draft_revision": 1,
-        "edit_revision": 1,
-        "pending_products": [],
-        "working_file_id": file_id,
-        "status": "active",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "expires_at": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(),
-    })
-
-    assert service.get_active_review_edit_session("expired-draft", shop_domain=shop) is None
-    assert service.review_edit_sessions["expired-session"]["status"] == "expired"
-    assert service.get_file(file_id) is None
 
 
 def test_legacy_review_edit_session_is_lazily_hydrated_with_safe_history_defaults():
@@ -1512,6 +1487,76 @@ def test_review_edit_session_hydration_bounds_history_cursor_and_grid_state():
     )
     assert hydrated is not None
     assert hydrated["history_cursor"] == 0
+
+
+def test_hydration_retains_synthetic_cell_history_and_derives_unapplied_changes():
+    service = get_app_context().services.supabase._service
+    shop = "cell-history.myshopify.com"
+    service.product_drafts["cell-history-draft"] = {
+        "draft_id": "cell-history-draft",
+        "shop_domain": shop,
+        "products": [{"variants": [{"inventory_quantity": 4}]}],
+    }
+    service.review_edit_sessions["cell-history-session"] = {
+        "session_id": "cell-history-session",
+        "draft_id": "cell-history-draft",
+        "shop_domain": shop,
+        "surface": "grid",
+        "base_draft_revision": 1,
+        "edit_revision": 2,
+        "pending_products": [{"variants": [{"inventory_quantity": 9}]}],
+        "working_plan": {"items": []},
+        "history": [
+            {
+                "operation_id": "inventory-cell-edit",
+                "operation": "cell_edit",
+                "before": 4,
+                "after": 9,
+            }
+        ],
+        "history_cursor": 1,
+        "status": "active",
+    }
+
+    hydrated = service.get_review_edit_session(
+        "cell-history-session", shop_domain=shop
+    )
+
+    assert hydrated is not None
+    assert hydrated["history_cursor"] == 1
+    assert hydrated["history"][0]["operation"] == "cell_edit"
+    assert hydrated["has_unapplied_changes"] is True
+
+
+def test_zero_history_pending_product_difference_is_recoverable():
+    service = get_app_context().services.supabase._service
+    shop = "recovered-autosave.myshopify.com"
+    service.product_drafts["recovered-autosave-draft"] = {
+        "draft_id": "recovered-autosave-draft",
+        "shop_domain": shop,
+        "products": [{"variants": [{"inventory_quantity": 2}]}],
+    }
+    service.review_edit_sessions["recovered-autosave-session"] = {
+        "session_id": "recovered-autosave-session",
+        "draft_id": "recovered-autosave-draft",
+        "shop_domain": shop,
+        "surface": "grid",
+        "base_draft_revision": 1,
+        "edit_revision": 2,
+        "pending_products": [{"variants": [{"inventory_quantity": 7}]}],
+        "working_plan": {"items": []},
+        "history": [],
+        "history_cursor": 0,
+        "status": "active",
+    }
+
+    hydrated = service.get_active_review_edit_session(
+        "recovered-autosave-draft", shop_domain=shop
+    )
+
+    assert hydrated is not None
+    assert hydrated["history_cursor"] == 0
+    assert hydrated["has_unapplied_changes"] is True
 
 
 def test_hydration_exposes_malformed_option_value_session_field_error():

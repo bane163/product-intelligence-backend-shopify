@@ -131,8 +131,6 @@ class SupabaseDraftsMixin:
         shop_domain: str | None = None,
         input_file_id: str | None = None,
         input_filename: str | None = None,
-        output_file_id: str | None = None,
-        output_filename: str | None = None,
         extraction_status: str | None = None,
         extraction_run_id: str | None = None,
         extraction_error: str | None = None,
@@ -160,8 +158,6 @@ class SupabaseDraftsMixin:
             "shop_domain": normalized_shop_domain,
             "input_file_id": input_file_id,
             "input_filename": input_filename,
-            "output_file_id": output_file_id,
-            "output_filename": output_filename,
             "extraction_status": extraction_status,
             "extraction_run_id": extraction_run_id,
             "extraction_error": extraction_error,
@@ -221,8 +217,6 @@ class SupabaseDraftsMixin:
                     compat_payload.pop("draft_name", None)
                     compat_payload.pop("input_file_id", None)
                     compat_payload.pop("input_filename", None)
-                    compat_payload.pop("output_file_id", None)
-                    compat_payload.pop("output_filename", None)
                     compat_payload.pop("extraction_status", None)
                     compat_payload.pop("extraction_run_id", None)
                     compat_payload.pop("extraction_error", None)
@@ -641,7 +635,7 @@ class SupabaseDraftsMixin:
                         shop_domain=normalized_shop_domain,
                     )
                     if isinstance(linked_draft, dict):
-                        for key in ("output_file_id", "input_file_id"):
+                        for key in ("input_file_id",):
                             candidate = linked_draft.get(key)
                             if isinstance(candidate, str) and candidate:
                                 resolved_preview = candidate

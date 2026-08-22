@@ -255,8 +255,6 @@ def _save_draft_state(
     fallback_input_file_id: str | None = None,
     fallback_input_filename: str | None = None,
     products: list[dict[str, Any]] | None = None,
-    output_file_id: str | None = None,
-    output_filename: str | None = None,
     extraction_status: str | None = None,
     extraction_run_id: str | None = None,
     extraction_error: str | None = None,
@@ -288,16 +286,6 @@ def _save_draft_state(
         or fallback_input_file_id,
         input_filename=_optional_str_field(existing, "input_filename")
         or fallback_input_filename,
-        output_file_id=(
-            output_file_id
-            if output_file_id is not None
-            else _optional_str_field(existing, "output_file_id")
-        ),
-        output_filename=(
-            output_filename
-            if output_filename is not None
-            else _optional_str_field(existing, "output_filename")
-        ),
         extraction_status=(
             extraction_status
             if extraction_status is not None
@@ -391,8 +379,6 @@ class OffloadWorker:
         input_name = _optional_str(payload.get("input_filename"))
         input_content_type = _optional_str(payload.get("input_content_type"))
         extraction_mode = _optional_str(payload.get("extraction_mode")) or "per_sheet"
-        write_to_file = _parse_bool(payload.get("write_to_file"))
-        output_path = _optional_str(payload.get("output_path"))
         collabora_url = _optional_str(payload.get("collabora_url"))
         import_mode = _optional_str(payload.get("import_mode")) or "auto"
         auto_submit = _parse_bool(payload.get("auto_submit"))
@@ -453,8 +439,6 @@ class OffloadWorker:
             run_id=run_id,
             collabora_url=collabora_url,
             extraction_mode=extraction_mode,
-            write_to_file=write_to_file,
-            output_path=output_path,
             shop_domain=shop_domain,
             manage_lifecycle=False,
             source_file_id=file_id,
@@ -462,12 +446,7 @@ class OffloadWorker:
         )
         result_payload = result.get("result") if isinstance(result, dict) else None
 
-        output_file_id = None
-        output_filename = None
         extracted_products: list[dict[str, Any]] | None = None
-        if isinstance(result_payload, dict):
-            output_file_id = _optional_str(result_payload.get("file_id"))
-            output_filename = _optional_str(result_payload.get("filename"))
         extracted_products = _extract_products_from_result_payload(result_payload)
         quality_report = (
             result_payload.get("quality_report")
@@ -486,8 +465,6 @@ class OffloadWorker:
                 fallback_input_file_id=file_id,
                 fallback_input_filename=input_name,
                 products=extracted_products,
-                output_file_id=output_file_id,
-                output_filename=output_filename,
                 extraction_status="succeeded",
                 extraction_run_id=run_id,
                 extraction_error=None,
@@ -599,8 +576,6 @@ class OffloadWorker:
             "run_id": run_id,
             "draft_id": draft_id,
             "file_id": file_id,
-            "output_file_id": output_file_id,
-            "output_filename": output_filename,
             "product_count": len(extracted_products or []),
         }
 

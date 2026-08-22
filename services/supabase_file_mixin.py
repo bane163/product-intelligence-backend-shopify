@@ -8,11 +8,8 @@ if TYPE_CHECKING:
     from supabase._sync.client import SyncClient
 
 from .supabase_constants import (
-    FILE_ORIGIN_DRAFT_RESUME,
     FILE_ORIGIN_MERCHANT_UPLOAD,
     FILE_ORIGIN_SOURCE_HIGHLIGHT,
-    FILE_ORIGIN_SUBMITTED_RESUME,
-    FILE_ORIGIN_WORKFLOW_OUTPUT,
 )
 
 LOG = logging.getLogger(__name__)
@@ -69,12 +66,6 @@ class SupabaseFileMixin:
             return FILE_ORIGIN_MERCHANT_UPLOAD
         if "-source-highlight" in name:
             return FILE_ORIGIN_SOURCE_HIGHLIGHT
-        if name.startswith("draft-") and name.endswith(".xlsx"):
-            return FILE_ORIGIN_DRAFT_RESUME
-        if name.startswith("submitted-") and name.endswith(".xlsx"):
-            return FILE_ORIGIN_SUBMITTED_RESUME
-        if name.endswith("-products.xlsx"):
-            return FILE_ORIGIN_WORKFLOW_OUTPUT
         return FILE_ORIGIN_MERCHANT_UPLOAD
 
     @classmethod

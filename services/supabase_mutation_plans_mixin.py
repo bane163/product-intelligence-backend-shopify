@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from application.domain.shopify_mutation_plan import normalize_review_plan_rows
+from application.domain.review_edit_history import CONTENT_HISTORY_OPERATIONS
 
 
 class SupabaseMutationPlansMixin:
@@ -141,22 +142,18 @@ class SupabaseMutationPlansMixin:
             if isinstance(raw_cursor, int) and not isinstance(raw_cursor, bool)
             else len(unfiltered_history)
         )
-        content_operations = {
-            "value_edit",
-            "value_revert",
-            "option_values_edit",
-            "selection",
-        }
         history = [
             entry
             for entry in unfiltered_history
-            if isinstance(entry, dict) and entry.get("operation") in content_operations
+            if isinstance(entry, dict)
+            and entry.get("operation") in CONTENT_HISTORY_OPERATIONS
         ]
         hydrated["history"] = history
         cursor = sum(
             1
             for entry in unfiltered_history[: max(0, old_cursor)]
-            if isinstance(entry, dict) and entry.get("operation") in content_operations
+            if isinstance(entry, dict)
+            and entry.get("operation") in CONTENT_HISTORY_OPERATIONS
         )
         hydrated["history_cursor"] = max(0, min(cursor, len(history)))
         hydrated["field_errors"] = cls._session_field_errors(hydrated["working_plan"])
@@ -176,10 +173,28 @@ class SupabaseMutationPlansMixin:
             hydrated["edit_revision"] = 1
         return hydrated
 
+    def _with_unapplied_changes(self, session: dict[str, Any]) -> dict[str, Any]:
+        hydrated = self._hydrate_review_edit_session(session)
+        draft = self.get_product_draft(
+            str(hydrated.get("draft_id") or ""),
+            shop_domain=str(hydrated.get("shop_domain") or ""),
+        )
+        canonical_products = draft.get("products") if isinstance(draft, dict) else []
+        pending_products = hydrated.get("pending_products")
+        hydrated["has_unapplied_changes"] = hydrated.get("status") == "active" and (
+            bool(hydrated["history_cursor"])
+            or (
+                isinstance(pending_products, list)
+                and isinstance(canonical_products, list)
+                and pending_products != canonical_products
+            )
+        )
+        return hydrated
+
     def cleanup_expired_review_edit_sessions(
         self, *, shop_domain: str | None = None
     ) -> int:
-        """Expire stale sessions and remove their isolated workbook copies."""
+        """Expire stale review sessions."""
         tenant = shop_domain.strip().lower() if shop_domain else None
         now = datetime.now(timezone.utc)
         expired: list[dict[str, Any]] = []
@@ -215,9 +230,6 @@ class SupabaseMutationPlansMixin:
         for session in expired:
             saved = {**session, "status": "expired", "updated_at": now.isoformat()}
             self.save_review_edit_session(saved)
-            working_file_id = session.get("working_file_id")
-            if isinstance(working_file_id, str) and working_file_id:
-                self.delete_file(working_file_id)
         return len(expired)
 
     @staticmethod
@@ -319,13 +331,15 @@ class SupabaseMutationPlansMixin:
         client = self._get_supabase_client()
         if client:
             persisted = {
-                key: value for key, value in stored.items() if key != "field_errors"
+                key: value
+                for key, value in stored.items()
+                if key not in {"field_errors", "has_unapplied_changes", "working_file_id"}
             }
             client.table("product_draft_review_edits").upsert(
                 persisted, on_conflict="session_id"
             ).execute()
         self.review_edit_sessions[str(stored["session_id"])] = stored
-        return stored
+        return self._with_unapplied_changes(stored)
 
     def get_review_edit_session(
         self, session_id: str, *, shop_domain: str
@@ -333,7 +347,7 @@ class SupabaseMutationPlansMixin:
         tenant = shop_domain.strip().lower()
         memory = self.review_edit_sessions.get(session_id)
         if memory and memory.get("shop_domain") == tenant:
-            hydrated = self._hydrate_review_edit_session(memory)
+            hydrated = self._with_unapplied_changes(memory)
             self.review_edit_sessions[session_id] = hydrated
             return hydrated
         client = self._get_supabase_client()
@@ -347,7 +361,7 @@ class SupabaseMutationPlansMixin:
                 .execute()
             )
             if result.data:
-                return self._hydrate_review_edit_session(result.data[0])
+                return self._with_unapplied_changes(result.data[0])
         return None
 
     def get_active_review_edit_session(
@@ -366,7 +380,7 @@ class SupabaseMutationPlansMixin:
             session = max(
                 candidates, key=lambda session: session.get("updated_at") or ""
             )
-            hydrated = self._hydrate_review_edit_session(session)
+            hydrated = self._with_unapplied_changes(session)
             self.review_edit_sessions[str(hydrated["session_id"])] = hydrated
             return hydrated
         client = self._get_supabase_client()
@@ -382,5 +396,5 @@ class SupabaseMutationPlansMixin:
                 .execute()
             )
             if result.data:
-                return self._hydrate_review_edit_session(result.data[0])
+                return self._with_unapplied_changes(result.data[0])
         return None

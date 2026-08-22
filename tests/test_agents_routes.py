@@ -710,7 +710,7 @@ async def test_list_files_hides_source_highlight_artifacts():
 
 
 @pytest.mark.asyncio
-async def test_list_files_hides_draft_resume_files():
+async def test_removed_draft_resume_endpoint_is_404_and_sources_remain_listed():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         uploaded = await ac.post(
@@ -739,14 +739,27 @@ async def test_list_files_hides_draft_resume_files():
         draft_id = created_draft.json()["draft_id"]
 
         resumed = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file")
-        assert resumed.status_code == 200
-        resume_file_id = resumed.json()["file_id"]
+        assert resumed.status_code == 404
 
         listed = await ac.get("/agents/files?limit=1000")
         assert listed.status_code == 200
         listed_ids = {str(item.get("file_id")) for item in listed.json().get("files", [])}
         assert merchant_file_id in listed_ids
-        assert resume_file_id not in listed_ids
+
+
+def test_import_schema_excludes_retired_workbook_fields_and_routes():
+    schema = app.openapi()
+    paths = schema["paths"]
+    assert "/agents/product-drafts/{draft_id}/resume-file" not in paths
+    assert "/agents/submitted-documents/{submitted_id}/resume-file" not in paths
+    import_body = paths["/agents/import"]["post"]["requestBody"]
+    body_schema = import_body["content"]["multipart/form-data"]["schema"]
+    reference = body_schema.get("$ref")
+    if reference:
+        body_schema = schema["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+    properties = body_schema.get("properties", {})
+    assert "write_to_file" not in properties
+    assert "output_path" not in properties
 
 
 @pytest.mark.asyncio
@@ -1854,8 +1867,8 @@ async def test_submit_products_legacy_ai_flag_does_not_mutate_draft(monkeypatch)
         assert "vendor" not in draft["products"][0]
         assert "seo_title" not in draft["products"][0]
         assert "tags" not in draft["products"][0]
-        assert draft.get("output_file_id") == "old-output-file"
-        assert draft.get("output_filename") == "old-output.xlsx"
+        assert "output_file_id" not in draft
+        assert "output_filename" not in draft
 
 
 @pytest.mark.asyncio
@@ -3044,18 +3057,12 @@ async def test_list_and_get_product_draft():
         assert detail.json()["draft"]["input_filename"] == "draft-input.xlsx"
 
         resume = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file", headers=tenant_header)
-        assert resume.status_code == 200
-        resume_body = resume.json()
-        assert "file_id" in resume_body
-        assert resume_body["filename"].endswith(".xlsx")
+        assert resume.status_code == 404
         persisted_detail = await ac.get(f"/agents/product-drafts/{draft_id}", headers=tenant_header)
         assert persisted_detail.status_code == 200
         persisted_draft = persisted_detail.json()["draft"]
-        assert persisted_draft["output_file_id"] == resume_body["file_id"]
-        assert persisted_draft["output_filename"] == resume_body["filename"]
-        resume_again = await ac.post(f"/agents/product-drafts/{draft_id}/resume-file", headers=tenant_header)
-        assert resume_again.status_code == 200
-        assert resume_again.json()["file_id"] == resume_body["file_id"]
+        assert "output_file_id" not in persisted_draft
+        assert "output_filename" not in persisted_draft
 
 
 @pytest.mark.asyncio
@@ -3205,8 +3212,7 @@ async def test_successful_submit_creates_submitted_and_hides_draft(monkeypatch):
             f"/agents/submitted-documents/{submitted_body['submitted_id']}/resume-file",
             headers=tenant_header,
         )
-        assert submitted_resume.status_code == 200
-        assert submitted_resume.json()["filename"].endswith(".xlsx")
+        assert submitted_resume.status_code == 404
 
 
 @pytest.mark.asyncio

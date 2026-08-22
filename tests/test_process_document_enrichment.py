@@ -4,7 +4,7 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 from ai.models import ProductsList
 from shared.observability import bind_observability_context
 from application.ports.document_layout_port import DocumentAnchor, DocumentLayout
@@ -320,7 +320,6 @@ async def test_process_document_normalizes_products_list_result_shape():
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-import-products-list",
         shop_domain=None,
-        write_to_file=False,
     )
 
     assert isinstance(result["result"], dict)
@@ -328,7 +327,7 @@ async def test_process_document_normalizes_products_list_result_shape():
 
 
 @pytest.mark.asyncio
-async def test_process_document_refreshes_workbook_output_after_enrichment(monkeypatch):
+async def test_process_document_returns_enriched_products_without_workbook_output(monkeypatch):
     async def fake_generate_suggestions_execute(
         *,
         supabase,
@@ -380,23 +379,16 @@ async def test_process_document_refreshes_workbook_output_after_enrichment(monke
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-import-refresh-output",
         shop_domain="store.myshopify.com",
-        write_to_file=True,
     )
 
     payload = result["result"]
     assert payload["products"][0]["vendor"] == "Enriched Vendor"
-    assert payload["file_id"] != "pre-enrichment-file"
-    assert len(supabase.file.saved_files) == 1
-    saved = supabase.file.saved_files[0]
-    assert saved["file_id"] == payload["file_id"]
-    assert saved["name"] == payload["filename"]
+    assert "file_id" not in payload
+    assert "filename" not in payload
+    assert supabase.file.saved_files == []
     finalized_extra = supabase.runs.finalized[-1][1]["extra_fields"]
-    assert finalized_extra["output_file_id"] == payload["file_id"]
-    assert finalized_extra["output_filename"] == payload["filename"]
-    workbook = load_workbook(BytesIO(saved["content"]))
-    worksheet = workbook["Products"]
-    headers = {str(cell.value): index + 1 for index, cell in enumerate(worksheet[1])}
-    assert worksheet.cell(row=2, column=headers["Vendor"]).value == "Enriched Vendor"
+    assert "output_file_id" not in finalized_extra
+    assert "output_filename" not in finalized_extra
 
 
 @pytest.mark.asyncio
@@ -449,10 +441,7 @@ async def test_process_document_enrichment_failure_is_non_fatal(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_document_workbook_ai_enhancements_shows_all_enriched_fields(monkeypatch):
-    """The AI Enhancements sheet must list ALL fields changed by enrichment,
-    not just metafields.  Non-metafield patches (vendor, seo_title, tags, etc.)
-    should appear alongside metafield patches."""
+async def test_process_document_keeps_all_enriched_fields_without_workbook(monkeypatch):
 
     async def fake_generate_suggestions_execute(
         *,
@@ -517,29 +506,14 @@ async def test_process_document_workbook_ai_enhancements_shows_all_enriched_fiel
         input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         run_id="run-ai-enhancements-sheet",
         shop_domain="store.myshopify.com",
-        write_to_file=True,
     )
 
-    saved = supabase.file.saved_files[0]
-    workbook = load_workbook(BytesIO(saved["content"]))
-    ai_sheet = workbook["AI Enhancements"]
-
-    # Collect all data rows (skip header)
-    rows = []
-    for row in ai_sheet.iter_rows(min_row=2, values_only=True):
-        attr = row[2]  # Attribute column
-        if attr and attr != "No AI-only attributes captured":
-            rows.append({"attribute": attr, "value": row[3], "type": row[4]})
-
-    attributes = [r["attribute"] for r in rows]
-    # Non-metafield enrichments must appear
-    assert "vendor" in attributes, f"vendor missing from AI Enhancements: {attributes}"
-    assert "seo_title" in attributes, f"seo_title missing from AI Enhancements: {attributes}"
-    assert "tags" in attributes, f"tags missing from AI Enhancements: {attributes}"
-    # Metafield enrichments must still appear
-    assert "metafield:extractor.color_hint" in attributes, (
-        f"metafield missing from AI Enhancements: {attributes}"
-    )
+    product = result["result"]["products"][0]
+    assert product["vendor"] == "Enriched Vendor"
+    assert product["seo_title"] == "Better SEO Title"
+    assert product["tags"] == "tag-a, tag-b"
+    assert product["metafields"][0]["key"] == "color_hint"
+    assert supabase.file.saved_files == []
 
 
 @pytest.mark.asyncio
@@ -673,7 +647,6 @@ async def test_pdf_evidence_gets_exactly_two_corrections_then_fails_without_outp
             input_content_type="application/pdf",
             source_file_id="uploaded-file",
             shop_domain="store.myshopify.com",
-            write_to_file=True,
             enable_ai_enhancements=False,
         )
 

@@ -135,27 +135,6 @@ async def get_submitted_document(
     }
 
 
-@router.post("/submitted-documents/{submitted_id}/resume-file", summary="Create preview file from submitted document")
-async def create_submitted_document_resume_file(
-    submitted_id: str,
-    request: Request,
-    shop_domain: str | None = None,
-    ctx: AppContext = Depends(get_ctx),
-) -> dict[str, str]:
-    from application.use_cases.submitted.create_submitted_resume_file import execute as create_resume_execute
-    try:
-        tenant = resolve_shop_domain(request, shop_domain)
-        return create_resume_execute(
-            supabase=ctx.supabase,
-            submitted_id=submitted_id,
-            shop_domain=tenant,
-        )
-    except LookupError:
-        raise HTTPException(status_code=404, detail="Submitted document not found")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Submitted document has no products")
-
-
 @router.delete("/submitted-documents/{submitted_id}", summary="Delete submitted document")
 async def delete_submitted_document(
     submitted_id: str,

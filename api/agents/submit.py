@@ -91,8 +91,6 @@ def _save_submit_draft_state(
         shop_domain=_optional_str(existing, "shop_domain") or shop_domain,
         input_file_id=_optional_str(existing, "input_file_id"),
         input_filename=_optional_str(existing, "input_filename"),
-        output_file_id=_optional_str(existing, "output_file_id"),
-        output_filename=_optional_str(existing, "output_filename"),
         extraction_status=_optional_str(existing, "extraction_status"),
         extraction_run_id=_optional_str(existing, "extraction_run_id"),
         extraction_error=_optional_str(existing, "extraction_error"),

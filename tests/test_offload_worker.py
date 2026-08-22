@@ -241,8 +241,6 @@ async def test_run_once_processes_document_import_job_success(monkeypatch):
             "run_id": run_id,
             "result": {
                 "products": [{"title": "Queued Product"}],
-                "file_id": "output-file",
-                "filename": "output.xlsx",
             },
         }
 
@@ -270,8 +268,8 @@ async def test_run_once_processes_document_import_job_success(monkeypatch):
     assert draft["ai_enhancements_enabled"] is False
     assert draft["extraction_status"] == "succeeded"
     assert draft["extraction_run_id"] == run_id
-    assert draft["output_file_id"] == "output-file"
-    assert draft["output_filename"] == "output.xlsx"
+    assert "output_file_id" not in draft
+    assert "output_filename" not in draft
     assert len(draft["products"]) == 1
 
 

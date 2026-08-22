@@ -173,7 +173,7 @@ async def readiness_check():
     client = service._get_supabase_client()
     if client is not None:
         probes = {
-            "product_draft_review_edits": "session_id,base_draft_revision,edit_revision,pending_products,working_file_id,status",
+            "product_draft_review_edits": "session_id,base_draft_revision,edit_revision,pending_products,status",
             "submitted_documents": "approved_selection,value_provenance",
             "shopify_mutation_plans": "approved_selection,review_contract_version,inventory_context",
             "file_metadata": "content_revision",

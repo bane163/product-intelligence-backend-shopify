@@ -13,20 +13,14 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from pydantic import ValidationError
-
-from ai.excel_writer import create_excel_bytes
-from ai.excel_reader import WorkbookValidationError, read_generated_workbook
-from ai.models import ProductsList
 from app_context import AppContext, get_ctx
-from application.use_cases.files.save_file import execute as save_file
+from application.domain.review_edit_history import CONTENT_HISTORY_OPERATIONS
 from application.domain.shopify_mutation_plan import (
     OptionValueEditError,
     _normalized_path_part,
     _review_row as _domain_review_row,
     _schema_from_product,
     _unique_variant_target,
-    _variant_subject,
     _variants,
     apply_option_value_operation,
     build_review_plan_item,
@@ -53,20 +47,6 @@ from .utils import require_authenticated_shop_domain
 router = APIRouter()
 LOG = logging.getLogger(__name__)
 REVIEW_FIELD_VALIDATION_FAILED = "REVIEW_FIELD_VALIDATION_FAILED"
-CONTENT_HISTORY_OPERATIONS = {
-    "value_edit",
-    "value_revert",
-    "cell_edit",
-    "cell_revert",
-    "option_values_edit",
-    "selection",
-    "option_dimension_add",
-    "option_dimension_rename",
-    "option_dimension_reorder",
-    "option_dimension_remove",
-    "variant_add",
-    "variant_remove",
-}
 HANDLE_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 APPLY_CHECKPOINT_KEY = "_apply_checkpoint"
 
@@ -109,15 +89,11 @@ def _apply_checkpoint(
     *,
     base_revision: int,
     products: list[dict[str, Any]],
-    output_file_id: str,
-    output_filename: str,
 ) -> dict[str, Any]:
     return {
         "base_draft_revision": base_revision,
         "target_draft_revision": base_revision + 1,
         "products_fingerprint": _products_fingerprint(products),
-        "output_file_id": output_file_id,
-        "output_filename": output_filename,
     }
 
 
@@ -125,7 +101,6 @@ def _is_expected_partial_apply(
     session: dict[str, Any],
     draft: dict[str, Any],
     products: list[dict[str, Any]],
-    canonical_file: dict[str, Any] | None,
 ) -> bool:
     working_plan = session.get("working_plan")
     checkpoint = (
@@ -133,7 +108,7 @@ def _is_expected_partial_apply(
         if isinstance(working_plan, dict)
         else None
     )
-    if not isinstance(checkpoint, dict) or not isinstance(canonical_file, dict):
+    if not isinstance(checkpoint, dict):
         return False
     base_revision = int(session.get("base_draft_revision") or 0)
     return (
@@ -143,9 +118,6 @@ def _is_expected_partial_apply(
         and checkpoint.get("products_fingerprint")
         == _products_fingerprint(products)
         == _products_fingerprint(_products(draft))
-        and str(checkpoint.get("output_file_id") or "")
-        == str(draft.get("output_file_id") or "")
-        and bool(canonical_file.get("content"))
     )
 
 
@@ -175,40 +147,6 @@ def _require_review_v2(
             },
         )
     return plan
-
-
-def _workbook_model(products: list[dict[str, Any]]) -> ProductsList:
-    normalized = deepcopy(products)
-    for product in normalized:
-        if isinstance(product.get("_value_origins"), dict) and not isinstance(
-            product.get("value_origins"), dict
-        ):
-            product["value_origins"] = product["_value_origins"]
-        raw_options = product.get("productOptions")
-        if isinstance(raw_options, list):
-            product["options"] = [
-                {
-                    "name": str(option.get("name") or ""),
-                    "position": option.get("position", index + 1),
-                    "values": [
-                        str(value.get("name") if isinstance(value, dict) else value)
-                        for value in option.get("values", [])
-                    ],
-                }
-                for index, option in enumerate(raw_options)
-                if isinstance(option, dict)
-            ]
-        option_names = [
-            str(option.get("name") or "")
-            for option in product.get("options", [])
-            if isinstance(option, dict)
-        ]
-        for variant in _variants(product):
-            values = _variant_option_map(variant)
-            for index, name in enumerate(option_names[:3], start=1):
-                if not variant.get(f"option{index}"):
-                    variant[f"option{index}"] = values.get(name.casefold())
-    return ProductsList.model_validate({"products": normalized})
 
 
 def _field_error(row: dict[str, Any], code: str, message: str) -> dict[str, str]:
@@ -251,61 +189,6 @@ def _validation_failure(
             "field_errors": errors,
         },
     )
-
-
-def _preflight_field_errors(
-    exc: Exception, working_plan: dict[str, Any]
-) -> list[dict[str, str]]:
-    validation_items = exc.errors() if isinstance(exc, ValidationError) else []
-    errors: list[dict[str, str]] = []
-    for validation in validation_items:
-        loc = validation.get("loc") if isinstance(validation, dict) else ()
-        loc = tuple(loc) if isinstance(loc, (tuple, list)) else ()
-        product_index = loc[1] if len(loc) > 1 and isinstance(loc[1], int) else None
-        model_field = str(loc[2]) if len(loc) > 2 else "product"
-        aliases = {
-            "body_html": "descriptionHtml",
-            "product_type": "productType",
-            "compare_at_price": "compareAtPrice",
-            "cost_per_item": "inventoryItem.cost",
-        }
-        field = aliases.get(model_field, model_field)
-        matching_row: dict[str, Any] | None = None
-        for item in working_plan.get("items", []):
-            if not isinstance(item, dict) or item.get("source_index") != product_index:
-                continue
-            matching_row = next(
-                (
-                    row
-                    for row in item.get("review_changes", [])
-                    if isinstance(row, dict) and row.get("field") == field
-                ),
-                None,
-            )
-            if matching_row:
-                break
-        message = (
-            str(validation.get("msg") or "This value is invalid.")
-            if isinstance(validation, dict)
-            else "This value is invalid."
-        )
-        errors.append(
-            _field_error(
-                matching_row or {"value_path": ".".join(map(str, loc))},
-                "INVALID_PRODUCT",
-                message,
-            )
-        )
-    if not errors:
-        errors.append(
-            {
-                "change_id": "",
-                "value_path": "product",
-                "code": "INVALID_PRODUCT",
-                "message": "One or more product values cannot be written to the workbook.",
-            }
-        )
-    return errors
 
 
 def _canonical_review_value(row: dict[str, Any], value: Any) -> Any:
@@ -389,18 +272,18 @@ def _option_rename_map(row: dict[str, Any], value: list[str]) -> dict[str, str]:
         not isinstance(item, str) for item in before
     ):
         raise ValueError(
-            "This option list is malformed. Revert it or edit the workbook."
+            "This option list is malformed. Revert it or use the option editor."
         )
     if len(value) != len(before):
-        raise ValueError("Add or remove option values in the workbook instead.")
+        raise ValueError("Add or remove option values with the option editor instead.")
     old_by_fold = {item.casefold(): item for item in before}
     new_by_fold = {item.casefold(): item for item in value}
     removed = [old_by_fold[key] for key in old_by_fold.keys() - new_by_fold.keys()]
     added = [new_by_fold[key] for key in new_by_fold.keys() - old_by_fold.keys()]
     if len(removed) != len(added):
-        raise ValueError("Add or remove option values in the workbook instead.")
+        raise ValueError("Add or remove option values with the option editor instead.")
     if len(removed) > 1:
-        raise ValueError("Rename one option value at a time, or edit the workbook.")
+        raise ValueError("Rename one option value at a time.")
     return dict(zip(removed, added, strict=True))
 
 
@@ -475,130 +358,6 @@ def _cascade_plan_variant_subjects(
         for old, new in rename_map.items():
             subject = subject.replace(f"{option_name}: {old}", f"{option_name}: {new}")
         candidate["subject"] = subject
-
-
-def _mark_workbook_edits(
-    before: list[dict[str, Any]], after: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    field_paths = {
-        "title": "title",
-        "body_html": "descriptionHtml",
-        "vendor": "vendor",
-        "product_type": "productType",
-        "product_category": "productType",
-        "seo_title": "seo.title",
-        "seo_description": "seo.description",
-        "tags": "tags",
-        "status": "status",
-    }
-    for index, product in enumerate(after):
-        original = before[index] if index < len(before) else {}
-        origins = product.get("value_origins")
-        if not isinstance(origins, dict):
-            origins = {}
-            product["value_origins"] = origins
-        for field, path in field_paths.items():
-            if product.get(field) != original.get(field):
-                origins[path] = "merchant_edited"
-        option_fields = ("name", "values")
-        original_options = (
-            original.get("options") if isinstance(original.get("options"), list) else []
-        )
-        for option_index, option in enumerate(
-            product.get("options") if isinstance(product.get("options"), list) else []
-        ):
-            old_option = (
-                original_options[option_index]
-                if option_index < len(original_options)
-                and isinstance(original_options[option_index], dict)
-                else {}
-            )
-            if not isinstance(option, dict):
-                continue
-            subject = (
-                option.get("name")
-                or old_option.get("name")
-                or f"Option {option_index + 1}"
-            )
-            for field in option_fields:
-                if option.get(field) != old_option.get(field):
-                    origins[f"option[{_normalized_path_part(subject)}].{field}"] = (
-                        "merchant_edited"
-                    )
-        option_names = _schema_from_product(product)
-        old_variants = _variants(original)
-        variant_aliases = {
-            "compare_at_price": "compareAtPrice",
-            "inventory_policy": "inventoryPolicy",
-            "tax_code": "taxCode",
-            "cost_per_item": "inventoryItem.cost",
-            "tracked": "inventoryItem.tracked",
-            "requires_shipping": "inventoryItem.requiresShipping",
-            "weight": "inventoryItem.weight.value",
-            "weight_unit": "inventoryItem.weight.unit",
-            "inventory_quantity": "inventory_quantity",
-        }
-        for variant_index, variant in enumerate(_variants(product)):
-            old_variant = (
-                old_variants[variant_index] if variant_index < len(old_variants) else {}
-            )
-            subject = _variant_subject(variant, option_names)
-            for field in (
-                "price",
-                "compare_at_price",
-                "sku",
-                "barcode",
-                "taxable",
-                "tax_code",
-                "inventory_policy",
-                "cost_per_item",
-                "tracked",
-                "requires_shipping",
-                "weight",
-                "weight_unit",
-                "inventory_quantity",
-            ):
-                if variant.get(field) != old_variant.get(field):
-                    canonical = variant_aliases.get(field, field)
-                    scope = (
-                        "inventory"
-                        if canonical == "inventory_quantity"
-                        or (
-                            canonical == "inventoryItem.tracked"
-                            and "inventory_quantity" in variant
-                        )
-                        else "variant"
-                    )
-                    origins[
-                        f"{scope}[{_normalized_path_part(subject)}].{canonical}"
-                    ] = "merchant_edited"
-        old_metafields = (
-            original.get("metafields")
-            if isinstance(original.get("metafields"), list)
-            else []
-        )
-        for mf_index, metafield in enumerate(
-            product.get("metafields")
-            if isinstance(product.get("metafields"), list)
-            else []
-        ):
-            old_metafield = (
-                old_metafields[mf_index]
-                if mf_index < len(old_metafields)
-                and isinstance(old_metafields[mf_index], dict)
-                else {}
-            )
-            if not isinstance(metafield, dict):
-                continue
-            subject = f"{metafield.get('namespace')}.{metafield.get('key')}"
-            for field in ("value", "type"):
-                if metafield.get(field) != old_metafield.get(field):
-                    origins[f"metafield[{_normalized_path_part(subject)}].{field}"] = (
-                        "merchant_edited"
-                    )
-        if isinstance(original.get("source_refs"), list):
-            product["source_refs"] = deepcopy(original["source_refs"])
-    return after
 
 
 def _coerce_review_value(row: dict[str, Any], value: Any) -> Any:
@@ -2609,7 +2368,6 @@ async def create_review_edit_session(
         )
 
     products = _products(draft)
-    working_file_id: str | None = None
     now = _now()
     session = _service(ctx).save_review_edit_session(
         {
@@ -2631,7 +2389,6 @@ async def create_review_edit_session(
             ),
             "history": [],
             "history_cursor": 0,
-            "working_file_id": working_file_id,
             "status": "active",
             "created_at": now,
             "updated_at": now,
@@ -2655,10 +2412,7 @@ async def patch_review_edit_session(
     session = _service(ctx).get_review_edit_session(session_id, shop_domain=tenant)
     if not session or session.get("draft_id") != draft_id:
         raise HTTPException(status_code=404, detail="Edit session not found")
-    if session.get("status") != "active" or session.get("surface") not in {
-        "grid",
-        "workbook",
-    }:
+    if session.get("status") != "active" or session.get("surface") != "grid":
         raise _conflict("Review edit session is not active")
     expected = payload.get("expected_edit_revision")
     current = int(session.get("edit_revision") or 1)
@@ -2751,19 +2505,6 @@ async def patch_review_edit_session(
         ]
     if any(not isinstance(operation, dict) for operation in operations):
         raise HTTPException(status_code=400, detail="changes must contain objects")
-    if session.get("surface") == "workbook":
-        ui_operations = {"filters", "expansion", "pagination", "workspace_view"}
-        invalid = next(
-            (
-                operation
-                for operation in operations
-                if (operation.get("type") or operation.get("operation"))
-                not in ui_operations
-            ),
-            None,
-        )
-        if invalid is not None:
-            raise _conflict("Workbook edit sessions accept UI-state operations only")
     try:
         pending, history, history_cursor = _apply_operations(
             pending,
@@ -3011,48 +2752,14 @@ async def apply_review_edit_session(
         if isinstance(session.get("working_plan"), dict)
         else {}
     )
-    checkpoint = working_plan.get(APPLY_CHECKPOINT_KEY)
-    checkpoint_file_id = (
-        str(checkpoint.get("output_file_id") or "")
-        if isinstance(checkpoint, dict)
-        else ""
-    )
-    canonical_checkpoint_file = (
-        ctx.supabase.file.get_file(checkpoint_file_id)
-        if checkpoint_file_id
-        else None
-    )
     base_revision = int(session.get("base_draft_revision") or 0)
     current_revision = int(draft.get("revision") or 1)
     resuming_partial_apply = _is_expected_partial_apply(
-        session, draft, pending_before, canonical_checkpoint_file
+        session, draft, pending_before
     )
     if current_revision != base_revision and not resuming_partial_apply:
         raise _conflict("Draft revision is stale")
-    if session.get("surface") == "workbook":
-        working_file_id = str(session.get("working_file_id") or "")
-        working_file = ctx.supabase.file.get_file(working_file_id)
-        if (
-            not working_file
-            or str(working_file.get("shop_domain") or "").strip().lower() != tenant
-        ):
-            raise _conflict("Workbook working copy is unavailable")
-        try:
-            parsed = read_generated_workbook(bytes(working_file["content"]))
-        except WorkbookValidationError as exc:
-            LOG.warning(
-                "import_review_workbook_validation_failed draft_id=%s session_id=%s errors=%s",
-                draft_id,
-                session_id,
-                len(exc.errors),
-            )
-            raise HTTPException(
-                status_code=422,
-                detail={"code": "WORKBOOK_VALIDATION_FAILED", "errors": exc.errors},
-            ) from exc
-        products = _mark_workbook_edits(pending_before, parsed)
-    else:
-        products = pending_before
+    products = pending_before
     existing_field_errors = session.get("field_errors")
     if isinstance(existing_field_errors, list) and existing_field_errors:
         LOG.warning(
@@ -3088,46 +2795,15 @@ async def apply_review_edit_session(
         raise _validation_failure(blocker_errors)
     if resuming_partial_apply:
         new_revision = current_revision
-        output_file_id = str(draft.get("output_file_id") or checkpoint_file_id)
-        output_filename = str(
-            draft.get("output_filename")
-            or (checkpoint.get("output_filename") if isinstance(checkpoint, dict) else "")
-            or "generated-import.xlsx"
-        )
         saved_draft = draft
     else:
-        try:
-            workbook_model = _workbook_model(products)
-            workbook = create_excel_bytes(workbook_model)
-        except (ValidationError, WorkbookValidationError, ValueError, TypeError) as exc:
-            field_errors = _preflight_field_errors(exc, working_plan)
-            LOG.warning(
-                "import_review_apply_validation_failed draft_id=%s session_id=%s change_ids=%s",
-                draft_id,
-                session_id,
-                ",".join(error.get("change_id", "") for error in field_errors[:10]),
-            )
-            raise _validation_failure(field_errors) from None
         new_revision = base_revision + 1
-        output_file_id = str(draft.get("output_file_id") or uuid.uuid4())
-        output_filename = str(draft.get("output_filename") or "generated-import.xlsx")
         working_plan[APPLY_CHECKPOINT_KEY] = _apply_checkpoint(
             base_revision=base_revision,
             products=products,
-            output_file_id=output_file_id,
-            output_filename=output_filename,
         )
         session = _service(ctx).save_review_edit_session(
             {**session, "working_plan": working_plan, "updated_at": _now()}
-        )
-        save_file(
-            supabase=ctx.supabase,
-            file_id=output_file_id,
-            name=output_filename,
-            content=workbook,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            file_origin="workflow_output",
-            shop_domain=tenant,
         )
         saved_draft = ctx.supabase.drafts.save_product_draft(
             draft_id=draft_id,
@@ -3137,8 +2813,6 @@ async def apply_review_edit_session(
             shop_domain=tenant,
             input_file_id=draft.get("input_file_id"),
             input_filename=draft.get("input_filename"),
-            output_file_id=output_file_id,
-            output_filename=output_filename,
             extraction_status=draft.get("extraction_status"),
             extraction_run_id=draft.get("extraction_run_id"),
             extraction_error=draft.get("extraction_error"),
@@ -3238,15 +2912,9 @@ async def apply_review_edit_session(
             "updated_at": _now(),
         }
     )
-    if isinstance(session.get("working_file_id"), str) and session["working_file_id"]:
-        ctx.supabase.file.delete_file(session["working_file_id"])
-    canonical_file = ctx.supabase.file.get_file(output_file_id) or {}
     return {
         "session": applied,
         "draft": saved_draft,
-        "output_file_id": output_file_id,
-        "output_filename": output_filename,
-        "workbook_revision": canonical_file.get("content_revision") or new_revision,
         "plan": rebuilt_plan,
     }
 
@@ -3266,9 +2934,4 @@ async def discard_review_edit_session(
         session = _service(ctx).save_review_edit_session(
             {**session, "status": "discarded", "updated_at": _now()}
         )
-        if (
-            isinstance(session.get("working_file_id"), str)
-            and session["working_file_id"]
-        ):
-            ctx.supabase.file.delete_file(session["working_file_id"])
     return {"session": session}

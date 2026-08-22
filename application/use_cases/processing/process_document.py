@@ -50,8 +50,6 @@ async def execute(
     run_id: str | None = None,
     collabora_url: str | None = None,
     extraction_mode: str = "per_sheet",
-    write_to_file: bool = False,
-    output_path: str | None = None,
     shop_domain: str | None = None,
     manage_lifecycle: bool = True,
     source_file_id: str | None = None,
@@ -98,7 +96,6 @@ async def execute(
             phase="request_received",
             message="Received /agents/import request",
             payload_preview={
-                "write_to_file": write_to_file,
                 "has_file_id": False,
                 "extraction_mode": extraction_mode,
             },
@@ -176,25 +173,6 @@ async def execute(
                 "shop_domain": shop_domain,
             },
         )
-
-        final_output_path = None
-        if write_to_file:
-            try:
-                base_name = os.path.basename(input_name) if input_name else None
-                if base_name:
-                    name, ext = os.path.splitext(base_name)
-                    suffixed = f"{name}-products{ext or ''}"
-                    final_output_path = os.path.abspath(
-                        os.path.join(os.getcwd(), suffixed)
-                    )
-                elif output_path:
-                    final_output_path = os.path.abspath(output_path)
-                else:
-                    final_output_path = os.path.abspath(
-                        os.path.join(os.getcwd(), "import-products.xlsx")
-                    )
-            except Exception:
-                final_output_path = output_path
 
         pdf_layout = None
         evidence_catalog: EvidenceCatalog | None = None
@@ -403,6 +381,11 @@ async def execute(
             )
             validation_feedback = validation.feedback
         if isinstance(result, dict):
+            # Extraction returns product data only. Ignore legacy writer metadata
+            # from older adapters so it cannot leak back into the import contract.
+            result.pop("file_id", None)
+            result.pop("filename", None)
+            result.pop("workbook_path", None)
             enrichment_attempted = False
             enrichment_applied = False
             enrichment_suggestions_count = 0
@@ -496,52 +479,6 @@ async def execute(
                 result["enrichment_duration_ms"] = enrichment_duration_ms
             if enrichment_warning:
                 result["enrichment_warning"] = enrichment_warning
-            if (
-                write_to_file
-                and isinstance(result.get("products"), list)
-            ):
-                try:
-                    from ai.excel_writer import create_excel_bytes
-
-                    enriched_products = [
-                        item
-                        for item in result["products"]
-                        if isinstance(item, dict)
-                    ]
-                    if enriched_products:
-                        parsed_products = ProductsList.model_validate(
-                            {"products": enriched_products}
-                        )
-                        refreshed_output_bytes = create_excel_bytes(
-                            parsed_products,
-                            applied_suggestions=applied_suggestions or None,
-                        )
-                        refreshed_file_id = str(uuid.uuid4())
-                        existing_filename = result.get("filename")
-                        if isinstance(existing_filename, str) and existing_filename.strip():
-                            base_name = os.path.splitext(os.path.basename(existing_filename))[0]
-                            refreshed_filename = f"{base_name or 'import-products'}.xlsx"
-                        elif input_name:
-                            base_name = os.path.splitext(os.path.basename(input_name))[0]
-                            refreshed_filename = f"{base_name or 'import-products'}-products.xlsx"
-                        else:
-                            refreshed_filename = "import-products.xlsx"
-                        supabase.file.save_file(
-                            refreshed_file_id,
-                            name=refreshed_filename,
-                            content=refreshed_output_bytes,
-                            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            file_origin="workflow_output",
-                            shop_domain=shop_domain,
-                        )
-                        result["file_id"] = refreshed_file_id
-                        result["filename"] = refreshed_filename
-                except Exception as exc:
-                    emit_and_persist(
-                        phase="import_output_refresh_skipped",
-                        message=f"Import output refresh skipped: {exc}",
-                        level="warning",
-                    )
             final_products = result.get("products")
             result["quality_report"] = build_quality_report(
                 [item for item in final_products if isinstance(item, dict)]
@@ -576,49 +513,6 @@ async def execute(
             pass
         raise
 
-    # If writer persisted file to disk, handle saving it
-    generated_file_id = None
-    generated_filename = None
-    if write_to_file:
-        if isinstance(result, dict) and result.get("file_id"):
-            pass
-        elif isinstance(result, str):
-            try:
-                if os.path.exists(result):
-                    with open(result, "rb") as fh:
-                        out_bytes = fh.read()
-                    generated_file_id = str(uuid.uuid4())
-                    generated_filename = os.path.basename(result)
-                    ct = (
-                        "text/csv"
-                        if generated_filename.lower().endswith(".csv")
-                        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-                    supabase.file.save_file(
-                        generated_file_id,
-                        name=generated_filename,
-                        content=out_bytes,
-                        content_type=ct,
-                        file_origin="workflow_output",
-                        shop_domain=shop_domain,
-                    )
-                    try:
-                        os.remove(result)
-                    except Exception:
-                        pass
-                    result = {
-                        "workbook_path": result,
-                        "file_id": generated_file_id,
-                        "filename": generated_filename,
-                    }
-            except Exception:
-                emit_and_persist(
-                    phase="storage_upload_error",
-                    message="Failed to persist generated workbook to storage",
-                    level="error",
-                    error=str(Exception),
-                )
-
     # Cleanup input file id if present
     try:
         # No input file id stored by this use-case; caller handles deletion when appropriate.
@@ -629,8 +523,6 @@ async def execute(
     output_meta = {}
     if isinstance(result, dict):
         output_meta = {
-            "output_file_id": result.get("file_id"),
-            "output_filename": result.get("filename"),
             "enrichment_attempted": result.get("enrichment_attempted"),
             "enrichment_applied": result.get("enrichment_applied"),
             "enrichment_suggestions_count": result.get("enrichment_suggestions_count"),

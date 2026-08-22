@@ -210,8 +210,6 @@ def _save_draft_state(
     fallback_input_file_id: str | None = None,
     fallback_input_filename: str | None = None,
     products: list[dict[str, Any]] | None = None,
-    output_file_id: str | None = None,
-    output_filename: str | None = None,
     extraction_status: str | None = None,
     extraction_run_id: str | None = None,
     extraction_error: str | None = None,
@@ -239,8 +237,6 @@ def _save_draft_state(
     existing_draft_name = _optional_str(existing, "draft_name")
     existing_input_file_id = _optional_str(existing, "input_file_id")
     existing_input_filename = _optional_str(existing, "input_filename")
-    existing_output_file_id = _optional_str(existing, "output_file_id")
-    existing_output_filename = _optional_str(existing, "output_filename")
     existing_extraction_status = _optional_str(existing, "extraction_status")
     existing_extraction_run_id = _optional_str(existing, "extraction_run_id")
     existing_extraction_error = _optional_str(existing, "extraction_error")
@@ -280,10 +276,6 @@ def _save_draft_state(
         shop_domain=existing_shop_domain or shop_domain,
         input_file_id=existing_input_file_id or fallback_input_file_id,
         input_filename=existing_input_filename or normalized_fallback_input_filename,
-        output_file_id=output_file_id if output_file_id is not None else existing_output_file_id,
-        output_filename=(
-            output_filename if output_filename is not None else existing_output_filename
-        ),
         extraction_status=(
             extraction_status
             if extraction_status is not None
@@ -330,8 +322,6 @@ async def _run_import_in_background(
     input_content_type: str | None,
     collabora_url: str | None,
     extraction_mode: str,
-    write_to_file: bool,
-    output_path: str | None,
     shop_domain: str | None,
     enable_ai_enhancements: bool = True,
 ) -> None:
@@ -365,22 +355,14 @@ async def _run_import_in_background(
             run_id=run_id,
             collabora_url=collabora_url,
             extraction_mode=extraction_mode,
-            write_to_file=write_to_file,
-            output_path=output_path,
             shop_domain=shop_domain,
             source_file_id=file_id,
             enable_ai_enhancements=enable_ai_enhancements,
         )
         payload = result.get("result") if isinstance(result, dict) else None
-        output_file_id = None
-        output_filename = None
         extracted_products: list[dict[str, Any]] | None = None
         quality_report: dict[str, Any] | None = None
         if isinstance(payload, dict):
-            if isinstance(payload.get("file_id"), str):
-                output_file_id = payload["file_id"]
-            if isinstance(payload.get("filename"), str):
-                output_filename = payload["filename"]
             if isinstance(payload.get("products"), list):
                 extracted_products = [
                     item for item in payload["products"] if isinstance(item, dict)
@@ -397,8 +379,6 @@ async def _run_import_in_background(
             fallback_input_file_id=file_id,
             fallback_input_filename=input_name,
             products=extracted_products,
-            output_file_id=output_file_id,
-            output_filename=output_filename,
             extraction_status="succeeded",
             extraction_run_id=run_id,
             extraction_error=None,
@@ -631,8 +611,6 @@ def _queue_batch_extract_submit_for_file(
                 "input_filename": input_name,
                 "input_content_type": input_content_type,
                 "extraction_mode": extraction_mode,
-                "write_to_file": False,
-                "output_path": None,
                 "collabora_url": None,
                 "import_mode": import_mode,
                 "auto_submit": bool(auto_submit),
@@ -1058,8 +1036,6 @@ async def process_excel(
     file: UploadFile | None = File(None),
     collabora_url: str | None = Form(None),
     extraction_mode: str = Form("per_sheet"),
-    write_to_file: bool = Form(False),
-    output_path: str | None = Form(None),
     offload: bool = Form(False),
     enable_ai_enhancements: bool = Form(True),
     shop_domain: str | None = Form(None),
@@ -1232,8 +1208,6 @@ async def process_excel(
                         "input_filename": input_name,
                         "input_content_type": input_content_type,
                         "extraction_mode": extraction_mode,
-                        "write_to_file": bool(write_to_file),
-                        "output_path": output_path,
                         "collabora_url": collabora_url,
                         "enable_ai_enhancements": enable_ai_enhancements,
                     },
@@ -1265,8 +1239,6 @@ async def process_excel(
         run_id=run_id,
         collabora_url=collabora_url,
         extraction_mode=extraction_mode,
-        write_to_file=write_to_file,
-        output_path=output_path,
         shop_domain=tenant,
         source_file_id=file_id,
         enable_ai_enhancements=enable_ai_enhancements,

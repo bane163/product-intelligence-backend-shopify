@@ -605,7 +605,15 @@ async def test_pdf_evidence_feedback_retries_with_complete_payload_and_resolves_
     pdf = _minimal_pdf_bytes()
     _patch_canonical_pdf(monkeypatch, pdf)
     llm = _SequenceLLM([
-        {"products": [{"title": "Classic Cotton T-Shirt"}]},
+        {"products": [{
+            "title": "Classic Cotton T-Shirt",
+            "vendor": "Unsupported optional vendor",
+            "images": [{"src": "https://example.com/catalog.jpg"}],
+            "source_refs": [
+                {"value_path": "title", "evidence_index": 1},
+                {"value_path": "images[0].src", "evidence_index": 1},
+            ],
+        }]},
         {"products": [{
             "title": "Classic Cotton T-Shirt",
             "source_refs": [{"value_path": "title", "evidence_index": 1}],
@@ -627,7 +635,9 @@ async def test_pdf_evidence_feedback_retries_with_complete_payload_and_resolves_
     )
 
     assert len(llm.calls) == 2
-    assert "title" in (llm.calls[1].validation_feedback or "")
+    feedback = llm.calls[1].validation_feedback or ""
+    assert "vendor" in feedback
+    assert "images[0].src" in feedback
     assert llm.calls[0].validation_feedback is None
     assert llm.calls[0].evidence_catalog is not None
     product = result["result"]["products"][0]

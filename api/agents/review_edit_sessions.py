@@ -2050,16 +2050,47 @@ def _apply_cell_operation(
     except ValueError as exc:
         raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "INVALID_REVIEW_VALUE", "message": str(exc)}]) from None
     before = _structural_state(products[product_index], item)
+    prior_row = next(
+        (
+            row
+            for row in item.get("review_changes", [])
+            if isinstance(row, dict)
+            and cell.get("change_id")
+            and row.get("change_id") == cell.get("change_id")
+        ),
+        None,
+    )
+    original_proposed = deepcopy(
+        prior_row.get("original_proposed", cell.get("original_proposed"))
+        if isinstance(prior_row, dict)
+        else cell.get("original_proposed")
+    )
+    original_origin = str(
+        prior_row.get("original_origin", cell.get("origin", "unknown"))
+        if isinstance(prior_row, dict)
+        else cell.get("origin", "unknown")
+    )
+    original_source_ref = deepcopy(
+        prior_row.get("original_source_ref", cell.get("source_ref"))
+        if isinstance(prior_row, dict)
+        else cell.get("source_ref")
+    )
+    original_source_refs = deepcopy(
+        prior_row.get("original_source_refs", cell.get("source_refs") or [])
+        if isinstance(prior_row, dict)
+        else cell.get("source_refs") or []
+    )
+    edit_origin = original_origin if operation_type == "cell_revert" else "merchant_edited"
     edited_product = deepcopy(products[product_index])
     edited_proposed = deepcopy(item.get("proposed") if isinstance(item.get("proposed"), dict) else {})
     try:
-        _set_product_value(edited_product, cell, value, origin="merchant_edited")
+        _set_product_value(edited_product, cell, value, origin=edit_origin)
         identity = cell.get("subject_identity")
         if not (
             isinstance(identity, dict)
             and isinstance(identity.get("source_variant_index"), int)
         ):
-            _set_product_value(edited_proposed, cell, value, origin="merchant_edited")
+            _set_product_value(edited_proposed, cell, value, origin=edit_origin)
     except (ValueError, HTTPException):
         raise _validation_failure([{"change_id": "", "value_path": str(cell.get("value_path") or ""), "code": "STALE_CELL_IDENTITY", "message": "This preview cell no longer has a unique target."}]) from None
     rebuilt = build_review_plan_item(
@@ -2070,6 +2101,36 @@ def _apply_cell_operation(
         blockers=item.get("blockers") if isinstance(item.get("blockers"), list) else [],
         unapplied=item.get("unapplied") if isinstance(item.get("unapplied"), list) else [], prior_item=item,
     )
+    rebuilt_row = next(
+        (
+            row
+            for row in rebuilt.get("review_changes", [])
+            if isinstance(row, dict)
+            and row.get("value_path") == cell.get("value_path")
+            and row.get("field") == cell.get("field")
+            and row.get("subject_identity") == cell.get("subject_identity")
+        ),
+        None,
+    )
+    if isinstance(rebuilt_row, dict):
+        rebuilt_row["original_proposed"] = original_proposed
+        rebuilt_row["original_origin"] = original_origin
+        rebuilt_row["original_source_ref"] = original_source_ref
+        rebuilt_row["original_source_refs"] = original_source_refs
+        rebuilt_row["origin"] = edit_origin
+        if operation_type == "cell_revert" and isinstance(original_source_ref, dict):
+            rebuilt_row["source_ref"] = deepcopy(original_source_ref)
+        else:
+            rebuilt_row.pop("source_ref", None)
+        if operation_type == "cell_revert" and original_source_refs:
+            rebuilt_row["source_refs"] = deepcopy(original_source_refs)
+        elif operation_type != "cell_revert":
+            rebuilt_row["source_refs"] = [
+                deepcopy(ref)
+                for ref in rebuilt_row.get("source_refs", [])
+                if isinstance(ref, dict)
+                and ref.get("evidence_role", "value") in {"label", "key"}
+            ]
     rebuilt["quality_issues"] = deepcopy(item.get("quality_issues") or [])
     rebuilt["selected"] = bool(item.get("selected"))
     rebuilt["selectable"] = bool(item.get("selectable"))

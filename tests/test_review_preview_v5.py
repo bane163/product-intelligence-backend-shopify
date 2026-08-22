@@ -60,6 +60,110 @@ def test_v5_preview_authors_stable_cells_and_hides_default_title_scaffold():
     ), "single-variant Shopify scaffolds must not leak option-value cells"
 
 
+def test_v5_preview_hydrates_unchanged_product_and_positional_variant_evidence():
+    product = {
+        "title": "Source Shirt",
+        "vendor": "Northwind",
+        "options": [{"name": "Color", "values": ["Black", "White"]}],
+        "variants": [
+            {"option1": "Black", "sku": "SHIRT-B", "price": "20"},
+            {"option1": "White", "sku": "SHIRT-W", "price": "20"},
+        ],
+        "value_origins": {
+            "title": "source",
+            "vendor": "source",
+            "variant[color-black].sku": "source",
+            "variant[color-black].price": "source",
+            "variant[color-white].sku": "source",
+            "variant[color-white].price": "source",
+        },
+        "source_refs": [
+            {"value_path": "title", "anchor_id": "title-anchor"},
+            {"value_path": "vendor", "anchor_id": "vendor-anchor"},
+            {"value_path": "variant[color-black].sku", "anchor_id": "black-sku"},
+            {"value_path": "variant[color-black].price", "anchor_id": "black-price"},
+            {"value_path": "variant[color-white].sku", "anchor_id": "white-sku"},
+            {"value_path": "variant[color-white].price", "anchor_id": "white-price"},
+        ],
+    }
+    item = _item(product, live=product)
+
+    product_cells = {
+        cell["column_key"]: cell
+        for cell in item["review_preview"]["product"]["cells"]
+    }
+    assert product_cells["title"]["origin"] == "source"
+    assert product_cells["title"]["source_ref"]["anchor_id"] == "title-anchor"
+    assert product_cells["vendor"]["source_ref"]["anchor_id"] == "vendor-anchor"
+
+    variants = item["review_preview"]["variants"]
+    assert [
+        next(cell for cell in row["cells"] if cell["column_key"] == "sku")["value_path"]
+        for row in variants
+    ] == ["variants[0].sku", "variants[1].sku"]
+    assert [
+        next(cell for cell in row["cells"] if cell["column_key"] == "price")["source_ref"]["anchor_id"]
+        for row in variants
+    ] == ["black-price", "white-price"]
+
+
+def test_v5_cell_edit_removes_source_authority_and_revert_restores_it():
+    product = {
+        "title": "Source Mug",
+        "variants": [{"sku": "MUG", "price": "12"}],
+        "value_origins": {"title": "source"},
+        "source_refs": [{"value_path": "title", "anchor_id": "title-anchor"}],
+    }
+    item = _item(product, live=product)
+    working_plan = {"review_contract_version": 5, "items": [item]}
+    title = next(
+        cell
+        for cell in item["review_preview"]["product"]["cells"]
+        if cell["column_key"] == "title"
+    )
+    products = [{}, {}, {}, deepcopy(product)]
+
+    products, history, cursor = _apply_cell_operation(
+        products,
+        working_plan,
+        {
+            "operation": "cell_edit",
+            "cell_id": title["cell_id"],
+            "value_path": title["value_path"],
+            "value": "Merchant Mug",
+        },
+        [],
+        0,
+    )
+    edited = next(
+        cell
+        for cell in working_plan["items"][0]["review_preview"]["product"]["cells"]
+        if cell["column_key"] == "title"
+    )
+    assert edited["origin"] == "merchant_edited"
+    assert "source_ref" not in edited
+
+    products, _, _ = _apply_cell_operation(
+        products,
+        working_plan,
+        {
+            "operation": "cell_revert",
+            "cell_id": edited["cell_id"],
+            "value_path": edited["value_path"],
+        },
+        history,
+        cursor,
+    )
+    reverted = next(
+        cell
+        for cell in working_plan["items"][0]["review_preview"]["product"]["cells"]
+        if cell["column_key"] == "title"
+    )
+    assert products[3]["title"] == "Source Mug"
+    assert reverted["origin"] == "source"
+    assert reverted["source_ref"]["anchor_id"] == "title-anchor"
+
+
 def test_v5_missing_variant_merchant_values_are_editable_required_cells():
     item = _item(
         {

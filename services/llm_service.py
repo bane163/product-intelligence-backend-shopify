@@ -27,6 +27,10 @@ from pydantic import ValidationError
 
 from ai.models import ProductsList
 from application.ports.llm_port import ExtractionRequest, ModelConfiguration
+from application.services.pdf_family_workflow import (
+    PDFDocumentWorkflowAdapter,
+    PDF_FAMILY_KINDS,
+)
 from shared.metrics_signals import signal_llm_latency
 from shared.token_usage import normalize_reported_token_usage
 from .interfaces import CollaboraServiceInterface, SupabaseServiceInterface
@@ -41,6 +45,7 @@ MONTY_RESOURCE_LIMITS = {
     "max_duration_secs": 30.0,
     "max_memory": 128 * 1024 * 1024,
 }
+COPILOT_DOCUMENT_KINDS = frozenset({"csv", "spreadsheet", "spreadsheet_legacy"})
 
 
 def _strip_markdown_json_fence(text: str) -> str:
@@ -490,22 +495,36 @@ class LLMService:
         collabora: CollaboraServiceInterface,
         supabase: SupabaseServiceInterface,
         agent_factory=GitHubCopilotAgent,
+        pdf_workflow: PDFDocumentWorkflowAdapter | None = None,
     ) -> None:
         self.collabora = collabora
         self.supabase = supabase
         self.agent_factory = agent_factory
+        self.pdf_workflow = pdf_workflow or PDFDocumentWorkflowAdapter()
 
     async def extract(self, request: ExtractionRequest) -> ProductsList:
         started_at = perf_counter()
         status = "failed"
+        operation = (
+            "pdf_document_workflow_extract"
+            if request.document_kind in PDF_FAMILY_KINDS
+            else "copilot_extract"
+        )
         try:
-            prepared = await self._prepare_legacy_spreadsheet(request)
-            result = await self._run_copilot(prepared)
+            if request.document_kind in PDF_FAMILY_KINDS:
+                result = await self.pdf_workflow.extract(request)
+            elif request.document_kind in COPILOT_DOCUMENT_KINDS:
+                prepared = await self._prepare_legacy_spreadsheet(request)
+                result = await self._run_copilot(prepared)
+            else:
+                raise RuntimeError(
+                    f"EXTRACTION_DOCUMENT_KIND_UNSUPPORTED: {request.document_kind}"
+                )
             status = "succeeded"
             return result
         finally:
             signal_llm_latency(
-                operation="copilot_extract",
+                operation=operation,
                 status=status,
                 duration_ms=int((perf_counter() - started_at) * 1000),
                 model_provider=request.model.provider,

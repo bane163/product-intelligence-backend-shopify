@@ -14,6 +14,7 @@ from copilot.generated.session_events import (
 )
 from copilot.tools import Tool, ToolInvocation
 
+from ai.models import ProductsList
 from application.ports.llm_port import ExtractionRequest, ModelConfiguration
 from application.services.pdf_evidence_index import EvidenceCatalog, EvidenceEntry
 from application.services.pdf_evidence_index import validate_indexed_pdf_evidence
@@ -574,116 +575,25 @@ async def test_product_intelligence_traces_usage_even_when_payload_is_malformed(
 
 
 @pytest.mark.asyncio
-async def test_pdf_exposes_only_pdf_evidence_tools_and_native_preview():
-    import fitz
+async def test_pdf_family_routes_to_document_workflow_without_starting_copilot():
+    calls = []
 
-    doc = fitz.open()
-    doc.new_page().insert_text((72, 72), "Demo")
-    pdf = doc.tobytes()
-    doc.close()
-    catalog = EvidenceCatalog(
-        (EvidenceEntry(1, "Demo", 1, (0, 0, 1, 1), "a1", "azure"),)
-    )
-    captured = {}
-
-    class PdfAgent:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            _ = args
-
-        async def run(self, prompt):
-            _ = prompt
-            preview = next(tool for tool in captured["tools"] if isinstance(tool, Tool))
-            captured["native_preview"] = await preview.handler(
-                ToolInvocation(arguments={"page_number": 1})
-            )
-            return SimpleNamespace(
-                text='{"products":[{"title":"Demo","source_refs":[{"value_path":"title","evidence_index":1}]}]}'
-            )
-
-    service = LLMService(
-        collabora=_NoopCollabora(), supabase=SimpleNamespace(), agent_factory=PdfAgent
-    )
-    await service.extract(
-        request(
-            document_kind="pdf",
-            content=pdf,
-            filename="catalog.pdf",
-            content_type="application/pdf",
-            evidence_catalog=catalog,
-        )
-    )
-    tool_names = {
-        getattr(tool, "name", getattr(tool, "__name__", ""))
-        for tool in captured["tools"]
-    }
-    assert tool_names == {
-        "document_manifest",
-        "read_evidence_page",
-        "search_evidence",
-        "validate_extraction",
-        "submit_extraction",
-        "view_page",
-    }
-    assert captured["native_preview"].binary_results_for_llm[0].mime_type == "image/png"
-    assert "custom:read_workbook_range" not in set(
-        captured["default_options"]["available_tools"]
-    )
-
-
-@pytest.mark.asyncio
-async def test_service_deletes_on_demand_preview_directory_after_pdf_run():
-    import fitz
-
-    doc = fitz.open()
-    doc.new_page().insert_text((72, 72), "Demo")
-    pdf = doc.tobytes()
-    doc.close()
-    captured = {}
-
-    class PreviewAgent:
-        def __init__(self, **kwargs):
-            self.preview = next(
-                tool for tool in kwargs["tools"] if isinstance(tool, Tool)
-            )
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            _ = args
-
-        async def run(self, prompt):
-            _ = prompt
-            result = await self.preview.handler(
-                ToolInvocation(arguments={"page_number": 1})
-            )
-            assert result.binary_results_for_llm
-            captured["directory"] = self.preview._preview_directory
-            return SimpleNamespace(
-                text='{"products":[{"title":"Demo","value_origins":{"title":"ai_assisted"}}]}'
-            )
+    class PdfWorkflow:
+        async def extract(self, extraction_request):
+            calls.append(extraction_request)
+            return ProductsList(products=[{"title": "Demo"}])
 
     service = LLMService(
         collabora=_NoopCollabora(),
         supabase=SimpleNamespace(),
-        agent_factory=PreviewAgent,
+        agent_factory=lambda **_: pytest.fail("Copilot must not handle PDF-family inputs"),
+        pdf_workflow=PdfWorkflow(),
     )
-    result = await service.extract(
-        request(
-            document_kind="pdf",
-            content=pdf,
-            filename="x.pdf",
-            content_type="application/pdf",
-        )
-    )
-    assert result.products[0].title == "Demo"
-    assert not captured["directory"].exists()
+    for kind in ("pdf", "docx", "pptx", "image"):
+        result = await service.extract(request(document_kind=kind))
+        assert result.products[0].title == "Demo"
+
+    assert [call.document_kind for call in calls] == ["pdf", "docx", "pptx", "image"]
 
 
 @pytest.mark.live_copilot

@@ -8,6 +8,7 @@ dependencies = [
     "agent-framework-core==1.13.0",
     "agent-framework-github-copilot==1.0.1",
     "agent-framework-monty==1.0.0b260730",
+    "agent-framework-openai==1.13.0",
     "pydantic-monty==0.0.18",
     "azure-ai-documentintelligence==1.0.2",
     "black>=25.11.0",

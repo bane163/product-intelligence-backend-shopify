@@ -12,6 +12,7 @@ from typing import Any
 from application.domain.shopify_product_normalization import normalize_core_product
 from application.domain.review_value_paths import (
     canonical_value_path,
+    iter_review_values,
     normalized_path_part,
 )
 
@@ -1111,25 +1112,68 @@ def _normalized_origin_path(value: Any) -> str:
     return canonical_value_path(value)
 
 
-def _matching_value_origin(origins: dict[str, Any], row: dict[str, Any]) -> str | None:
-    """Resolve one exact value origin, tolerating equivalent path spellings."""
-    value_path = _value_path(row)
-    requested = origins.get(value_path)
-    if requested in VALUE_ORIGINS:
-        return str(requested)
+def _indexed_source_value_path(
+    imported: dict[str, Any], row: dict[str, Any]
+) -> str | None:
+    """Resolve a repair row through its source variant position and field."""
+    identity = row.get("subject_identity")
+    if (
+        row.get("scope") not in {"variant", "inventory"}
+        or not isinstance(identity, dict)
+        or not isinstance(identity.get("source_variant_index"), int)
+    ):
+        return None
+    source_variant_index = identity["source_variant_index"]
+    variants = _variants(imported)
+    if not 0 <= source_variant_index < len(variants):
+        return None
 
-    normalized_path = _normalized_origin_path(value_path)
+    # iter_review_values is the authority that authored canonical extraction
+    # paths. Select the subject produced for this exact source variant, then
+    # match only the requested field. Values never participate in matching.
+    option_names = _schema_from_product(imported)
+    subject = _variant_subject(variants[source_variant_index], option_names)
+    field = str(row.get("field") or "")
+    candidates = [
+        item.value_path
+        for item in iter_review_values(imported)
+        if item.scope == row.get("scope")
+        and item.subject == subject
+        and item.field == field
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _provenance_value_paths(
+    imported: dict[str, Any], row: dict[str, Any]
+) -> tuple[str, ...]:
+    paths = [_value_path(row)]
+    indexed = _indexed_source_value_path(imported, row)
+    if indexed and canonical_value_path(indexed) not in {
+        canonical_value_path(path) for path in paths
+    }:
+        paths.append(indexed)
+    return tuple(paths)
+
+
+def _matching_value_origin(
+    origins: dict[str, Any], row: dict[str, Any], imported: dict[str, Any]
+) -> str | None:
+    """Resolve one exact value origin, tolerating equivalent path spellings."""
+    normalized_paths = {
+        _normalized_origin_path(path) for path in _provenance_value_paths(imported, row)
+    }
     matching_items = [
         origin
         for path, origin in origins.items()
-        if _normalized_origin_path(path) == normalized_path
+        if _normalized_origin_path(path) in normalized_paths
     ]
     if matching_items and not any(origin in VALUE_ORIGINS for origin in matching_items):
         return "unknown"
     matches = {
         str(origin)
         for path, origin in origins.items()
-        if origin in VALUE_ORIGINS and _normalized_origin_path(path) == normalized_path
+        if origin in VALUE_ORIGINS and _normalized_origin_path(path) in normalized_paths
     }
     if len(matches) == 1:
         return next(iter(matches))
@@ -1155,14 +1199,15 @@ def _matching_source_refs(
     refs = imported.get("source_refs")
     if not isinstance(refs, list):
         return []
-    value_path = _value_path(row)
+    value_paths = {
+        canonical_value_path(path) for path in _provenance_value_paths(imported, row)
+    }
     exact = [
         deepcopy(ref)
         for ref in refs
         if isinstance(ref, dict)
         and ref.get("value_path")
-        and canonical_value_path(ref.get("value_path"))
-        == canonical_value_path(value_path)
+        and canonical_value_path(ref.get("value_path")) in value_paths
     ]
     if exact:
         deduplicated: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -1221,7 +1266,7 @@ def _decorate_review_rows(
             ),
             None,
         )
-        requested_origin = _matching_value_origin(origins, row)
+        requested_origin = _matching_value_origin(origins, row, imported)
         origin = (
             requested_origin
             if requested_origin
@@ -1472,6 +1517,36 @@ def _preview_cell(
     return cell
 
 
+def _preview_row_with_provenance(
+    repair_source: dict[str, Any],
+    row: dict[str, Any] | None,
+    *,
+    scope: str,
+    subject: str,
+    subject_identity: dict[str, Any] | None,
+    field: str,
+    current: Any,
+    proposed: Any,
+) -> dict[str, Any] | None:
+    """Hydrate unchanged preview cells from trusted extraction evidence."""
+    if isinstance(row, dict):
+        return row
+    synthetic = _review_row(
+        scope=scope,
+        subject=subject,
+        subject_identity=subject_identity,
+        field=field,
+        current=current,
+        proposed=proposed,
+        disposition="applicable",
+        change_kind="unchanged",
+    )
+    decorated = _decorate_review_rows([synthetic], repair_source)[0]
+    decorated["disposition"] = "unchanged"
+    decorated["included"] = True
+    return decorated
+
+
 def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
     """Author the v5 cell contract from mutation authority, never client guesses."""
     proposed = item.get("proposed") if isinstance(item.get("proposed"), dict) else {}
@@ -1518,6 +1593,16 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
                     change_kind="added",
                 )
                 row.update({"origin": "defaulted", "included": True, "editable": True})
+        row = _preview_row_with_provenance(
+            repair_source,
+            row,
+            scope="product",
+            subject=str(proposed.get("title") or "Product"),
+            subject_identity=None,
+            field=field,
+            current=current_value,
+            proposed=proposed_value,
+        )
         product_cells.append(_preview_cell(
             item, column=column, scope="product", subject=str(proposed.get("title") or "Product"),
             subject_identity=None, value_path=field, current=current_value,
@@ -1584,6 +1669,16 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
             row = row_for("inventory" if field == "inventory_quantity" else "variant", field, identity)
             if row is None and field.startswith("inventoryItem."):
                 row = row_for("variant", field, identity)
+            row = _preview_row_with_provenance(
+                repair_source,
+                row,
+                scope="inventory" if field == "inventory_quantity" else "variant",
+                subject=subject,
+                subject_identity=identity,
+                field=field,
+                current=live_flat.get(field),
+                proposed=flat.get(field),
+            )
             required = not live and field in {"sku", "price"}
             cells.append(_preview_cell(
                 item, column=_preview_column(field, "variant"),

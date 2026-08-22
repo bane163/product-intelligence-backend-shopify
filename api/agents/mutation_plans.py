@@ -410,6 +410,8 @@ async def _repair_legacy_review_evidence(
     """Re-verify retained source evidence without advancing the value revision."""
     if not previous or previous.get("status") != "review":
         return draft
+    if previous.get("review_contract_version") == 5:
+        return draft
     file_id = str(draft.get("input_file_id") or "")
     source = ctx.supabase.file.get_file(file_id) if file_id else None
     if not isinstance(source, dict) or not isinstance(

@@ -948,10 +948,48 @@ async def test_preflight_persists_generated_sku_once_with_required_derived_autho
         if row["field"] == "sku" and row.get("proposed") == "TEE-WHITE"
     )
     assert regenerated_row["origin"] == "derived"
+    first_title = next(
+        cell
+        for cell in first.json()["plan"]["items"][0]["review_preview"]["product"]["cells"]
+        if cell["column_key"] == "title"
+    )
+    second_title = next(
+        cell
+        for cell in second.json()["plan"]["items"][0]["review_preview"]["product"]["cells"]
+        if cell["column_key"] == "title"
+    )
+    assert first_title["source_ref"] == second_title["source_ref"] == {
+        "value_path": "title",
+        "cell": "A2",
+        "evidence_role": "value",
+    }
     assert all(
         issue["code"] != "SKU_REQUIRED"
         for issue in first.json()["plan"]["items"][0]["quality_issues"]
     )
+
+
+@pytest.mark.asyncio
+async def test_v5_plan_skips_legacy_evidence_repair():
+    from types import SimpleNamespace
+
+    from api.agents.mutation_plans import _repair_legacy_review_evidence
+
+    class FailingFiles:
+        def get_file(self, _file_id):
+            raise AssertionError("v5 regeneration must not rebuild trusted evidence")
+
+    draft = {"draft_id": "draft-1", "input_file_id": "file-1", "products": []}
+    previous = {
+        "status": "review",
+        "review_contract_version": 5,
+        "items": [],
+    }
+    ctx = SimpleNamespace(supabase=SimpleNamespace(file=FailingFiles()))
+
+    assert await _repair_legacy_review_evidence(
+        draft, previous, "shop.myshopify.com", ctx
+    ) is draft
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,7 @@ import shopify_session_store
 from app_context import AppContext, get_ctx
 from application.domain.shopify_mutation_plan import (
     build_review_plan_item,
+    executable_inventory_dependencies,
     infer_positional_option_dimensions,
     materialize_execution_proposed,
     materialize_inventory_operations,
@@ -884,8 +885,14 @@ async def create_mutation_plan(
                     ):
                         row["origin"] = "defaulted"
             plan_item["quality_issues"] = product_quality_issues
+            executable_inventory_rows = {
+                id(row) for row in executable_inventory_dependencies(plan_item)
+            }
             for row in plan_item.get("review_changes", []):
                 if not isinstance(row, dict) or row.get("scope") != "inventory":
+                    continue
+                if id(row) not in executable_inventory_rows:
+                    row["required"] = False
                     continue
                 # Blank inventory means no inventory mutation. Numeric values
                 # become required operations only once a location is available.
@@ -1122,10 +1129,7 @@ async def approve_mutation_plan(
                 "Choose an inventory location before applying inventory"
             )
         for item in selected:
-            rows = [
-                row for row in item.get("review_changes", []) if isinstance(row, dict)
-            ]
-            inventory_rows = [row for row in rows if row.get("scope") == "inventory"]
+            inventory_rows = executable_inventory_dependencies(item)
             if any(
                 not row.get("included") or row.get("disposition") != "applicable"
                 for row in inventory_rows

@@ -824,6 +824,134 @@ def test_stored_v2_plans_and_edit_sessions_hydrate_safe_row_defaults(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_approval_ignores_legacy_rejected_inventory_rows_but_requires_executable_rows(
+    monkeypatch,
+):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "legacy-inventory-audit-approval"
+    plan_id = "legacy-inventory-audit-plan"
+    shop_domain = "legacy-inventory.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [{"title": "Desk"}],
+    }
+    material_identity = {
+        "kind": "variant_options",
+        "option_names": ["material"],
+        "values": ["oak"],
+    }
+    valid_quantity = {
+        "change_id": "material-quantity",
+        "scope": "inventory",
+        "subject": "Material: Oak",
+        "subject_identity": material_identity,
+        "field": "inventory_quantity",
+        "proposed": 8,
+        "disposition": "applicable",
+        "change_kind": "updated",
+        "included": True,
+    }
+    rejected_default = {
+        "change_id": "default-title-quantity",
+        "scope": "inventory",
+        "subject": "Title: Default Title",
+        "subject_identity": {
+            "kind": "variant_options",
+            "option_names": ["title"],
+            "values": ["default title"],
+        },
+        "field": "inventory_quantity",
+        "proposed": 8,
+        "disposition": "blocked",
+        "change_kind": "rejected",
+        "included": False,
+        "required": True,
+    }
+    base_plan = {
+        "plan_id": plan_id,
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 5,
+        "inventory_context": {
+            "required": True,
+            "status": "ready",
+            "selected_location": {
+                "id": "gid://shopify/Location/1",
+                "name": "Main",
+            },
+        },
+        "items": [
+            {
+                "item_id": "desk",
+                "selected": True,
+                "selectable": True,
+                "blockers": [],
+                "quality_issues": [],
+                "proposed": {
+                    "title": "Desk",
+                    "productOptions": [
+                        {"name": "Material", "values": [{"name": "Oak"}]}
+                    ],
+                    "variants": [
+                        {
+                            "id": "gid://shopify/ProductVariant/1",
+                            "optionValues": [
+                                {"optionName": "Material", "name": "Oak"}
+                            ],
+                            "inventoryItem": {"tracked": True},
+                        }
+                    ],
+                },
+                "review_changes": [valid_quantity, rejected_default],
+            }
+        ],
+    }
+    service.mutation_plans[plan_id] = base_plan
+
+    class FakeShopifyClient:
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        assert shop == shop_domain
+        return FakeShopifyClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    url = f"/agents/product-drafts/{draft_id}/mutation-plan/approve"
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        approved = await client.post(url, json={"plan_id": plan_id})
+        service.mutation_plans[plan_id] = {
+            **base_plan,
+            "items": [
+                {
+                    **base_plan["items"][0],
+                    "review_changes": [
+                        {**valid_quantity, "included": False},
+                        rejected_default,
+                    ],
+                }
+            ],
+        }
+        excluded = await client.post(url, json={"plan_id": plan_id})
+
+    assert approved.status_code == 200
+    assert excluded.status_code == 409
+    assert excluded.json()["detail"]["code"] == "REVIEW_REQUIRED"
+
+
+@pytest.mark.asyncio
 async def test_approval_ignores_legacy_acknowledgement_and_omits_deferred_values(
     monkeypatch,
 ):

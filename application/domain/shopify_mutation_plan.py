@@ -1432,6 +1432,25 @@ def _review_row_target_exists(item: dict[str, Any], row: dict[str, Any]) -> bool
     return False
 
 
+def executable_inventory_dependencies(
+    item: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return inventory rows that can produce writes for the proposed product."""
+    proposed = item.get("proposed")
+    if not isinstance(proposed, dict):
+        return []
+    return [
+        row
+        for row in item.get("review_changes", [])
+        if isinstance(row, dict)
+        and row.get("scope") == "inventory"
+        and row.get("field") in {"inventory_quantity", "inventoryItem.tracked"}
+        and row.get("change_kind") != "rejected"
+        and row.get("disposition") != "rejected"
+        and _unique_variant_target(proposed, row) is not None
+    ]
+
+
 def _technical_review_row(row: dict[str, Any]) -> bool:
     if str(row.get("scope") or "").strip().casefold() != "metafield":
         return False
@@ -2352,8 +2371,16 @@ def review_changes(
             and item.get("code")
         ]
         combo = _canonical_combo(raw_variant, option_names or imported_names)
-        represented = bool(raw_variant.get("id") in proposed_ids) or (
-            combo is not None and combo in proposed_combos
+        safe_singleton_match = proposed.get("_review_single_variant_match")
+        represented = (
+            bool(raw_variant.get("id") in proposed_ids)
+            or (combo is not None and combo in proposed_combos)
+            or (
+                index == 0
+                and len(_variants(imported)) == 1
+                and isinstance(safe_singleton_match, dict)
+                and safe_singleton_match.get("matched") is True
+            )
         )
         if not targeted_codes and represented:
             continue

@@ -102,6 +102,61 @@ def test_inventory_quantity_contract_and_immutable_operation_materialization():
     assert "inventory_quantity" not in execution["variants"][0]
 
 
+def test_safe_single_variant_match_does_not_emit_default_title_inventory_audit_rows():
+    live = {
+        "id": "gid://shopify/Product/1",
+        "title": "Desk",
+        "options": [{"name": "Material", "optionValues": [{"name": "Oak"}]}],
+        "variants": {
+            "nodes": [
+                {
+                    "id": "gid://shopify/ProductVariant/1",
+                    "sku": "DESK-OAK",
+                    "price": "100.00",
+                    "selectedOptions": [{"name": "Material", "value": "Oak"}],
+                    "inventory_quantity": 2,
+                    "inventoryItem": {"tracked": False},
+                }
+            ]
+        },
+    }
+    imported = {
+        "title": "Desk",
+        "options": [{"name": "Title", "values": ["Default Title"]}],
+        "variants": [
+            {
+                "option1": "Default Title",
+                "sku": "DESK-OAK",
+                "price": "100.00",
+                "inventory_quantity": 8,
+            }
+        ],
+    }
+
+    proposed, blockers, unapplied = merge_structured_product(
+        live, imported, {"title": "Desk"}
+    )
+    item = build_review_plan_item(
+        item_id="desk",
+        currency_code="USD",
+        source_index=0,
+        source_product=imported,
+        live_snapshot=live,
+        proposed=proposed,
+        operation="update",
+        blockers=blockers,
+        unapplied=unapplied,
+    )
+
+    assert not blockers
+    inventory_rows = [
+        row for row in item["review_changes"] if row["scope"] == "inventory"
+    ]
+    assert {row["field"] for row in inventory_rows} == {"inventory_quantity"}
+    assert all(row["change_kind"] != "rejected" for row in inventory_rows)
+    assert all(row["subject"] == "Material: Oak" for row in inventory_rows)
+
+
 def test_missing_sku_and_price_have_required_editable_blocked_rows():
     imported = {
         "title": "Tee",

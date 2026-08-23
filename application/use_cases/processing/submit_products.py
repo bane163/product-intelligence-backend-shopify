@@ -17,6 +17,10 @@ from application.use_cases.intelligence_apply_suggestion import (
 from api.agents.utils import normalize_shop_domain, parse_products_json
 from shopify import ShopifyClient
 from shared.observability import current_observability_fields
+from application.services.product_media_ingestion import (
+    PRODUCT_MEDIA_FILE_ORIGIN,
+    fetch_external_image,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -151,7 +155,107 @@ def _resolve_submit_source(
 def _strip_internal_submit_fields(product: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(product)
     sanitized.pop(VARIANT_OPERATIONS_FIELD, None)
+    sanitized.pop("_approved_media", None)
+    sanitized.pop("media_gallery", None)
     return sanitized
+
+
+async def _prepare_product_media(
+    *,
+    supabase: SupabaseNamespacedPort,
+    shopify: ShopifyPort,
+    product: dict[str, Any],
+    shop_domain: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Stage approved image bytes and return a Shopify-safe product payload."""
+
+    raw_gallery = product.get("_approved_media")
+    gallery = (
+        [item for item in raw_gallery if isinstance(item, dict)]
+        if isinstance(raw_gallery, list)
+        else []
+    )
+    existing_ids = [
+        str(item["shopify_media_id"])
+        for item in gallery
+        if item.get("source_kind") == "shopify_existing"
+        and item.get("shopify_media_id")
+    ]
+    incoming = [
+        item for item in gallery if item.get("source_kind") != "shopify_existing"
+    ]
+    staged_files: list[dict[str, str]] = []
+    for item in incoming:
+        asset_id = _normalize_optional_string(item.get("asset_id"))
+        content: bytes
+        mime_type: str
+        filename: str
+        if asset_id:
+            stored = supabase.file.get_file(asset_id)
+            if (
+                not isinstance(stored, dict)
+                or str(stored.get("shop_domain") or "").strip().lower() != shop_domain
+                or stored.get("file_origin") != PRODUCT_MEDIA_FILE_ORIGIN
+                or not isinstance(stored.get("content"), (bytes, bytearray))
+            ):
+                raise RuntimeError("An approved image is unavailable for this shop")
+            content = bytes(stored["content"])
+            mime_type = str(
+                stored.get("content_type") or item.get("content_type") or ""
+            )
+            filename = str(stored.get("name") or asset_id)
+            expected_hash = _normalize_optional_string(item.get("content_sha256"))
+            if expected_hash:
+                import hashlib
+
+                if hashlib.sha256(content).hexdigest() != expected_hash:
+                    raise RuntimeError("An approved image changed after review")
+        else:
+            source_url = _normalize_optional_string(item.get("source_url"))
+            if not source_url:
+                raise RuntimeError("An approved image has no stored bytes")
+            content, mime_type, extension, _width, _height, _resolved = (
+                await fetch_external_image(source_url)
+            )
+            filename = f"product-image.{extension}"
+        if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise RuntimeError("An approved image has an unsupported content type")
+        target = await shopify.create_staged_image_upload(
+            filename=filename,
+            mime_type=mime_type,
+            file_size=len(content),
+        )
+        resource_url = str(target.get("resourceUrl") or "").strip()
+        upload_url = str(target.get("url") or "").strip()
+        if not resource_url or not upload_url:
+            raise RuntimeError("Shopify did not return a usable image upload target")
+        await shopify.upload_bytes_to_staged_url(
+            url=upload_url,
+            parameters=(
+                target.get("parameters")
+                if isinstance(target.get("parameters"), list)
+                else []
+            ),
+            content=content,
+            filename=filename,
+            mime_type=mime_type,
+            http_method=str(target.get("httpMethod") or "POST"),
+        )
+        file_input = {"contentType": "IMAGE", "originalSource": resource_url}
+        alt_text = _normalize_optional_string(item.get("alt_text"))
+        if alt_text:
+            file_input["alt"] = alt_text
+        staged_files.append(file_input)
+    prepared = _strip_internal_submit_fields(product)
+    if staged_files:
+        prepared["files"] = [
+            *({"id": media_id} for media_id in existing_ids),
+            *staged_files,
+        ]
+    return prepared, {
+        "existing_media_ids": existing_ids,
+        "expected_new_count": len(staged_files),
+    }
 
 
 def _collect_variant_operations_by_index(
@@ -277,7 +381,12 @@ def _build_failed_result_row(
 
 
 def _build_partially_applied_result_row(
-    *, index: int, title: str, shopify_product_id: str, errors: list[Any]
+    *,
+    index: int,
+    title: str,
+    shopify_product_id: str,
+    errors: list[Any],
+    failed_component: str = "metafields",
 ) -> dict[str, Any]:
     return {
         "index": index,
@@ -287,8 +396,55 @@ def _build_partially_applied_result_row(
         "shopify_product_id": shopify_product_id,
         "errors": errors,
         "applied": ["product"],
-        "failed": ["metafields"],
+        "failed": [failed_component],
     }
+
+
+def _media_processing_errors(status: dict[str, Any]) -> list[dict[str, Any]]:
+    errors: list[dict[str, Any]] = []
+    for media in (
+        status.get("failed", []) if isinstance(status.get("failed"), list) else []
+    ):
+        if not isinstance(media, dict):
+            continue
+        raw_errors = [
+            *(
+                media.get("fileErrors")
+                if isinstance(media.get("fileErrors"), list)
+                else []
+            ),
+            *(
+                media.get("mediaErrors")
+                if isinstance(media.get("mediaErrors"), list)
+                else []
+            ),
+        ]
+        if not raw_errors:
+            raw_errors = [{"message": "Shopify failed to process this image."}]
+        for error in raw_errors:
+            errors.append(
+                {
+                    "field": ["media"],
+                    "code": error.get("code") if isinstance(error, dict) else None,
+                    "message": (
+                        str(
+                            error.get("message")
+                            or "Shopify failed to process this image."
+                        )
+                        if isinstance(error, dict)
+                        else str(error)
+                    ),
+                }
+            )
+    if status.get("status") == "timeout":
+        errors.append(
+            {
+                "field": ["media"],
+                "code": "MEDIA_PROCESSING_TIMEOUT",
+                "message": "The product was applied, but Shopify did not finish processing its images in time.",
+            }
+        )
+    return errors
 
 
 def _malformed_bulk_result_message(detail: str) -> str:
@@ -492,7 +648,39 @@ async def execute(
         )
 
     variant_operations_by_index = _collect_variant_operations_by_index(products)
-    submit_products = [_strip_internal_submit_fields(item) for item in products]
+    results: list[dict[str, Any]] = []
+    submit_products: list[dict[str, Any]] = []
+    submit_index_map: list[int] = []
+    prepared_products_by_index: dict[int, dict[str, Any]] = {}
+    media_expectations_by_index: dict[int, dict[str, Any]] = {}
+    for original_index, product in enumerate(products):
+        title = str(product.get("title") or f"Product {original_index}")
+        try:
+            prepared, media_expectation = await _prepare_product_media(
+                supabase=supabase,
+                shopify=submit_client,
+                product=product,
+                shop_domain=tenant or "",
+            )
+        except Exception as media_exc:
+            emit_and_persist(
+                phase="submit_item_error",
+                message=f"Could not prepare images for '{title}'",
+                level="error",
+                error=str(media_exc),
+            )
+            results.append(
+                _build_failed_result_row(
+                    index=original_index,
+                    title=title,
+                    message=f"Image upload preparation failed: {media_exc}",
+                )
+            )
+            continue
+        submit_products.append(prepared)
+        submit_index_map.append(original_index)
+        prepared_products_by_index[original_index] = prepared
+        media_expectations_by_index[original_index] = media_expectation
     source = source_context.source
     client_type = type(submit_client).__name__
     client_shop = tenant
@@ -527,9 +715,10 @@ async def execute(
         client_shop,
     )
 
-    results: list[dict[str, Any]] = []
     # ── Bulk operation flow via productSet ──────────────────────────────
     try:
+        if not submit_products:
+            raise RuntimeError("No products passed image upload preparation")
         emit_and_persist(
             phase="submit_bulk_build",
             message=f"Building JSONL for {len(submit_products)} products",
@@ -635,25 +824,28 @@ async def execute(
                 else:
                     unnumbered_results.append(row)
             missing_result = object()
-            for index, product in enumerate(submit_products):
-                title = product.get("title", f"Product {index}")
-                result_data = results_by_line.get(index, missing_result)
+            for line_index, product in enumerate(submit_products):
+                original_index = submit_index_map[line_index]
+                title = product.get("title", f"Product {original_index}")
+                result_data = results_by_line.get(line_index, missing_result)
                 if (
                     result_data is missing_result
                     and not results_by_line
-                    and index < len(unnumbered_results)
+                    and line_index < len(unnumbered_results)
                 ):
-                    result_data = unnumbered_results[index]
+                    result_data = unnumbered_results[line_index]
                 if result_data is not missing_result:
                     parsed_row, product_data = _parse_bulk_product_set_result(
                         result_data=result_data,
-                        index=index,
+                        index=original_index,
                         title=title,
                     )
                     if parsed_row.get("status") == "success" and product_data:
                         created_id = product_data.get("id", "")
                         # Apply variant operations if any
-                        variant_ops = variant_operations_by_index.get(index, [])
+                        variant_ops = variant_operations_by_index.get(
+                            original_index, []
+                        )
                         if variant_ops and created_id:
                             try:
                                 await _apply_variant_operations_for_product(
@@ -670,7 +862,7 @@ async def execute(
                                 )
                                 results.append(
                                     _build_failed_result_row(
-                                        index=index,
+                                        index=original_index,
                                         title=title,
                                         message=f"Product partially applied; variant step failed: {var_exc}",
                                         shopify_product_id=created_id,
@@ -694,7 +886,7 @@ async def execute(
                                 if metafield_errors:
                                     results.append(
                                         _build_partially_applied_result_row(
-                                            index=index,
+                                            index=original_index,
                                             title=product_data.get("title", title),
                                             shopify_product_id=created_id,
                                             errors=[
@@ -710,7 +902,7 @@ async def execute(
                             except Exception as metafield_exc:
                                 results.append(
                                     _build_partially_applied_result_row(
-                                        index=index,
+                                        index=original_index,
                                         title=product_data.get("title", title),
                                         shopify_product_id=created_id,
                                         errors=[
@@ -722,9 +914,61 @@ async def execute(
                                     )
                                 )
                                 continue
+                        media_expectation = media_expectations_by_index.get(
+                            original_index, {}
+                        )
+                        expected_new_count = int(
+                            media_expectation.get("expected_new_count") or 0
+                        )
+                        if expected_new_count and created_id:
+                            try:
+                                media_status = (
+                                    await submit_client.wait_for_product_media(
+                                        created_id,
+                                        existing_media_ids=list(
+                                            media_expectation.get("existing_media_ids")
+                                            or []
+                                        ),
+                                        expected_new_count=expected_new_count,
+                                    )
+                                )
+                            except Exception as media_exc:
+                                media_status = {
+                                    "status": "failed",
+                                    "failed": [
+                                        {
+                                            "mediaErrors": [
+                                                {
+                                                    "code": "MEDIA_STATUS_CHECK_FAILED",
+                                                    "message": str(media_exc),
+                                                }
+                                            ]
+                                        }
+                                    ],
+                                }
+                            if media_status.get("status") != "ready":
+                                media_errors = _media_processing_errors(media_status)
+                                if not media_errors:
+                                    media_errors = [
+                                        {
+                                            "field": ["media"],
+                                            "code": "MEDIA_PROCESSING_FAILED",
+                                            "message": "Shopify did not confirm the approved product images.",
+                                        }
+                                    ]
+                                results.append(
+                                    _build_partially_applied_result_row(
+                                        index=original_index,
+                                        title=product_data.get("title", title),
+                                        shopify_product_id=created_id,
+                                        errors=media_errors,
+                                        failed_component="media",
+                                    )
+                                )
+                                continue
                         results.append(
                             _build_success_result_row(
-                                index=index,
+                                index=original_index,
                                 title=product_data.get("title", title),
                                 shopify_product_id=created_id,
                             )
@@ -734,28 +978,30 @@ async def execute(
                 else:
                     results.append(
                         _build_failed_result_row(
-                            index=index,
+                            index=original_index,
                             title=title,
                             message="No result from bulk operation",
                         )
                     )
         elif bulk_status == "COMPLETED":
             # Shopify completion without output is not evidence of item success.
-            for index, product in enumerate(submit_products):
+            for line_index, product in enumerate(submit_products):
+                original_index = submit_index_map[line_index]
                 results.append(
                     _build_failed_result_row(
-                        index=index,
-                        title=product.get("title", f"Product {index}"),
+                        index=original_index,
+                        title=product.get("title", f"Product {original_index}"),
                         message="Bulk operation completed without a result URL",
                     )
                 )
         else:
             error_code = final_status.get("errorCode", "UNKNOWN")
-            for index, product in enumerate(submit_products):
+            for line_index, product in enumerate(submit_products):
+                original_index = submit_index_map[line_index]
                 results.append(
                     _build_failed_result_row(
-                        index=index,
-                        title=product.get("title", f"Product {index}"),
+                        index=original_index,
+                        title=product.get("title", f"Product {original_index}"),
                         message=f"Bulk operation {bulk_status}: {error_code}",
                     )
                 )
@@ -772,11 +1018,12 @@ async def execute(
             level="error",
             error=str(exc),
         )
-        for index, product in enumerate(submit_products):
+        for line_index, product in enumerate(submit_products):
+            original_index = submit_index_map[line_index]
             results.append(
                 _build_failed_result_row(
-                    index=index,
-                    title=product.get("title", f"Product {index}"),
+                    index=original_index,
+                    title=product.get("title", f"Product {original_index}"),
                     message=str(exc),
                 )
             )
@@ -789,20 +1036,18 @@ async def execute(
         idx = row.get("index")
         if (
             isinstance(idx, int)
-            and 0 <= idx < len(submit_products)
+            and 0 <= idx < len(products)
             and idx not in seen_indexes
         ):
             seen_indexes.add(idx)
             successful_indexes.append(idx)
     success_count = len(successful_indexes)
-    failed_count = max(0, len(submit_products) - success_count)
+    failed_count = max(0, len(products) - success_count)
     partial_count = sum(
         1 for row in results if row.get("status") == "partially_applied"
     )
     fully_applied = (
-        success_count == len(submit_products)
-        and failed_count == 0
-        and partial_count == 0
+        success_count == len(products) and failed_count == 0 and partial_count == 0
     )
     status = "success" if fully_applied else "error"
     submitted_id: str | None = None
@@ -834,7 +1079,7 @@ async def execute(
             )
     elif failed_count:
         warnings.append(
-            f"Submitted {success_count} of {len(submit_products)} products; {failed_count} failed"
+            f"Submitted {success_count} of {len(products)} products; {failed_count} failed"
         )
     if status == "success":
         inferred_name = document_name
@@ -845,8 +1090,10 @@ async def execute(
                     "first_product_title"
                 )
         if not inferred_name:
-            inferred_name = str(submit_products[0].get("title") or "Submitted document")
-        submitted_products = [submit_products[idx] for idx in successful_indexes]
+            inferred_name = str(products[0].get("title") or "Submitted document")
+        submitted_products = [
+            prepared_products_by_index[idx] for idx in successful_indexes
+        ]
         submitted = supabase.submitted.save_submitted_document(
             submitted_id=str(uuid.uuid4()),
             run_id=current_run_id,

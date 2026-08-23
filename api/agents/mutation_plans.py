@@ -27,8 +27,8 @@ from application.domain.shopify_mutation_plan import (
     validate_product,
 )
 from application.domain.product_images import (
-    is_non_production,
-    product_set_files,
+    approved_media_gallery,
+    review_media_gallery,
     resolve_product_image,
 )
 from application.domain.extraction_quality import (
@@ -424,7 +424,7 @@ async def _repair_legacy_review_evidence(
     """Re-verify retained source evidence without advancing the value revision."""
     if not previous or previous.get("status") != "review":
         return draft
-    if previous.get("review_contract_version") == 5:
+    if previous.get("review_contract_version") in {5, 6}:
         return draft
     file_id = str(draft.get("input_file_id") or "")
     source = ctx.supabase.file.get_file(file_id) if file_id else None
@@ -843,12 +843,7 @@ async def create_mutation_plan(
             proposed, structured_blockers, structured_unapplied = (
                 merge_structured_product(live, product, proposed)
             )
-            image = resolve_product_image(
-                product, live, non_production=is_non_production()
-            )
-            files = product_set_files(image, live)
-            if files:
-                proposed["files"] = files
+            image = resolve_product_image(product, live, non_production=False)
             blockers.extend(structured_blockers)
             unapplied.extend(structured_unapplied)
             for deferred_index, deferred in enumerate(unapplied):
@@ -879,6 +874,7 @@ async def create_mutation_plan(
                 prior_item=prior_item,
             )
             plan_item["image"] = image
+            plan_item["media_gallery"] = review_media_gallery(product, live)
             generated_for_product = {
                 sku
                 for (product_index, _), sku in generated_skus.items()
@@ -959,7 +955,7 @@ async def create_mutation_plan(
         "version": int((previous or {}).get("version") or 0) + 1,
         "status": "review",
         "currency_code": currency_code,
-        "review_contract_version": 5,
+        "review_contract_version": 6,
         "inventory_context": inventory_context,
         "items": items,
         "approved_at": None,
@@ -1018,7 +1014,7 @@ async def patch_mutation_plan_selection(
     items = list(plan.get("items") or [])
     item_selections = payload.get("item_selections")
     if item_selections is not None:
-        if plan.get("review_contract_version") not in {2, 3, 4, 5}:
+        if plan.get("review_contract_version") not in {2, 3, 4, 5, 6}:
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -1141,7 +1137,7 @@ async def approve_mutation_plan(
         raise _review_error("Selected changes contain blockers")
     inventory_context = plan.get("inventory_context")
     if (
-        plan.get("review_contract_version") in {4, 5}
+        plan.get("review_contract_version") in {4, 5, 6}
         and isinstance(inventory_context, dict)
         and inventory_context.get("required")
     ):
@@ -1156,12 +1152,19 @@ async def approve_mutation_plan(
                 for row in inventory_rows
             ):
                 raise _review_error("All inventory and tracking changes are required")
-    selected_warnings = sorted(
+    selected_warnings = [
         str(issue.get("issue_id") or issue.get("code") or "")
         for item in selected
         for issue in item.get("quality_issues", [])
         if isinstance(issue, dict) and issue.get("severity") == "warning"
+    ]
+    selected_warnings.extend(
+        f"review:{item.get('item_id')}:image-missing"
+        for item in selected
+        if int(plan.get("review_contract_version") or 0) >= 6
+        and not approved_media_gallery(item)
     )
+    selected_warnings = sorted(set(selected_warnings))
     if selected_warnings and payload.get("warnings_acknowledged") is not True:
         raise HTTPException(
             status_code=422,
@@ -1186,7 +1189,10 @@ async def approve_mutation_plan(
             {
                 **item,
                 "execution_proposed": (
-                    materialize_execution_proposed(item)
+                    {
+                        **materialize_execution_proposed(item),
+                        "_approved_media": approved_media_gallery(item),
+                    }
                     if item.get("selected")
                     else None
                 ),

@@ -8,9 +8,14 @@ from application.ports.supabase_port import SupabaseNamespacedPort
 def _health(result: dict[str, Any] | None) -> dict[str, Any]:
     if not result:
         return {
-            "state": "not_audited", "score": None, "component_scores": {},
-            "findings_count": 0, "audit_id": None, "run_id": None,
-            "last_audited_at": None, "requires_reaudit": True,
+            "state": "not_audited",
+            "score": None,
+            "component_scores": {},
+            "findings_count": 0,
+            "audit_id": None,
+            "run_id": None,
+            "last_audited_at": None,
+            "requires_reaudit": True,
         }
     score = int(result.get("score") or 0)
     return {
@@ -26,32 +31,79 @@ def _health(result: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def execute(
-    *, supabase: SupabaseNamespacedPort, product_ids: list[str], shop_domain: str,
+    *,
+    supabase: SupabaseNamespacedPort,
+    product_ids: list[str],
+    shop_domain: str,
     view: str = "summary",
 ) -> list[dict[str, Any]]:
     results = supabase.intelligence.list_product_intelligence_product_results(
-        product_ids=product_ids, shop_domain=shop_domain,
+        product_ids=product_ids,
+        shop_domain=shop_domain,
     )
     result_by_product = {str(row.get("product_id")): row for row in results}
+    audits = supabase.intelligence.list_product_intelligence_audits(
+        shop_domain=shop_domain,
+        limit=max(50, len(product_ids) * 3),
+        offset=0,
+    )
+    audit_by_id = {str(row.get("audit_id") or ""): row for row in audits}
+    review_suggestions_by_product: dict[str, list[dict[str, Any]]] = {}
+    if view == "review":
+        artifacts = supabase.intelligence.list_product_intelligence_audit_artifacts(
+            audit_ids=[str(row.get("audit_id") or "") for row in audits],
+            shop_domain=shop_domain,
+        )
+        for artifact in artifacts:
+            for suggestion in artifact.get("suggestions", []):
+                if not isinstance(suggestion, dict):
+                    continue
+                product_id = str(suggestion.get("product_id") or "")
+                if product_id in product_ids:
+                    review_suggestions_by_product.setdefault(product_id, []).append(
+                        suggestion
+                    )
     output: list[dict[str, Any]] = []
     for product_id in product_ids:
         result = result_by_product.get(product_id)
         audit_id = str(result.get("audit_id") or "") if result else ""
-        suggestions = (
+        latest_suggestions = (
             supabase.intelligence.list_product_intelligence_suggestions(
-                audit_id=audit_id, shop_domain=shop_domain,
-            ) if audit_id else []
+                audit_id=audit_id,
+                shop_domain=shop_domain,
+            )
+            if audit_id
+            else []
         )
-        suggestions = [row for row in suggestions if str(row.get("product_id") or "") == product_id]
+        latest_suggestions = [
+            row
+            for row in latest_suggestions
+            if str(row.get("product_id") or "") == product_id
+        ]
+        suggestions = (
+            review_suggestions_by_product.get(product_id, latest_suggestions)
+            if view == "review"
+            else latest_suggestions
+        )
         pending = [row for row in suggestions if row.get("status") == "pending"]
         applied = [row for row in suggestions if row.get("status") == "applied"]
         reverted = [row for row in suggestions if row.get("status") == "reverted"]
         pending_fields = sum(
             len(row.get("patch_payload") or {})
-            for row in pending if isinstance(row.get("patch_payload"), dict)
+            for row in pending
+            if isinstance(row.get("patch_payload"), dict)
         )
         health = _health(result)
         health["requires_reaudit"] = bool(applied or reverted) if result else True
+        audit = audit_by_id.get(audit_id)
+        if view == "review" and audit_id:
+            audit = supabase.intelligence.get_product_intelligence_audit(
+                audit_id,
+                shop_domain=shop_domain,
+            )
+        health["enhancement_status"] = (
+            audit.get("enhancement_status") if isinstance(audit, dict) else None
+        ) or "not_audited"
         snapshot = result.get("audited_snapshot") if isinstance(result, dict) else None
         product_title = (
             result.get("product_title") if isinstance(result, dict) else None
@@ -61,24 +113,30 @@ def execute(
             "product_title": str(product_title or ""),
             "health": health,
             "counts": {
-                "pending_suggestions": len(pending), "pending_fields": pending_fields,
-                "applied": len(applied), "reverted": len(reverted),
+                "pending_suggestions": len(pending),
+                "pending_fields": pending_fields,
+                "applied": len(applied),
+                "reverted": len(reverted),
             },
         }
         if view == "review":
-            audit = (
-                supabase.intelligence.get_product_intelligence_audit(audit_id, shop_domain=shop_domain)
-                if audit_id else None
-            )
             findings = audit.get("findings") if isinstance(audit, dict) else []
             item["findings"] = [
-                row for row in (findings or [])
+                row
+                for row in (findings or [])
                 if str(row.get("product_id") or "") == product_id
             ]
             item["pending_reviews"] = pending
+            item["enhanced_changes"] = sorted(
+                suggestions,
+                key=lambda row: str(row.get("created_at") or ""),
+                reverse=True,
+            )
             item["history"] = sorted(
                 [*applied, *reverted],
-                key=lambda row: str(row.get("applied_at") or row.get("created_at") or ""),
+                key=lambda row: str(
+                    row.get("applied_at") or row.get("created_at") or ""
+                ),
                 reverse=True,
             )
         output.append(item)

@@ -82,13 +82,15 @@ async def test_create_mutation_plan_direct_call_defaults_to_plain_payload(monkey
         return FakeShopifyClient()
 
     monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
-    request = Request({
-        "type": "http",
-        "method": "POST",
-        "path": "/",
-        "query_string": b"",
-        "headers": [(b"x-shop-domain", shop_domain.encode())],
-    })
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "query_string": b"",
+            "headers": [(b"x-shop-domain", shop_domain.encode())],
+        }
+    )
 
     response = await mutation_plans_api.create_mutation_plan(
         draft_id=draft_id,
@@ -171,6 +173,79 @@ async def test_approval_requires_acknowledgment_for_selected_quality_warnings(
     assert approved.status_code == 200
     assert approved.json()["plan"]["warnings_acknowledged_at"]
     assert approved.json()["plan"]["warnings_acknowledgment_hash"]
+
+
+@pytest.mark.asyncio
+async def test_v6_approval_requires_acknowledgment_when_final_gallery_has_no_image(
+    monkeypatch,
+):
+    import api.agents.mutation_plans as mutation_plans_api
+
+    draft_id = "missing-image-approval"
+    plan_id = "missing-image-plan"
+    shop_domain = "missing-image.myshopify.com"
+    service = get_app_context().services.supabase._service
+    monkeypatch.setattr(service, "_get_supabase_client", lambda: None)
+    service.product_drafts[draft_id] = {
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "revision": 1,
+        "products": [{"title": "Aura Linen Shirt"}],
+    }
+    service.mutation_plans[plan_id] = {
+        "plan_id": plan_id,
+        "draft_id": draft_id,
+        "shop_domain": shop_domain,
+        "draft_revision": 1,
+        "version": 1,
+        "status": "review",
+        "review_contract_version": 6,
+        "items": [
+            {
+                "item_id": "aura-shirt",
+                "selected": True,
+                "selectable": True,
+                "blockers": [],
+                "quality_issues": [],
+                "media_gallery": [],
+                "proposed": {"title": "Aura Linen Shirt"},
+                "review_changes": [],
+            }
+        ],
+    }
+
+    class FakeApprovalClient:
+        async def close(self):
+            return None
+
+    async def fake_offline_client(shop):
+        assert shop == shop_domain
+        return FakeApprovalClient()
+
+    monkeypatch.setattr(mutation_plans_api, "_offline_client", fake_offline_client)
+    url = f"/agents/product-drafts/{draft_id}/mutation-plan/approve"
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+        headers={"x-shop-domain": shop_domain},
+    ) as client:
+        rejected = await client.post(url, json={"plan_id": plan_id})
+        approved = await client.post(
+            url,
+            json={"plan_id": plan_id, "warnings_acknowledged": True},
+        )
+
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"] == {
+        "code": "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED",
+        "message": "Review and acknowledge the remaining warnings before applying changes.",
+        "warning_count": 1,
+    }
+    assert approved.status_code == 200
+    assert (
+        approved.json()["plan"]["items"][0]["execution_proposed"]["_approved_media"]
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -776,7 +851,7 @@ async def test_structured_only_trail_tee_mug_and_daypack_updates_start_selected(
         <= {change["field"] for change in item["applicable_changes"]}
         for item in items
     )
-    assert response.json()["plan"]["review_contract_version"] == 5
+    assert response.json()["plan"]["review_contract_version"] == 6
     assert all(item["review_preview"]["variants"] for item in items)
     assert response.json()["plan"]["inventory_context"]["status"] == "ready"
     assert all(item["unapplied"] == [] for item in items)
@@ -903,9 +978,7 @@ async def test_approval_ignores_legacy_rejected_inventory_rows_but_requires_exec
                     "variants": [
                         {
                             "id": "gid://shopify/ProductVariant/1",
-                            "optionValues": [
-                                {"optionName": "Material", "name": "Oak"}
-                            ],
+                            "optionValues": [{"optionName": "Material", "name": "Oak"}],
                             "inventoryItem": {"tracked": True},
                         }
                     ],
@@ -1134,19 +1207,27 @@ async def test_preflight_persists_generated_sku_once_with_required_derived_autho
     assert regenerated_row["origin"] == "derived"
     first_title = next(
         cell
-        for cell in first.json()["plan"]["items"][0]["review_preview"]["product"]["cells"]
+        for cell in first.json()["plan"]["items"][0]["review_preview"]["product"][
+            "cells"
+        ]
         if cell["column_key"] == "title"
     )
     second_title = next(
         cell
-        for cell in second.json()["plan"]["items"][0]["review_preview"]["product"]["cells"]
+        for cell in second.json()["plan"]["items"][0]["review_preview"]["product"][
+            "cells"
+        ]
         if cell["column_key"] == "title"
     )
-    assert first_title["source_ref"] == second_title["source_ref"] == {
-        "value_path": "title",
-        "cell": "A2",
-        "evidence_role": "value",
-    }
+    assert (
+        first_title["source_ref"]
+        == second_title["source_ref"]
+        == {
+            "value_path": "title",
+            "cell": "A2",
+            "evidence_role": "value",
+        }
+    )
     assert all(
         issue["code"] != "SKU_REQUIRED"
         for issue in first.json()["plan"]["items"][0]["quality_issues"]
@@ -1171,9 +1252,10 @@ async def test_v5_plan_skips_legacy_evidence_repair():
     }
     ctx = SimpleNamespace(supabase=SimpleNamespace(file=FailingFiles()))
 
-    assert await _repair_legacy_review_evidence(
-        draft, previous, "shop.myshopify.com", ctx
-    ) is draft
+    assert (
+        await _repair_legacy_review_evidence(draft, previous, "shop.myshopify.com", ctx)
+        is draft
+    )
 
 
 @pytest.mark.asyncio

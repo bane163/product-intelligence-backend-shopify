@@ -77,7 +77,43 @@ async def test_run_bulk_mutation_uses_product_set_variant_matrix_document():
     assert "optionValues {" in embedded_mutation
     assert "variants(first: 250) {" in embedded_mutation
     assert "selectedOptions {" in embedded_mutation
+    # Shopify bulk mutations allow at most one connection in the mutation
+    # response. Product media readiness is queried separately after productSet.
+    assert "media(first:" not in embedded_mutation
     assert "userErrors {" in embedded_mutation
+
+
+@pytest.mark.asyncio
+async def test_get_product_media_avoids_file_scope_only_diagnostics():
+    client = ShopifyClient(shop="test-shop.myshopify.com", token="token")
+    response = {
+        "data": {
+            "product": {
+                "media": {
+                    "nodes": [
+                        {
+                            "id": "gid://shopify/MediaImage/1",
+                            "status": "READY",
+                            "fileStatus": "READY",
+                            "mediaContentType": "IMAGE",
+                            "image": {"url": "https://cdn.example/image.jpg"},
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    with respx.mock(base_url="https://test-shop.myshopify.com") as mock:
+        route = mock.post("/admin/api/2026-07/graphql.json").respond(200, json=response)
+        media = await client.get_product_media("gid://shopify/Product/1")
+
+    assert media[0]["status"] == "READY"
+    request_body = json.loads(route.calls.last.request.content.decode())
+    query = request_body["query"]
+    assert "fileErrors" not in query
+    assert "mediaErrors" not in query
+    assert "fileStatus" in query
 
 
 @pytest.mark.asyncio
@@ -221,6 +257,10 @@ async def test_update_product_with_metafields_triggers_metafields_set():
         )
         assert resp["data"]["productUpdate"]["product"]["title"] == "T updated"
         assert route.call_count == 2
+        update_body = json.loads(route.calls[0].request.content.decode())
+        assert update_body["variables"]["product"]["seo"] == {
+            "title": "Better title"
+        }
 
 
 @pytest.mark.asyncio

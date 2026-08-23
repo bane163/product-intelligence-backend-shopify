@@ -44,13 +44,40 @@ class ShopifyPort(Protocol):
         self, query: Optional[str] = None, limit: int = 50
     ) -> list[Dict[str, Any]]: ...
 
-    async def list_products_by_ids(self, product_ids: list[str]) -> list[Dict[str, Any]]: ...
+    async def list_products_by_ids(
+        self, product_ids: list[str]
+    ) -> list[Dict[str, Any]]: ...
 
     async def create_staged_upload(self) -> Dict[str, Any]: ...
 
     async def upload_to_staged_url(
         self, url: str, parameters: List[Dict[str, str]], jsonl_data: str
     ) -> None: ...
+
+    async def create_staged_image_upload(
+        self, *, filename: str, mime_type: str, file_size: int
+    ) -> Dict[str, Any]: ...
+
+    async def upload_bytes_to_staged_url(
+        self,
+        *,
+        url: str,
+        parameters: List[Dict[str, str]],
+        content: bytes,
+        filename: str,
+        mime_type: str,
+        http_method: str = "POST",
+    ) -> None: ...
+
+    async def wait_for_product_media(
+        self,
+        product_id: str,
+        *,
+        existing_media_ids: list[str],
+        expected_new_count: int,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> Dict[str, Any]: ...
 
     async def run_bulk_mutation(self, staged_upload_path: str) -> Dict[str, Any]: ...
 

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import uuid
 from typing import Any
 
@@ -127,13 +128,19 @@ async def test_approved_products_override_five_product_draft_and_keep_metadata(
     ]
     for index in (1, 3):
         plan["items"][index]["execution_proposed"] = draft_products[index]
-        plan["items"][index]["review_changes"] = [{
-            "change_id": f"title-{index}",
-            "value_path": "title",
-            "origin": "source",
-            "included": True,
-            "source_ref": {"source_file_id": "source-file", "sheet": "Products", "cell": f"A{index + 2}"},
-        }]
+        plan["items"][index]["review_changes"] = [
+            {
+                "change_id": f"title-{index}",
+                "value_path": "title",
+                "origin": "source",
+                "included": True,
+                "source_ref": {
+                    "source_file_id": "source-file",
+                    "sheet": "Products",
+                    "cell": f"A{index + 2}",
+                },
+            }
+        ]
     captured: dict[str, Any] = {}
     _patch_bulk(
         monkeypatch,
@@ -186,6 +193,166 @@ async def test_approved_products_override_five_product_draft_and_keep_metadata(
     assert stored["product_count"] == 2
     assert stored["approved_selection"] == plan["approved_selection"]
     assert stored["value_provenance"]["item-1"]["title"]["origin"] == "source"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("verification_status", "expected_result_status"),
+    [("ready", "success"), ("failed", "partially_applied")],
+)
+async def test_approved_image_bytes_are_staged_and_verified_before_success(
+    monkeypatch,
+    verification_status,
+    expected_result_status,
+):
+    import shopify as shopify_module
+
+    content = b"exact-reviewed-image-bytes"
+    asset_id = "product-media-approved.jpg"
+    draft_id, plan_id = _seed_plan(
+        draft_products=[{"title": "Aura Linen Shirt"}],
+        selected_indexes=[0],
+    )
+    service = get_app_context().services.supabase._service
+    service.save_file(
+        asset_id,
+        name=asset_id,
+        content=content,
+        content_type="image/jpeg",
+        file_origin="product_media_asset",
+        shop_domain=SHOP,
+    )
+    service.mutation_plans[plan_id]["items"][0]["execution_proposed"] = {
+        "title": "Aura Linen Shirt",
+        "_approved_media": [
+            {
+                "review_media_id": "review-media-1",
+                "asset_id": asset_id,
+                "source_kind": "embedded_pdf",
+                "content_sha256": hashlib.sha256(content).hexdigest(),
+                "content_type": "image/jpeg",
+                "position": 1,
+                "alt_text": "Aura Linen Shirt",
+            }
+        ],
+    }
+    service.mutation_plans[plan_id]["approved_selection"] = [
+        {
+            "item_id": "item-0",
+            "included": True,
+            "included_change_ids": [],
+        }
+    ]
+    captured: dict[str, Any] = {}
+    _patch_bulk(
+        monkeypatch,
+        [
+            {
+                "data": {
+                    "productSet": {
+                        "product": {
+                            "id": "gid://shopify/Product/42",
+                            "title": "Aura Linen Shirt",
+                        },
+                        "userErrors": [],
+                    }
+                }
+            }
+        ],
+        captured,
+    )
+
+    async def create_staged_image(self, *, filename, mime_type, file_size):
+        captured["image_target"] = {
+            "filename": filename,
+            "mime_type": mime_type,
+            "file_size": file_size,
+        }
+        return {
+            "url": "https://staged.example/upload",
+            "resourceUrl": "https://staged.example/resource/aura.jpg",
+            "parameters": [{"name": "key", "value": "aura.jpg"}],
+        }
+
+    async def upload_image(self, **kwargs):
+        captured["image_upload"] = kwargs
+
+    async def wait_for_media(self, product_id, **kwargs):
+        captured["media_verification"] = {"product_id": product_id, **kwargs}
+        if verification_status == "failed":
+            return {
+                "status": "failed",
+                "failed": [
+                    {
+                        "mediaErrors": [
+                            {
+                                "code": "INVALID_IMAGE_FILE",
+                                "message": "Shopify rejected the image.",
+                            }
+                        ]
+                    }
+                ],
+            }
+        return {
+            "status": "ready",
+            "ready": [
+                {
+                    "id": "gid://shopify/MediaImage/7",
+                    "status": "READY",
+                    "image": {"url": "https://cdn.shopify.com/aura.jpg"},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "create_staged_image_upload",
+        create_staged_image,
+    )
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "upload_bytes_to_staged_url",
+        upload_image,
+    )
+    monkeypatch.setattr(
+        shopify_module.ShopifyClient,
+        "wait_for_product_media",
+        wait_for_media,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/agents/submit-products",
+            headers=HEADERS,
+            data={"plan_id": plan_id, "revision": "1"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["results"][0]["status"] == expected_result_status
+    if verification_status == "failed":
+        assert response.json()["results"][0]["failed"] == ["media"]
+    assert captured["image_target"] == {
+        "filename": asset_id,
+        "mime_type": "image/jpeg",
+        "file_size": len(content),
+    }
+    assert captured["image_upload"]["content"] == content
+    assert captured["products"][0]["files"] == [
+        {
+            "contentType": "IMAGE",
+            "originalSource": "https://staged.example/resource/aura.jpg",
+            "alt": "Aura Linen Shirt",
+        }
+    ]
+    assert "_approved_media" not in captured["products"][0]
+    assert captured["media_verification"] == {
+        "product_id": "gid://shopify/Product/42",
+        "existing_media_ids": [],
+        "expected_new_count": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -291,7 +458,12 @@ async def test_repeated_apply_reuses_active_job_and_terminal_failure_requires_re
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("status", "expected_status"),
-    [("approved", 200), ("executing", 200), ("failed", 409), ("partially_applied", 409)],
+    [
+        ("approved", 200),
+        ("executing", 200),
+        ("failed", 409),
+        ("partially_applied", 409),
+    ],
 )
 async def test_approval_is_idempotent_only_for_approved_or_active_plans(
     monkeypatch, status, expected_status
@@ -305,10 +477,14 @@ async def test_approval_is_idempotent_only_for_approved_or_active_plans(
     )
 
     async def unexpected_offline_client(_shop):
-        raise AssertionError("idempotent or terminal approval must not reacquire a client")
+        raise AssertionError(
+            "idempotent or terminal approval must not reacquire a client"
+        )
 
     monkeypatch.setattr(plans_api, "_offline_client", unexpected_offline_client)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
         response = await client.post(
             f"/agents/product-drafts/{draft_id}/mutation-plan/approve",
             headers=HEADERS,

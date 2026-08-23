@@ -27,7 +27,10 @@ async def _reserve_intelligence_credits(
     operation_type: str,
     products: int,
 ) -> dict[str, Any]:
-    from services.credit_billing_service import BillingStorageUnavailable, CreditLimitReached
+    from services.credit_billing_service import (
+        BillingStorageUnavailable,
+        CreditLimitReached,
+    )
     from services.metered_operations import quote_intelligence_operation
     from shared.credit_billing import BillingRateUnavailable
 
@@ -41,7 +44,9 @@ async def _reserve_intelligence_credits(
         )
         reservation = service.reserve_credits(
             shop_domain=shop_domain,
-            operation_key=(request.headers.get("x-idempotency-key") or f"{operation_type}:{run_id}"),
+            operation_key=(
+                request.headers.get("x-idempotency-key") or f"{operation_type}:{run_id}"
+            ),
             operation_type=operation_type,
             maximum_credits=quote.credits,
             rate_card_version=quote.rate_card_version,
@@ -151,9 +156,12 @@ NORMALIZATION_CATEGORY_KEYS = (
 )
 
 
-@router.post("/intelligence/products/overview", summary="Get product-scoped intelligence")
+@router.post(
+    "/intelligence/products/overview", summary="Get product-scoped intelligence"
+)
 async def get_product_intelligence_overview(
-    request: Request, ctx: AppContext = Depends(get_ctx),
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.intelligence_get_product_overview import execute
 
@@ -171,18 +179,31 @@ async def get_product_intelligence_overview(
             raw_ids = json.loads(raw_json) if isinstance(raw_json, str) else None
         except json.JSONDecodeError:
             raw_ids = None
-    product_ids = list(dict.fromkeys(str(value or "").strip() for value in (raw_ids or [])))
+    product_ids = list(
+        dict.fromkeys(str(value or "").strip() for value in (raw_ids or []))
+    )
     view = str(payload.get("view") or "summary").strip().lower()
     if not product_ids or len(product_ids) > 100:
-        raise HTTPException(status_code=400, detail="product_ids must contain 1 to 100 items")
+        raise HTTPException(
+            status_code=400, detail="product_ids must contain 1 to 100 items"
+        )
     if any(not PRODUCT_GID_RE.fullmatch(value) for value in product_ids):
         raise HTTPException(status_code=400, detail="Invalid Shopify Product GID")
-    if view not in {"summary", "review"} or (view == "review" and len(product_ids) != 1):
-        raise HTTPException(status_code=400, detail="review view requires exactly one product")
+    if view not in {"summary", "review"} or (
+        view == "review" and len(product_ids) != 1
+    ):
+        raise HTTPException(
+            status_code=400, detail="review view requires exactly one product"
+        )
     tenant = require_shop_domain(request, payload.get("shop_domain"))
-    return {"products": execute(
-        supabase=ctx.supabase, product_ids=product_ids, shop_domain=tenant, view=view,
-    )}
+    return {
+        "products": execute(
+            supabase=ctx.supabase,
+            product_ids=product_ids,
+            shop_domain=tenant,
+            view=view,
+        )
+    }
 
 
 def _default_unit_system_from_request(request: Request) -> str:
@@ -302,7 +323,9 @@ async def run_product_intelligence_audit(
         try:
             payload["product_ids"] = json.loads(product_ids_json)
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid product_ids_json: {exc}")
+            raise HTTPException(
+                status_code=400, detail=f"Invalid product_ids_json: {exc}"
+            )
 
     submitted_id = payload.get("submitted_id")
     run_id = payload.get("run_id")
@@ -316,14 +339,22 @@ async def run_product_intelligence_audit(
     )
     observability_fields = current_observability_fields()
     started_at = datetime.now(timezone.utc)
-    ctx.supabase.runs.create_or_update_run(run_id_value, {
-        "status": "queued", "source": "product_intelligence_audit",
-        "started_at": started_at.isoformat(), "attempt": 1,
-        "shop_domain": shop_domain, **observability_fields,
-    })
+    ctx.supabase.runs.create_or_update_run(
+        run_id_value,
+        {
+            "status": "queued",
+            "source": "product_intelligence_audit",
+            "started_at": started_at.isoformat(),
+            "attempt": 1,
+            "shop_domain": shop_domain,
+            **observability_fields,
+        },
+    )
     from application.services.run_event_emitter import RunEventEmitter
-    emitter = RunEventEmitter(tracing=ctx.services.tracing, supabase=ctx.supabase,
-                              run_id=run_id_value)
+
+    emitter = RunEventEmitter(
+        tracing=ctx.services.tracing, supabase=ctx.supabase, run_id=run_id_value
+    )
     emitter.emit_and_persist(phase="audit_queued", message="Catalog audit queued")
     ctx.supabase.runs.create_or_update_run(run_id_value, {"status": "running"})
     shop_access_token = resolve_shop_access_token(
@@ -344,10 +375,16 @@ async def run_product_intelligence_audit(
     raw_product_ids = payload.get("product_ids")
     product_ids = (
         list(dict.fromkeys(str(value or "").strip() for value in raw_product_ids))
-        if isinstance(raw_product_ids, list) else []
+        if isinstance(raw_product_ids, list)
+        else []
     )
-    if len(product_ids) > 100 or any(not PRODUCT_GID_RE.fullmatch(value) for value in product_ids):
-        raise HTTPException(status_code=400, detail="product_ids must contain at most 100 Shopify Product GIDs")
+    if len(product_ids) > 100 or any(
+        not PRODUCT_GID_RE.fullmatch(value) for value in product_ids
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="product_ids must contain at most 100 Shopify Product GIDs",
+        )
 
     raw_products = payload.get("products")
     if isinstance(raw_products, list):
@@ -357,24 +394,36 @@ async def run_product_intelligence_audit(
         if submitted_id:
             document = ctx.supabase.submitted.get_submitted_document(str(submitted_id))
             if not document:
-                raise HTTPException(status_code=404, detail="Submitted document not found")
+                raise HTTPException(
+                    status_code=404, detail="Submitted document not found"
+                )
             doc_products = document.get("products")
             if isinstance(doc_products, list):
                 products = [item for item in doc_products if isinstance(item, dict)]
         if all_products:
-            shopify_client = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain,
-                                                     shop_access_token=shop_access_token)
+            shopify_client = _resolve_shopify_client(
+                ctx=ctx, shop_domain=shop_domain, shop_access_token=shop_access_token
+            )
             products = await shopify_client.list_products_for_audit(
-                query=query_text, limit=requested_limit)
+                query=query_text, limit=requested_limit
+            )
         if product_ids:
             shopify_client = _resolve_shopify_client(
-                ctx=ctx, shop_domain=shop_domain, shop_access_token=shop_access_token,
+                ctx=ctx,
+                shop_domain=shop_domain,
+                shop_access_token=shop_access_token,
             )
             products = await shopify_client.list_products_by_ids(product_ids)
             returned_ids = {str(product.get("id") or "") for product in products}
-            missing_ids = [product_id for product_id in product_ids if product_id not in returned_ids]
+            missing_ids = [
+                product_id
+                for product_id in product_ids
+                if product_id not in returned_ids
+            ]
             if missing_ids:
-                raise HTTPException(status_code=404, detail={"missing_product_ids": missing_ids})
+                raise HTTPException(
+                    status_code=404, detail={"missing_product_ids": missing_ids}
+                )
         if not products:
             raise HTTPException(status_code=400, detail="No products found for audit")
         billing_reservation = await _reserve_intelligence_credits(
@@ -387,11 +436,20 @@ async def run_product_intelligence_audit(
         )
     except Exception as exc:
         reason = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
-        emitter.emit_and_persist(phase="audit_failed", message="Catalog audit failed",
-                                 level="error", error=reason)
-        ctx.supabase.runs.finalize_run(run_id_value, status="error",
-            duration_ms=int((datetime.now(timezone.utc)-started_at).total_seconds()*1000),
-            error=reason)
+        emitter.emit_and_persist(
+            phase="audit_failed",
+            message="Catalog audit failed",
+            level="error",
+            error=reason,
+        )
+        ctx.supabase.runs.finalize_run(
+            run_id_value,
+            status="error",
+            duration_ms=int(
+                (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+            ),
+            error=reason,
+        )
         ctx.services.tracing.complete_run(run_id_value)
         raise
 
@@ -634,7 +692,11 @@ async def get_product_intelligence_monitoring_summary(
         else 0
     )
     magnitude = max(abs(score_delta), abs(findings_delta))
-    severity = "high" if magnitude >= 15 else "medium" if magnitude >= 8 else "low" if magnitude >= 4 else "none"
+    severity = (
+        "high"
+        if magnitude >= 15
+        else "medium" if magnitude >= 8 else "low" if magnitude >= 4 else "none"
+    )
     trend = "up" if score_delta > 2 else "down" if score_delta < -2 else "flat"
     detected_at = current.get("created_at") if current else None
     alerts: list[dict[str, Any]] = []
@@ -691,6 +753,29 @@ async def get_product_intelligence_audit(
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     return {"audit": audit}
+
+
+@router.get(
+    "/intelligence/audits/{audit_id}/review",
+    summary="Get the immutable merchant review for an intelligence audit",
+)
+async def get_product_intelligence_audit_review(
+    request: Request,
+    audit_id: str,
+    shop_domain: str | None = None,
+    ctx: AppContext = Depends(get_ctx),
+) -> dict[str, Any]:
+    from application.use_cases.intelligence_get_audit_review import execute
+
+    tenant = require_shop_domain(request, shop_domain)
+    review = execute(
+        supabase=ctx.supabase,
+        audit_id=audit_id,
+        shop_domain=tenant,
+    )
+    if review is None:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    return review
 
 
 @router.post(
@@ -752,9 +837,11 @@ async def list_product_intelligence_audit_artifacts(
                 "audit_id": item.get("audit_id"),
                 "audit": item.get("audit"),
                 "suggestions": [
-                    _with_reversibility_flags(suggestion)
-                    if isinstance(suggestion, dict)
-                    else suggestion
+                    (
+                        _with_reversibility_flags(suggestion)
+                        if isinstance(suggestion, dict)
+                        else suggestion
+                    )
                     for suggestion in item.get("suggestions", [])
                 ],
             }
@@ -871,37 +958,56 @@ async def apply_product_intelligence_suggestion(
         raise HTTPException(status_code=status_code, detail=str(exc))
 
 
-@router.post("/intelligence/suggestions/review-preview", summary="Preview reviewed intelligence suggestions")
+@router.post(
+    "/intelligence/suggestions/review-preview",
+    summary="Preview reviewed intelligence suggestions",
+)
 async def preview_reviewed_suggestions(
-    request: Request, ctx: AppContext = Depends(get_ctx),
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.intelligence_review_suggestions import preview
 
     payload = await _review_request_payload(request)
     shop_domain = require_shop_domain(request, payload.get("shop_domain"))
-    token = resolve_shop_access_token(request, payload.get("shop_access_token"), shop_domain=shop_domain)
-    shopify = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain, shop_access_token=token)
+    token = resolve_shop_access_token(
+        request, payload.get("shop_access_token"), shop_domain=shop_domain
+    )
+    shopify = _resolve_shopify_client(
+        ctx=ctx, shop_domain=shop_domain, shop_access_token=token
+    )
     return await preview(
-        supabase=ctx.supabase, shopify=shopify,
+        supabase=ctx.supabase,
+        shopify=shopify,
         reviews=[x for x in payload["reviews"] if isinstance(x, dict)],
         shop_domain=shop_domain,
     )
 
 
-@router.post("/intelligence/suggestions/apply-reviewed", summary="Apply reviewed intelligence suggestions")
+@router.post(
+    "/intelligence/suggestions/apply-reviewed",
+    summary="Apply reviewed intelligence suggestions",
+)
 async def apply_reviewed_suggestions(
-    request: Request, ctx: AppContext = Depends(get_ctx),
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.intelligence_review_suggestions import apply_reviewed
 
     payload = await _review_request_payload(request)
     shop_domain = require_shop_domain(request, payload.get("shop_domain"))
-    token = resolve_shop_access_token(request, payload.get("shop_access_token"), shop_domain=shop_domain)
-    shopify = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain, shop_access_token=token)
+    token = resolve_shop_access_token(
+        request, payload.get("shop_access_token"), shop_domain=shop_domain
+    )
+    shopify = _resolve_shopify_client(
+        ctx=ctx, shop_domain=shop_domain, shop_access_token=token
+    )
     return await apply_reviewed(
-        supabase=ctx.supabase, shopify=shopify,
+        supabase=ctx.supabase,
+        shopify=shopify,
         reviews=[x for x in payload["reviews"] if isinstance(x, dict)],
-        shop_domain=shop_domain, safe_only=_to_bool(payload.get("safe_only")),
+        shop_domain=shop_domain,
+        safe_only=_to_bool(payload.get("safe_only")),
     )
 
 
@@ -910,7 +1016,9 @@ async def apply_reviewed_suggestions(
     summary="Regenerate one field of an intelligence suggestion",
 )
 async def regenerate_product_intelligence_suggestion(
-    suggestion_id: str, request: Request, ctx: AppContext = Depends(get_ctx),
+    suggestion_id: str,
+    request: Request,
+    ctx: AppContext = Depends(get_ctx),
 ) -> dict[str, Any]:
     from application.use_cases.intelligence_apply_suggestion import _resolve_product_gid
     from application.use_cases.intelligence_regenerate_suggestion import execute
@@ -932,12 +1040,19 @@ async def regenerate_product_intelligence_suggestion(
         else str(uuid.uuid4())
     )
     started_at = datetime.now(timezone.utc)
-    ctx.supabase.runs.create_or_update_run(run_id, {
-        "status": "queued", "source": "product_intelligence_regeneration",
-        "started_at": started_at.isoformat(), "attempt": 1,
-        "shop_domain": shop_domain, **current_observability_fields(),
-    })
+    ctx.supabase.runs.create_or_update_run(
+        run_id,
+        {
+            "status": "queued",
+            "source": "product_intelligence_regeneration",
+            "started_at": started_at.isoformat(),
+            "attempt": 1,
+            "shop_domain": shop_domain,
+            **current_observability_fields(),
+        },
+    )
     from application.services.run_event_emitter import RunEventEmitter
+
     emitter = RunEventEmitter(
         tracing=ctx.services.tracing, supabase=ctx.supabase, run_id=run_id
     )
@@ -979,18 +1094,27 @@ async def regenerate_product_intelligence_suggestion(
         field = str(data.get("field") or "").strip()
         if not field:
             raise HTTPException(status_code=400, detail="field is required")
-        token = resolve_shop_access_token(request, data.get("shop_access_token"), shop_domain=shop_domain)
-        shopify = _resolve_shopify_client(ctx=ctx, shop_domain=shop_domain, shop_access_token=token)
+        token = resolve_shop_access_token(
+            request, data.get("shop_access_token"), shop_domain=shop_domain
+        )
+        shopify = _resolve_shopify_client(
+            ctx=ctx, shop_domain=shop_domain, shop_access_token=token
+        )
         source = ctx.supabase.intelligence.get_product_intelligence_suggestion(
-            suggestion_id, shop_domain=shop_domain)
+            suggestion_id, shop_domain=shop_domain
+        )
         if not source:
             raise HTTPException(status_code=404, detail="Suggestion not found")
         gid = await _resolve_product_gid(shopify, {"id": source.get("product_id")})
         if not gid:
-            raise HTTPException(status_code=400, detail="Unable to resolve suggestion product")
+            raise HTTPException(
+                status_code=400, detail="Unable to resolve suggestion product"
+            )
         product = await shopify.get_product(gid)
         if not isinstance(product, dict):
-            raise HTTPException(status_code=502, detail="Unable to load current Shopify product")
+            raise HTTPException(
+                status_code=502, detail="Unable to load current Shopify product"
+            )
         product.setdefault("id", gid)
         billing_reservation = await _reserve_intelligence_credits(
             request=request,
@@ -1000,10 +1124,17 @@ async def regenerate_product_intelligence_suggestion(
             operation_type="product_intelligence_regeneration",
             products=1,
         )
-        result = await execute(supabase=ctx.supabase, suggestion_id=suggestion_id,
-                               field=field, product=product, shop_domain=shop_domain,
-                               trace_event=emitter.trace_event)
-        emitter.emit_and_persist(phase="regeneration_completed", message="Fix regeneration completed")
+        result = await execute(
+            supabase=ctx.supabase,
+            suggestion_id=suggestion_id,
+            field=field,
+            product=product,
+            shop_domain=shop_domain,
+            trace_event=emitter.trace_event,
+        )
+        emitter.emit_and_persist(
+            phase="regeneration_completed", message="Fix regeneration completed"
+        )
         finish("succeeded")
         result["run_id"] = run_id
         result["billing_estimate"] = {
@@ -1158,9 +1289,11 @@ async def upsert_product_intelligence_normalization_settings(
         fallback=_default_normalization_settings(request),
     )
     normalized = _coerce_normalization_settings(settings_payload, fallback=fallback)
-    saved = ctx.supabase.intelligence.upsert_product_intelligence_normalization_settings(
-        shop_domain=tenant,
-        settings=normalized,
+    saved = (
+        ctx.supabase.intelligence.upsert_product_intelligence_normalization_settings(
+            shop_domain=tenant,
+            settings=normalized,
+        )
     )
     return {
         "settings": {
@@ -1249,10 +1382,12 @@ async def apply_product_intelligence_suggestions_bulk(
             separators=(",", ":"),
         )
         request_hash = hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
-        existing_operation = ctx.supabase.intelligence.get_product_intelligence_bulk_operation(
-            operation_type=operation_type,
-            idempotency_key=idempotency_key,
-            shop_domain=shop_domain,
+        existing_operation = (
+            ctx.supabase.intelligence.get_product_intelligence_bulk_operation(
+                operation_type=operation_type,
+                idempotency_key=idempotency_key,
+                shop_domain=shop_domain,
+            )
         )
         if isinstance(existing_operation, dict):
             existing_hash = str(existing_operation.get("request_hash") or "").strip()

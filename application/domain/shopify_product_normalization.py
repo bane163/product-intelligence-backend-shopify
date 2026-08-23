@@ -151,24 +151,17 @@ def normalize_tags(tags: Any, *, allow_empty: bool = False) -> list[str] | None:
 def _build_seo_payload(
     product: Dict[str, Any], *, include_empty_when_explicit: bool
 ) -> dict[str, str] | None:
-    seo_title = product.get("seo_title")
-    seo_description = product.get("seo_description")
-    include_seo = (
-        (
-            "seo_title" in product
-            or "seo_description" in product
-            or seo_title not in (None, "")
-            or seo_description not in (None, "")
-        )
-        if include_empty_when_explicit
-        else bool(seo_title or seo_description)
-    )
-    if not include_seo:
-        return None
-    return {
-        "title": str(seo_title or ""),
-        "description": str(seo_description or ""),
-    }
+    payload: dict[str, str] = {}
+    for source, target in (
+        ("seo_title", "title"),
+        ("seo_description", "description"),
+    ):
+        if source not in product:
+            continue
+        value = product.get(source)
+        if value not in (None, "") or include_empty_when_explicit:
+            payload[target] = str(value or "")
+    return payload or None
 
 
 def _apply_field_mapping(

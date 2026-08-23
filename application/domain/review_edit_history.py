@@ -14,5 +14,6 @@ CONTENT_HISTORY_OPERATIONS = frozenset(
         "option_dimension_remove",
         "variant_add",
         "variant_remove",
+        "media_gallery_update",
     }
 )

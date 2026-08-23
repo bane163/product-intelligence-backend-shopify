@@ -9,6 +9,7 @@ from .supabase_intelligence_mixin import SupabaseIntelligenceMixin
 from .supabase_llm_config_mixin import SupabaseLlmConfigMixin
 from .supabase_mutation_plans_mixin import SupabaseMutationPlansMixin
 from .supabase_runs_mixin import SupabaseRunsMixin
+from .credit_billing_service import CreditOperationManager, PartnerSubscriptionVerifier
 
 
 class SupabaseService(
@@ -44,3 +45,5 @@ class SupabaseService(
         self.product_intelligence_normalization_settings: dict[str, dict[str, Any]] = {}
         self.llm_model_configs: dict[str, dict[str, Any]] = {}
         self._billing_store: dict[str, dict[str, Any]] = {}
+        self._credit_manager = CreditOperationManager()
+        self._subscription_verifier = PartnerSubscriptionVerifier()

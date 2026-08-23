@@ -58,3 +58,13 @@ def test_missing_evidence_is_warning_only():
     evidence = next(issue for issue in report["issues"] if issue["code"] == "SOURCE_EVIDENCE_MISSING")
     assert evidence["severity"] == "warning"
     assert report["summary"]["blocked_product_count"] == 0
+
+
+def test_reserved_test_image_does_not_count_as_extracted_media():
+    report = build_quality_report([{
+        "title": "Valid",
+        "vendor": "Acme",
+        "image_src": "https://example.com/image.jpg",
+        "variants": [{"sku": "SKU-1", "price": "10.00"}],
+    }])
+    assert "IMAGE_MISSING" in _codes(report)

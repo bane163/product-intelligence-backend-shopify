@@ -38,6 +38,27 @@ async def _review_session_cleanup_loop() -> None:
             logger.exception("import_review_session_cleanup_failed")
 
 
+async def _billing_outbox_loop() -> None:
+    from services.credit_billing_service import ShopifyAppEventsClient, drain_app_event_outbox
+
+    client = ShopifyAppEventsClient()
+    while True:
+        try:
+            if not client.delivery_enabled:
+                await asyncio.sleep(max(1, int(os.getenv("SHOPIFY_EVENT_OUTBOX_INTERVAL_SECONDS", "5"))))
+                continue
+            from app_context import get_app_context
+
+            adapter = get_app_context().services.supabase
+            service = getattr(adapter, "_service", adapter)
+            await drain_app_event_outbox(service, client)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("shopify_app_event_outbox_drain_failed")
+        await asyncio.sleep(max(1, int(os.getenv("SHOPIFY_EVENT_OUTBOX_INTERVAL_SECONDS", "5"))))
+
+
 def _normalize_origin(value: str) -> str | None:
     raw = str(value or "").strip()
     if not raw:
@@ -79,6 +100,7 @@ async def lifespan(app: FastAPI):
     review_cleanup_task: asyncio.Task[None] = asyncio.create_task(
         _review_session_cleanup_loop()
     )
+    billing_outbox_task: asyncio.Task[None] = asyncio.create_task(_billing_outbox_loop())
     debug_enabled = os.getenv("DEBUG", "").lower() in ("1", "true")
 
     def _log_tunnel_result(task: asyncio.Task[str | None]) -> None:
@@ -110,8 +132,11 @@ async def lifespan(app: FastAPI):
     finally:
         # Shutdown
         review_cleanup_task.cancel()
+        billing_outbox_task.cancel()
         with suppress(asyncio.CancelledError):
             await review_cleanup_task
+        with suppress(asyncio.CancelledError):
+            await billing_outbox_task
         if tunnel_task is not None and not tunnel_task.done():
             tunnel_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -178,6 +203,10 @@ async def readiness_check():
             "shopify_mutation_plans": "approved_selection,review_contract_version,inventory_context",
             "file_metadata": "content_revision",
             "product_source_references": "value_path",
+            "billing_cycles": "billing_mode,plan_handle,included_credits,reserved_credits,settled_credits",
+            "billing_operations": "billing_mode,plan_handle,reserved_credits,settled_credits,raw_usage",
+            "provider_usage_events": "operation_id,provider_call_key,provider,usage",
+            "shopify_event_outbox": "event_key,status,next_attempt_at",
         }
         try:
             for table, columns in probes.items():

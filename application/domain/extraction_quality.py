@@ -7,6 +7,8 @@ import math
 import re
 from typing import Any
 
+from application.domain.product_images import resolve_extracted_image
+
 
 QUALITY_REPORT_VERSION = 1
 QUALITY_STATUS_RUNNING = "running"
@@ -125,10 +127,7 @@ def build_quality_report(
                 severity="warning", code="VENDOR_MISSING", product_index=product_index,
                 value_path="vendor", message="No vendor was extracted for this product.", remedy="edit",
             ))
-        images = product.get("images")
-        if not _text(product.get("image_src")) and not (
-            isinstance(images, list) and any(isinstance(item, dict) and _text(item.get("src")) for item in images)
-        ):
+        if resolve_extracted_image(product) is None:
             issues.append(_issue(
                 severity="warning", code="IMAGE_MISSING", product_index=product_index,
                 value_path="images", message="No product image was extracted.", remedy="edit",

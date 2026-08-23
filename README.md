@@ -165,7 +165,7 @@ helper script.
 3. The backend will be available at: `http://localhost:8000`
    - **Swagger UI**: `http://localhost:8000/docs`
    - **Collabora**: `http://localhost:9980` (running as a sidecar service)
-   - **LLM**: OpenAI `gpt-5.4-mini` is seeded by default. Custom compatible
+   - **LLM**: OpenAI `gpt-5.6-luna` is seeded by default. Custom compatible
      endpoints, including Ollama, can still be configured in Settings.
 
 ### Offload Queue Worker
@@ -246,6 +246,14 @@ The frontend is a Shopify App built with React Router (formerly Remix).
 
 Each directory has its own `.env` file. Ensure they are populated with the
 necessary keys (Supabase URL, Service Role Key, Shopify API keys, etc.).
+
+Processing-credit billing additionally requires `SHOPIFY_APP_GID`,
+`SHOPIFY_PARTNER_ORG_ID`, and `SHOPIFY_PARTNER_API_ACCESS_TOKEN` for canonical
+subscription verification. Set the deployed-region Azure page price in
+`AZURE_DOCUMENT_INTELLIGENCE_PAGE_RATE_USD` and the calibrated
+`BILLING_PLATFORM_FLOOR_*_USD` values before enabling
+`CREDIT_ENFORCEMENT_ENABLED`. Shopify delivery is controlled independently by
+`SHOPIFY_EVENT_DELIVERY_ENABLED`.
 
 ### Vault-backed OpenAI key for install seeding
 

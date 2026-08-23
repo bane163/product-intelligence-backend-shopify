@@ -865,7 +865,7 @@ def test_exact_review_rows_cover_options_variant_fields_cost_and_metafields():
     )
 
 
-def test_review_exposes_rejected_variant_values_and_blocked_quantities():
+def test_review_exposes_rejected_variant_values_without_blocking_unrelated_cells():
     imported = {
         "title": "Blocked planter",
         "options": [{"name": "Size", "values": ["Small"]}],
@@ -882,11 +882,11 @@ def test_review_exposes_rejected_variant_values_and_blocked_quantities():
         if row["field"] == "price" and row["change_kind"] == "rejected"
     )
     assert rejected_price["proposed"] == "30.99"
-    assert rejected_price["disposition"] == "blocked"
-    assert "INCOMPLETE_VARIANT_COMBINATION" in rejected_price["reason_codes"]
+    assert rejected_price["disposition"] == "applicable"
+    assert "reason_codes" not in rejected_price
     quantity = next(row for row in rows if row["field"] == "inventory_quantity")
     assert quantity["proposed"] == 7
-    assert quantity["disposition"] == "blocked"
+    assert quantity["disposition"] == "applicable"
     assert quantity["scope"] == "inventory"
 
 

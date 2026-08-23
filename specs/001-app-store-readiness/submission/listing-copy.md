@@ -47,12 +47,12 @@ Use exactly this pricing unless billing configuration changes in
 
 | Plan | Monthly price | Included files | Overage |
 | --- | --- | --- | --- |
-| Starter | $79 | 80 / billing cycle | $0.85 per file |
-| Growth | $219 | 250 / billing cycle | $0.85 per file |
-| Scale | $599 | 700 / billing cycle | $0.85 per file |
+| Starter | $19 | 1,900 processing credits | $0.01 per additional credit |
+| Growth | $49 | 5,400 processing credits | $0.01 per additional credit |
+| Scale | $149 | 17,800 processing credits | $0.01 per additional credit |
 
-- **Trial**: 5-day free trial
-- **Overage cap**: $500 per billing cycle
+- **Trial**: None at launch
+- **Overage limit**: Merchant-controlled from $0 to $500 per billing cycle
 - **Billing provider**: Shopify Billing
 
 ## Review-copy guardrails

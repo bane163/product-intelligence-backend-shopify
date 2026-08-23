@@ -26,6 +26,11 @@ from application.domain.shopify_mutation_plan import (
     validate_inventory_quantity,
     validate_product,
 )
+from application.domain.product_images import (
+    is_non_production,
+    product_set_files,
+    resolve_product_image,
+)
 from application.domain.extraction_quality import (
     QUALITY_STATUS_LIVE_PENDING,
     QUALITY_STATUS_READY,
@@ -40,6 +45,9 @@ from application.domain.sku_autocorrection import (
 from application.domain.review_value_paths import (
     canonical_value_path,
     normalized_path_part,
+)
+from application.domain.shopify_product_normalization import (
+    canonicalize_single_option_variant_titles,
 )
 from shopify import SHOPIFY_REAUTH_REQUIRED, ShopifyClient
 from .utils import require_authenticated_shop_domain
@@ -57,6 +65,8 @@ PRODUCT_BY_HANDLE_QUERY = """query MutationPlanProductByHandle($query: String!) 
   products(first: 2, query: $query) { nodes {
     id title handle descriptionHtml vendor productType status tags
     seo { title description }
+    featuredImage { url altText }
+    media(first: 100) { nodes { id ... on MediaImage { image { url altText } } } }
     options { id name position optionValues { id name } }
     variants(first: 250) { nodes {
       id title price compareAtPrice sku barcode taxable taxCode inventoryPolicy
@@ -434,12 +444,13 @@ async def _repair_legacy_review_evidence(
         enrich_spreadsheet_source_refs(
             products, bytes(source["content"]), filename, source_file_id=file_id
         )
-    elif lower_name.endswith(".pdf") and ctx.services.document_layout is not None:
+    elif lower_name.endswith(".pdf"):
+        from application.services.document_layout_service import pymupdf_layout
         from application.services.pdf_source_refs import verify_pdf_source_refs
 
-        layout = await ctx.services.document_layout.analyze_pdf(
-            bytes(source["content"]), file_id
-        )
+        # Opening legacy review state is free. Use embedded PDF text only so a
+        # read-only review cannot accidentally invoke app-funded Azure analysis.
+        layout = pymupdf_layout(bytes(source["content"]), file_id)
         verify_pdf_source_refs(products, layout, file_id)
     else:
         return draft
@@ -661,6 +672,9 @@ async def create_mutation_plan(
         persisted_products = deepcopy(_products(draft))
         inferred_any = False
         for product in persisted_products:
+            inferred_any = (
+                canonicalize_single_option_variant_titles(product) or inferred_any
+            )
             inferred_any = infer_positional_option_dimensions(product) or inferred_any
         effective_products = deepcopy(persisted_products)
         live_products = [
@@ -829,6 +843,12 @@ async def create_mutation_plan(
             proposed, structured_blockers, structured_unapplied = (
                 merge_structured_product(live, product, proposed)
             )
+            image = resolve_product_image(
+                product, live, non_production=is_non_production()
+            )
+            files = product_set_files(image, live)
+            if files:
+                proposed["files"] = files
             blockers.extend(structured_blockers)
             unapplied.extend(structured_unapplied)
             for deferred_index, deferred in enumerate(unapplied):
@@ -858,6 +878,7 @@ async def create_mutation_plan(
                 unapplied=unapplied,
                 prior_item=prior_item,
             )
+            plan_item["image"] = image
             generated_for_product = {
                 sku
                 for (product_index, _), sku in generated_skus.items()

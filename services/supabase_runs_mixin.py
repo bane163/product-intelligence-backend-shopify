@@ -144,6 +144,10 @@ class SupabaseRunsMixin:
                     "enrichment_applied",
                     "enrichment_suggestions_count",
                     "enrichment_warning",
+                    "billing_operation_id",
+                    "billing_quoted_credits",
+                    "billing_rate_card_version",
+                    "billing_failure_class",
                 ),
             )
             if compat_payload is not None:
@@ -321,6 +325,16 @@ class SupabaseRunsMixin:
         if extra_fields:
             fields.update(extra_fields)
         self.create_or_update_run(run_id, fields)
+        try:
+            run = self.get_run(run_id)
+            if isinstance(run, dict):
+                from services.metered_operations import settle_terminal_run
+
+                settle_terminal_run(self, run)
+        except Exception:
+            # Billing telemetry must alert and retry independently; it must not
+            # replace the worker's authoritative terminal transition.
+            LOG.exception("Terminal credit settlement failed for run_id=%s", run_id)
 
     def enqueue_offload_job(
         self,
@@ -800,7 +814,25 @@ class SupabaseRunsMixin:
     ) -> list[dict[str, Any]]:
         client = self._get_supabase_client()
         if not client:
-            return []
+            normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+            rows = [
+                dict(row)
+                for row in getattr(self, "llm_runs", {}).values()
+                if isinstance(row, dict)
+                and (
+                    not normalized_shop_domain
+                    or self._normalize_shop_domain(row.get("shop_domain"))
+                    == normalized_shop_domain
+                )
+                and (
+                    not status
+                    or self._normalize_run_status(row.get("status")) == status
+                )
+            ]
+            rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+            rows = rows[max(0, offset) : max(0, offset) + max(0, limit)]
+            self._enrich_run_credit_usage(rows, shop_domain=normalized_shop_domain)
+            return rows
         try:
             query = (
                 client.table("llm_runs")
@@ -814,10 +846,108 @@ class SupabaseRunsMixin:
             if normalized_shop_domain:
                 query = query.eq("shop_domain", normalized_shop_domain)
             res = query.execute()
-            return res.data or []
+            rows = res.data or []
+            self._enrich_run_credit_usage(rows, shop_domain=normalized_shop_domain)
+            return rows
         except Exception:
             LOG.exception("Failed listing llm_runs")
             return []
+
+    @staticmethod
+    def _credit_usage_from_operation(
+        operation: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(operation, dict):
+            return None
+        status = str(operation.get("status") or "").strip().lower()
+        if status == "reserved":
+            return {
+                "amount": max(0, int(operation.get("reserved_credits") or 0)),
+                "state": "estimated",
+                "operation_count": 1,
+            }
+        if status == "released":
+            return {"amount": 0, "state": "actual", "operation_count": 1}
+        if status in {"settled", "reversed"}:
+            return {
+                "amount": max(
+                    0,
+                    int(operation.get("settled_credits") or 0)
+                    - int(operation.get("reversed_credits") or 0),
+                ),
+                "state": "actual",
+                "operation_count": 1,
+            }
+        return None
+
+    def _credit_operations_by_id(
+        self,
+        operation_ids: list[str],
+        *,
+        shop_domain: str | None,
+    ) -> dict[str, dict[str, Any]]:
+        normalized_ids = list(
+            dict.fromkeys(
+                operation_id.strip()
+                for operation_id in operation_ids
+                if operation_id.strip()
+            )
+        )
+        if not normalized_ids:
+            return {}
+        normalized_shop_domain = self._normalize_shop_domain(shop_domain)
+        client = self._get_supabase_client()
+        if client:
+            try:
+                query = client.table("billing_operations").select(
+                    "operation_id,shop_domain,status,reserved_credits,settled_credits,reversed_credits"
+                ).in_("operation_id", normalized_ids)
+                if normalized_shop_domain:
+                    query = query.eq("shop_domain", normalized_shop_domain)
+                response = query.execute()
+                return {
+                    str(row.get("operation_id")): row
+                    for row in response.data or []
+                    if isinstance(row, dict)
+                    and row.get("operation_id")
+                    and (
+                        not normalized_shop_domain
+                        or self._normalize_shop_domain(row.get("shop_domain"))
+                        == normalized_shop_domain
+                    )
+                }
+            except Exception:
+                LOG.exception("Failed resolving batched billing operations")
+                return {}
+        manager = getattr(self, "_credit_manager", None)
+        operations = getattr(manager, "_operations", {})
+        return {
+            operation_id: dict(operation)
+            for operation_id in normalized_ids
+            if isinstance((operation := operations.get(operation_id)), dict)
+            and (
+                not normalized_shop_domain
+                or self._normalize_shop_domain(operation.get("shop_domain"))
+                == normalized_shop_domain
+            )
+        }
+
+    def _enrich_run_credit_usage(
+        self, rows: list[dict[str, Any]], *, shop_domain: str | None
+    ) -> None:
+        operation_ids = [
+            str(row.get("billing_operation_id") or "").strip()
+            for row in rows
+            if isinstance(row, dict)
+        ]
+        operations = self._credit_operations_by_id(
+            operation_ids, shop_domain=shop_domain
+        )
+        for row in rows:
+            operation_id = str(row.get("billing_operation_id") or "").strip()
+            row["credit_usage"] = self._credit_usage_from_operation(
+                operations.get(operation_id)
+            )
 
     def get_run(
         self, run_id: str, *, shop_domain: str | None = None
@@ -871,6 +1001,7 @@ class SupabaseRunsMixin:
                     "prompt_tokens": run.get("prompt_tokens"),
                     "completion_tokens": run.get("completion_tokens"),
                     "total_tokens": run.get("total_tokens"),
+                    "billing_operation_id": run.get("billing_operation_id"),
                 }
                 events = (
                     memory_events.get(run_id, [])
@@ -887,7 +1018,19 @@ class SupabaseRunsMixin:
                         summary["processing_message"] = message
                         break
                 summaries[run_id] = summary
-            return summaries
+            summary_rows = [
+                {"run_id": run_id, **summary}
+                for run_id, summary in summaries.items()
+            ]
+            self._enrich_run_credit_usage(
+                summary_rows, shop_domain=normalized_shop_domain
+            )
+            return {
+                str(row["run_id"]): {
+                    key: value for key, value in row.items() if key != "run_id"
+                }
+                for row in summary_rows
+            }
 
         normalized_run_ids: list[str] = []
         seen_run_ids: set[str] = set()
@@ -905,7 +1048,7 @@ class SupabaseRunsMixin:
         summaries: dict[str, dict[str, Any]] = {}
         try:
             query = client.table("llm_runs").select(
-                "run_id,status,error,prompt_tokens,completion_tokens,total_tokens"
+                "run_id,status,error,prompt_tokens,completion_tokens,total_tokens,billing_operation_id"
             )
             query = query.in_("run_id", normalized_run_ids)
             if normalized_shop_domain:
@@ -921,6 +1064,7 @@ class SupabaseRunsMixin:
                     "prompt_tokens": row.get("prompt_tokens"),
                     "completion_tokens": row.get("completion_tokens"),
                     "total_tokens": row.get("total_tokens"),
+                    "billing_operation_id": row.get("billing_operation_id"),
                 }
         except Exception:
             LOG.exception(
@@ -958,7 +1102,17 @@ class SupabaseRunsMixin:
                 len(summaries),
             )
 
-        return summaries
+        summary_rows = [
+            {"run_id": run_id, **summary}
+            for run_id, summary in summaries.items()
+        ]
+        self._enrich_run_credit_usage(summary_rows, shop_domain=normalized_shop_domain)
+        return {
+            str(row["run_id"]): {
+                key: value for key, value in row.items() if key != "run_id"
+            }
+            for row in summary_rows
+        }
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool:
         client = self._get_supabase_client()

@@ -13,6 +13,9 @@ from application.domain.product_intelligence_patching import (
 )
 from application.domain.extraction_quality import build_quality_report
 from application.domain.field_derivation_policy import apply_server_owned_origins
+from application.domain.shopify_product_normalization import (
+    canonicalize_single_option_variant_titles,
+)
 from application.ports.llm_port import ExtractionRequest, LLMPort, ModelConfiguration
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
@@ -126,7 +129,7 @@ async def execute(
         model_config = ModelConfiguration(
             provider="openai",
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model_id=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
+            model_id=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
             api_key=os.getenv("OPENAI_API_KEY", ""),
         )
         if shop_domain:
@@ -232,6 +235,11 @@ async def execute(
                 phase="pdf_page_coverage",
                 message="Resolved PDF layout coverage",
                 payload_preview={"provider": pdf_layout.provider, "expected": list(pdf_layout.expected_pages), "covered": list(pdf_layout.covered_pages), "anchors": len(pdf_layout.anchors)},
+                metadata={
+                    "provider": "azure_document_intelligence",
+                    "model_name": "prebuilt-layout:2024-11-30",
+                    "usage": {"azure_pages": pdf_layout.page_count},
+                },
             )
             emit_and_persist(
                 phase="pdf_evidence_catalog_built",
@@ -400,6 +408,8 @@ async def execute(
             )
             if isinstance(raw_products, list):
                 result["products"] = products
+            for product in products:
+                canonicalize_single_option_variant_titles(product)
             if products and document_format.is_spreadsheet:
                 enrich_spreadsheet_source_refs(
                     products, file_bytes, input_name, source_file_id=source_file_id
@@ -501,7 +511,11 @@ async def execute(
             if not manage_lifecycle:
                 raise RuntimeError("lifecycle managed by offload worker")
             supabase.runs.finalize_run(
-                run_id, status="error", duration_ms=duration_ms, error=str(exc)
+                run_id,
+                status="error",
+                duration_ms=duration_ms,
+                error=str(exc),
+                extra_fields={"billing_failure_class": "platform_or_provider"},
             )
         except Exception:
             pass

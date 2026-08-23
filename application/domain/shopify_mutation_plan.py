@@ -41,9 +41,6 @@ DEFERRED_FIELDS = {
     "googleShopping": "TODO_GOOGLE_SHOPPING",
     "published": "UNAPPLIED_PUBLICATION",
     "gift_card": "UNAPPLIED_PRODUCT_ATTRIBUTE",
-    "image_src": "UNAPPLIED_MEDIA",
-    "image_position": "UNAPPLIED_MEDIA",
-    "image_alt_text": "UNAPPLIED_MEDIA",
     "google_shopping_category": "TODO_GOOGLE_SHOPPING",
     "google_shopping_gender": "TODO_GOOGLE_SHOPPING",
     "google_shopping_age_group": "TODO_GOOGLE_SHOPPING",
@@ -1533,7 +1530,9 @@ def _preview_cell(
         deepcopy(issue)
         for issue in item.get("quality_issues", [])
         if isinstance(issue, dict)
-        and issue.get("value_path") in {None, "", value_path}
+        and issue.get("value_path")
+        and canonical_value_path(issue.get("value_path"))
+        == canonical_value_path(value_path)
     ]
     actual_change_ids = {
         str(candidate.get("change_id"))
@@ -1752,10 +1751,34 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
             values = dict(_variant_pairs(variant, option_names))
             positional_value = _text(variant.get(f"option{option_index + 1}"))
             live_values = dict(_variant_pairs(live_variant or {}, live_option_names))
+            structural_codes = list(dict.fromkeys(
+                str(blocker.get("code"))
+                for blocker in item.get("blockers", [])
+                if isinstance(blocker, dict)
+                and blocker.get("code")
+                and canonical_value_path(blocker.get("field"))
+                in {
+                    canonical_value_path(f"variants[{index}]"),
+                    canonical_value_path(f"variants[{index}].option{option_index + 1}"),
+                }
+            ))
+            option_row = None
+            if structural_codes:
+                option_row = _review_row(
+                    scope="variant",
+                    subject=subject,
+                    subject_identity=identity,
+                    field=f"option{option_index + 1}",
+                    current=live_values.get(option_name),
+                    proposed=values.get(option_name) or positional_value,
+                    disposition="blocked",
+                    change_kind="rejected",
+                    reason_codes=structural_codes,
+                )
             cells.append(_preview_cell(
                 item, column=f"option{option_index + 1}Value", scope="variant", subject=subject,
                 subject_identity=identity, value_path=f"variant[{_normalized_path_part(subject)}].option{option_index + 1}",
-                current=live_values.get(option_name), proposed=values.get(option_name) or positional_value, row=None,
+                current=live_values.get(option_name), proposed=values.get(option_name) or positional_value, row=option_row,
                 live_variant=live_variant,
             ))
         for field in variant_fields:
@@ -1835,6 +1858,11 @@ def build_review_preview(item: dict[str, Any]) -> dict[str, Any]:
         "variants": variant_rows,
         "option_dimensions": option_dimensions,
         "metafield_cells": metafield_cells,
+        "image": (
+            deepcopy(item.get("image"))
+            if isinstance(item.get("image"), dict)
+            else None
+        ),
     }
 
 
@@ -1922,8 +1950,13 @@ def normalize_review_plan_rows(plan: dict[str, Any]) -> dict[str, Any]:
                 and target_exists
             )
         if normalized.get("review_contract_version") == 5:
-            item["review_preview"] = build_review_preview(item)
-            item.pop("_repair_source", None)
+            repair_source = item.get("_repair_source")
+            existing_preview = item.get("review_preview")
+            if isinstance(repair_source, dict):
+                item["review_preview"] = build_review_preview(item)
+                item.pop("_repair_source", None)
+            elif not isinstance(existing_preview, dict):
+                item["review_preview"] = build_review_preview(item)
     return normalized
 
 
@@ -2121,6 +2154,23 @@ def _kind(current: Any, proposed: Any) -> str:
     return "updated"
 
 
+def _direct_blocker_codes(
+    blockers: list[dict[str, Any]], value_path: str
+) -> list[str]:
+    """Return blockers that name this exact review field."""
+    canonical = canonical_value_path(value_path)
+    return list(
+        dict.fromkeys(
+            str(blocker.get("code"))
+            for blocker in blockers
+            if isinstance(blocker, dict)
+            and blocker.get("code")
+            and blocker.get("field")
+            and canonical_value_path(blocker.get("field")) == canonical
+        )
+    )
+
+
 def review_changes(
     current: dict[str, Any] | None,
     imported: dict[str, Any],
@@ -2132,14 +2182,8 @@ def review_changes(
     current = current or {}
     blockers = blockers or []
     unapplied = unapplied or []
-    reason_codes = list(
-        dict.fromkeys(
-            str(item.get("code"))
-            for item in blockers
-            if isinstance(item, dict) and item.get("code")
-        )
-    )
-    disposition = "blocked" if blockers else "applicable"
+    reason_codes: list[str] = []
+    disposition = "applicable"
     rows: list[dict[str, Any]] = []
 
     before = canonical_product(current)
@@ -2443,6 +2487,15 @@ def review_changes(
                 subject_identity=subject_identity,
             )
         )
+    for row in rows:
+        if row.get("disposition") == "deferred":
+            continue
+        matched_codes = _direct_blocker_codes(blockers, _value_path(row))
+        row["disposition"] = "blocked" if matched_codes else "applicable"
+        if matched_codes:
+            row["reason_codes"] = matched_codes
+        else:
+            row.pop("reason_codes", None)
     return _decorate_review_rows(rows, imported)
 
 
@@ -3137,14 +3190,9 @@ def build_review_plan_item(
         for field in dict.fromkeys([*flattened, "sku", "price"]):
             if field == "inventory_quantity" or field.startswith("inventoryItem."):
                 continue
-            targeted = [
-                str(blocker.get("code"))
-                for blocker in blockers_copy
-                if isinstance(blocker, dict)
-                and str(blocker.get("field") or "").startswith(
-                    f"variants[{source_variant_index}]"
-                )
-            ]
+            targeted = _direct_blocker_codes(
+                blockers_copy, f"variants[{source_variant_index}].{field}"
+            )
             value = flattened.get(field)
             required_missing = field in {"sku", "price"} and (
                 value is None or not str(value).strip()

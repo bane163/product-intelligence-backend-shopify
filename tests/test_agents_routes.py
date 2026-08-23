@@ -2690,16 +2690,9 @@ async def test_import_offload_uses_deterministic_name_when_source_filename_missi
             "/agents/import",
             data={"file_id": file_id, "run_id": "run-import-no-name", "offload": "true"},
         )
-        assert response.status_code == 202
-        body = response.json()
-
-        detail = await ac.get(f"/agents/product-drafts/{body['draft_id']}")
-        assert detail.status_code == 200
-        draft = detail.json()["draft"]
-        assert draft["draft_name"] == f"draft-{body['draft_id'][:8]}.xlsx"
-        assert draft["draft_name"].strip()
-        assert draft["draft_name"].lower() != "untitled"
-        assert len(queued_jobs) == 1
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        assert queued_jobs == []
 
 
 @pytest.mark.asyncio

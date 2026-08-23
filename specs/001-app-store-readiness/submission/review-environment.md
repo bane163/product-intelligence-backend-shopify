@@ -16,11 +16,11 @@ Use this document to describe the exact environment a Shopify reviewer should us
 - **Shopify app name shown to reviewer**: `Stockpile`
 - **Expected first in-app route after install**: `/app/documents`
 - **Expected billing plans**:
-  - Starter — `$79/month`, `80` included files
-  - Growth — `$219/month`, `250` included files
-  - Scale — `$599/month`, `700` included files
-  - Overage — `$0.85/file`, capped at `$500/cycle`
-  - Trial — `5` days
+  - Starter — `$19/month`, `1,900` included processing credits
+  - Growth — `$49/month`, `5,400` included processing credits
+  - Scale — `$149/month`, `17,800` included processing credits
+  - Overage — `$0.01/processing credit`, disabled until the merchant sets a limit up to `$500/cycle`
+  - Monthly only, with no processing trial and no credit rollover
 
 ## Reviewer expectations
 

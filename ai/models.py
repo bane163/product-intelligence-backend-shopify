@@ -23,9 +23,18 @@ class ProductOption(BaseModel):
 
 class ProductVariant(BaseModel):
     # Option values (up to 3)
-    option1: Optional[str] = None
-    option2: Optional[str] = None
-    option3: Optional[str] = None
+    option1: Optional[str] = Field(
+        default=None,
+        description="First declared option value. Put the value here, not only in variant title.",
+    )
+    option2: Optional[str] = Field(
+        default=None,
+        description="Second declared option value. Put the value here, not in variant title.",
+    )
+    option3: Optional[str] = Field(
+        default=None,
+        description="Third declared option value. Put the value here, not in variant title.",
+    )
 
     # Variant identifiers and pricing
     sku: Optional[str] = None
@@ -53,7 +62,10 @@ class ProductVariant(BaseModel):
     compare_at_price_international: Optional[str] = None
 
     # Misc
-    title: Optional[str] = None
+    title: Optional[str] = Field(
+        default=None,
+        description="Compatibility label only; option1-option3 are authoritative for option values.",
+    )
     status: Optional[str] = None
 
 

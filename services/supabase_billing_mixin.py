@@ -1,6 +1,15 @@
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+from shared.credit_billing import PLANS
+from .credit_billing_service import (
+    BillingStorageUnavailable,
+    CreditLimitReached,
+    CreditOperationManager,
+    Cycle,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -8,6 +17,7 @@ LOG = logging.getLogger(__name__)
 class SupabaseBillingMixin:
     # Provided by the concrete service (`SupabaseService.__init__`).
     _billing_store: dict[str, dict[str, Any]]
+    _credit_manager: CreditOperationManager
 
     def _get_supabase_client(self) -> Optional[Any]:
         """Stub for static typing.
@@ -258,21 +268,323 @@ class SupabaseBillingMixin:
     # ------------------------------------------------------------------
 
     def can_process(self, shop_domain: str) -> bool:
-        """Check if a merchant can process files based on subscription status."""
+        """Check if a merchant has a currently active paid subscription."""
         subscription = self.get_subscription(shop_domain)
         if not subscription:
             return False
-        status = subscription.get("status")
-        if status == "active":
-            return True
-        if status == "trial":
-            trial_ends = subscription.get("trial_ends_at")
-            if trial_ends:
-                from datetime import datetime, timezone
-                try:
-                    end_dt = datetime.fromisoformat(trial_ends.replace("Z", "+00:00"))
-                    return datetime.now(timezone.utc) < end_dt
-                except (ValueError, TypeError):
-                    return False
-            return True  # No trial_ends_at set — allow (graceful)
-        return False
+        return str(subscription.get("status") or "").lower() == "active"
+
+    # ------------------------------------------------------------------
+    # Processing credits (legacy file usage above remains audit-only)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _plan_handle(subscription: dict[str, Any] | None) -> str:
+        raw = str(
+            (subscription or {}).get("plan_handle")
+            or (subscription or {}).get("plan_name")
+            or ""
+        ).strip().lower()
+        return raw if raw in PLANS else ""
+
+    def get_credit_cycle(
+        self,
+        shop_domain: str,
+        *,
+        billing_mode: str = "shopify",
+        plan_handle: str | None = None,
+    ) -> Cycle:
+        now = datetime.now(timezone.utc)
+        subscription = self.get_subscription(shop_domain) or {}
+        resolved_handle = (plan_handle or self._plan_handle(subscription)).lower()
+        plan = PLANS.get(resolved_handle)
+        if plan is None:
+            raise ValueError("SUBSCRIPTION_REQUIRED")
+        if billing_mode == "shopify":
+            start = str(subscription.get("current_period_start") or now.isoformat())
+            end = str(subscription.get("current_period_end") or (now + timedelta(days=30)).isoformat())
+        else:
+            start_dt = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            next_month = (start_dt.replace(day=28) + timedelta(days=4)).replace(day=1)
+            start, end = start_dt.isoformat(), next_month.isoformat()
+        return Cycle(
+            shop_domain=shop_domain,
+            starts_at=start,
+            ends_at=end,
+            included_credits=plan.included_credits,
+            overage_limit_cents=int(subscription.get("overage_limit_cents") or 0),
+            plan_handle=resolved_handle,
+            billing_mode=billing_mode,
+        )
+
+    def reserve_credits(
+        self,
+        *,
+        shop_domain: str,
+        operation_key: str,
+        operation_type: str,
+        maximum_credits: int,
+        rate_card_version: str,
+        metadata: dict[str, Any] | None = None,
+        operation_id: str | None = None,
+        billing_mode: str = "shopify",
+        plan_handle: str | None = None,
+    ) -> dict[str, Any]:
+        cycle = self.get_credit_cycle(shop_domain, billing_mode=billing_mode, plan_handle=plan_handle)
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.rpc(
+                    "reserve_processing_credits",
+                    {
+                        "p_shop_domain": shop_domain,
+                        "p_operation_key": operation_key,
+                        "p_operation_type": operation_type,
+                        "p_operation_id": operation_id,
+                        "p_maximum_credits": int(maximum_credits),
+                        "p_rate_card_version": rate_card_version,
+                        "p_metadata": metadata or {},
+                        "p_billing_mode": billing_mode,
+                        "p_plan_handle": cycle.plan_handle,
+                    },
+                ).execute()
+                data = response.data
+                if isinstance(data, list) and data:
+                    return data[0]
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:
+                raise BillingStorageUnavailable("Durable credit reservation is unavailable") from exc
+        return self._credit_manager.reserve(
+            cycle=cycle,
+            operation_key=operation_key,
+            operation_type=operation_type,
+            maximum_credits=maximum_credits,
+            rate_card_version=rate_card_version,
+            metadata=metadata,
+            operation_id=operation_id,
+        )
+
+    def record_provider_usage_event(self, **values: Any) -> dict[str, Any]:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                payload = {
+                    "operation_id": values["operation_id"],
+                    "provider_call_key": values["provider_call_key"],
+                    "provider": values["provider"],
+                    "model": values.get("model"),
+                    "usage": values.get("usage") or {},
+                    "succeeded": values.get("succeeded", True),
+                }
+                response = client.table("provider_usage_events").upsert(
+                    payload, on_conflict="operation_id,provider_call_key"
+                ).execute()
+                if response.data:
+                    return response.data[0]
+            except Exception as exc:
+                raise BillingStorageUnavailable("Durable provider usage storage is unavailable") from exc
+        return self._credit_manager.record_provider_usage(**values)
+
+    def get_credit_operation(self, operation_id: str) -> dict[str, Any] | None:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.table("billing_operations").select("*").eq(
+                    "operation_id", operation_id
+                ).limit(1).execute()
+                if response.data:
+                    return response.data[0]
+            except Exception as exc:
+                raise BillingStorageUnavailable("Durable billing operation storage is unavailable") from exc
+        operation = self._credit_manager._operations.get(operation_id)
+        return dict(operation) if operation else None
+
+    def list_provider_usage_events(self, operation_id: str) -> list[dict[str, Any]]:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.table("provider_usage_events").select("*").eq(
+                    "operation_id", operation_id
+                ).execute()
+                return list(response.data or [])
+            except Exception as exc:
+                raise BillingStorageUnavailable("Durable provider usage storage is unavailable") from exc
+        return [
+            dict(item)
+            for (candidate, _), item in self._credit_manager._usage_events.items()
+            if candidate == operation_id
+        ]
+
+    def settle_credits(
+        self,
+        *,
+        operation_id: str,
+        actual_credits: int | None,
+        raw_usage: dict[str, Any],
+        cost_breakdown: dict[str, Any],
+        missing_telemetry: bool = False,
+    ) -> dict[str, Any]:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.rpc(
+                    "settle_processing_credits",
+                    {
+                        "p_operation_id": operation_id,
+                        "p_actual_credits": actual_credits,
+                        "p_raw_usage": raw_usage,
+                        "p_cost_breakdown": cost_breakdown,
+                        "p_missing_telemetry": missing_telemetry,
+                    },
+                ).execute()
+                data = response.data
+                if isinstance(data, list) and data:
+                    return data[0]
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:
+                raise BillingStorageUnavailable("Durable credit settlement is unavailable") from exc
+        operation = self.get_credit_operation(operation_id) or {}
+        return self._credit_manager.settle(
+            operation_id=operation_id,
+            actual_credits=actual_credits,
+            raw_usage=raw_usage,
+            cost_breakdown=cost_breakdown,
+            missing_telemetry=missing_telemetry,
+            completion_cycle=self.get_credit_cycle(
+                str(operation.get("shop_domain") or ""),
+                billing_mode=str(operation.get("billing_mode") or "shopify"),
+                plan_handle=str(operation.get("plan_handle") or "") or None,
+            ),
+        )
+
+    def release_credits(self, operation_id: str, reason: str) -> dict[str, Any]:
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.rpc(
+                    "release_processing_credits",
+                    {"p_operation_id": operation_id, "p_reason": reason},
+                ).execute()
+                data = response.data
+                if isinstance(data, list) and data:
+                    return data[0]
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:
+                raise BillingStorageUnavailable("Durable credit release is unavailable") from exc
+        return self._credit_manager.release(operation_id, reason)
+
+    def reverse_credits(self, operation_id: str, credits: int, reason: str) -> dict[str, Any]:
+        client = self._get_supabase_client()
+        if client:
+            response = client.rpc(
+                "reverse_processing_credits",
+                {"p_operation_id": operation_id, "p_credits": credits, "p_reason": reason},
+            ).execute()
+            data = response.data
+            return data[0] if isinstance(data, list) and data else data
+        return self._credit_manager.reverse(operation_id, credits, reason)
+
+    def get_credit_summary(
+        self,
+        shop_domain: str,
+        *,
+        billing_mode: str = "shopify",
+        plan_handle: str | None = None,
+    ) -> dict[str, Any]:
+        subscription = self.get_subscription(shop_domain) or {}
+        cycle = self.get_credit_cycle(shop_domain, billing_mode=billing_mode, plan_handle=plan_handle)
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.rpc(
+                    "processing_credit_summary", {
+                        "p_shop_domain": shop_domain,
+                        "p_billing_mode": billing_mode,
+                        "p_plan_handle": cycle.plan_handle,
+                    }
+                ).execute()
+                data = response.data
+                if isinstance(data, list) and data:
+                    return data[0]
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:
+                raise BillingStorageUnavailable("Durable credit summary is unavailable") from exc
+        return self._credit_manager.summary(
+            cycle,
+            subscription_state=("active" if billing_mode == "simulated" else str(subscription.get("status") or "inactive")),
+            billing_mode=billing_mode,
+        )
+
+    def set_overage_limit(
+        self,
+        shop_domain: str,
+        cents: int,
+        *,
+        billing_mode: str = "shopify",
+        plan_handle: str | None = None,
+    ) -> dict[str, Any]:
+        cycle = self.get_credit_cycle(shop_domain, billing_mode=billing_mode, plan_handle=plan_handle)
+        client = self._get_supabase_client()
+        if client:
+            try:
+                response = client.rpc(
+                    "set_processing_credit_overage_limit",
+                    {
+                        "p_shop_domain": shop_domain,
+                        "p_limit_cents": int(cents),
+                        "p_billing_mode": billing_mode,
+                        "p_plan_handle": cycle.plan_handle,
+                    },
+                ).execute()
+                data = response.data
+                if isinstance(data, list) and data:
+                    return data[0]
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:
+                if "BILLING_LIMIT_CONFLICT" in str(exc):
+                    raise CreditLimitReached(str(exc)) from exc
+                raise
+        result = self._credit_manager.set_overage_limit(cycle, cents)
+        subscription = self.get_subscription(shop_domain)
+        if billing_mode == "shopify" and subscription is not None:
+            self.upsert_subscription(shop_domain, {**subscription, "overage_limit_cents": int(cents)})
+        return result
+
+    def pending_shopify_events(self, shop_domain: str | None = None) -> list[dict[str, Any]]:
+        client = self._get_supabase_client()
+        if client:
+            query = client.table("shopify_event_outbox").select("*").in_("status", ["pending", "retry"])
+            if shop_domain:
+                query = query.eq("shop_domain", shop_domain)
+            response = query.lte("next_attempt_at", self._utc_now()).order("created_at").limit(100).execute()
+            return list(response.data or [])
+        events = self._credit_manager.pending_outbox()
+        if shop_domain:
+            events = [event for event in events if event.get("shop_domain") == shop_domain]
+        for event in events:
+            subscription = self.get_subscription(str(event.get("shop_domain") or "")) or {}
+            event.setdefault("shopify_shop_gid", subscription.get("shopify_shop_gid"))
+        return events
+
+    def mark_shopify_event(self, event_key: str, status: str, error: str | None = None) -> None:
+        client = self._get_supabase_client()
+        if client:
+            now = datetime.now(timezone.utc)
+            current = client.table("shopify_event_outbox").select("attempts").eq("event_key", event_key).limit(1).execute()
+            attempts = int((current.data or [{}])[0].get("attempts") or 0) + 1
+            values: dict[str, Any] = {
+                "status": status,
+                "attempts": attempts,
+                "last_error": error,
+                "next_attempt_at": (now + timedelta(seconds=min(2 ** attempts, 300))).isoformat(),
+            }
+            if status == "delivered":
+                values["delivered_at"] = now.isoformat()
+            client.table("shopify_event_outbox").update(values).eq("event_key", event_key).execute()
+            return
+        self._credit_manager.mark_outbox(event_key, status, error)

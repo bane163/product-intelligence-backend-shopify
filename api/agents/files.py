@@ -31,7 +31,7 @@ from .schemas import (
     BulkUploadResult,
 )
 from .utils import require_internal_service_key, require_shop_domain, resolve_dev_billing_simulator_plan
-from api.agents.billing import _get_billing_svc
+from api.agents.billing import _get_billing_svc, require_paid_processing
 
 router = APIRouter()
 LOG = logging.getLogger(__name__)
@@ -100,12 +100,6 @@ async def record_source_link_trace_event(
         details=details,
     )
     return {"recorded": True}
-
-
-def _has_processing_access(request: Request, billing_svc: Any, shop_domain: str) -> bool:
-    return resolve_dev_billing_simulator_plan(request) is not None or billing_svc.can_process(
-        shop_domain
-    )
 
 
 def _optional_str(entry: dict[str, object] | None, key: str) -> str | None:
@@ -794,11 +788,6 @@ async def upload_file(
     started_at = datetime.now(timezone.utc)
     prepared: dict[str, Any] | None = None
     try:
-        billing_svc = _get_billing_svc(ctx)
-        simulator_plan = resolve_dev_billing_simulator_plan(request)
-        if not _has_processing_access(request, billing_svc, shop_domain):
-            raise HTTPException(status_code=402, detail="Active subscription required to process files")
-
         prepared = await _prepare_uploaded_file(file, ctx=ctx)
 
         from application.use_cases.files.save_file import execute as save_file_execute
@@ -840,22 +829,6 @@ async def upload_files_bulk(
     ctx: AppContext = Depends(get_ctx),
 ) -> BulkUploadResult:
     shop_domain = require_shop_domain(request)
-    billing_svc = _get_billing_svc(ctx)
-    simulator_plan = resolve_dev_billing_simulator_plan(request)
-    if not _has_processing_access(request, billing_svc, shop_domain):
-        exc = HTTPException(status_code=402, detail="Active subscription required to process files")
-        for file in files:
-            _record_failed_upload_activity(
-                ctx=ctx,
-                shop_domain=shop_domain,
-                filename=file.filename,
-                content_type=file.content_type,
-                size=getattr(file, "size", None),
-                error=exc,
-                started_at=datetime.now(timezone.utc),
-            )
-        raise exc
-
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
@@ -1047,8 +1020,7 @@ async def process_excel(
     """
     tenant = require_shop_domain(request, shop_domain)
     billing_svc = _get_billing_svc(ctx)
-    if not _has_processing_access(request, billing_svc, tenant):
-        raise HTTPException(status_code=402, detail="Active subscription required to process files")
+    billing_access = await require_paid_processing(request, billing_svc, tenant)
 
     from application.use_cases.processing.process_document import (
         execute as process_document_execute,
@@ -1109,6 +1081,16 @@ async def process_excel(
             ),
         )
 
+    try:
+        validate_document_content(import_format, file_bytes=file_bytes_data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_INPUT", "message": str(exc)},
+        ) from exc
+
+    effective_run_id = run_id or str(uuid.uuid4())
+
     if offload:
         observability_fields = current_observability_fields()
         if not file_id:
@@ -1157,8 +1139,64 @@ async def process_excel(
                     "file_id": file_id,
                 },
             )
-        effective_run_id = run_id or str(uuid.uuid4())
         draft_id = str(uuid.uuid4())
+    else:
+        draft_id = None
+
+    from services.credit_billing_service import BillingStorageUnavailable, CreditLimitReached
+    from services.metered_operations import quote_document_import
+    from shared.credit_billing import BillingRateUnavailable
+
+    active_model = ctx.supabase.llm_configs.get_active_llm_model_config(tenant)
+    model_id = str((active_model or {}).get("model_id") or os.getenv("OPENAI_MODEL", "gpt-5.6-luna"))
+    try:
+        quote, quote_metadata = quote_document_import(
+            content=file_bytes_data,
+            filename=input_name,
+            content_type=input_content_type,
+            model=model_id,
+        )
+        reservation = billing_svc.reserve_credits(
+            shop_domain=tenant,
+            operation_key=(request.headers.get("x-idempotency-key") or f"document_import:{effective_run_id}"),
+            operation_type="document_import",
+            maximum_credits=quote.credits,
+            rate_card_version=quote.rate_card_version,
+            metadata={**quote_metadata, "source_file_id": file_id, "filename": input_name},
+            billing_mode=billing_access.mode,
+            plan_handle=billing_access.plan_handle,
+        )
+    except BillingRateUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "BILLING_RATE_UNAVAILABLE", "message": str(exc)},
+        ) from exc
+    except CreditLimitReached as exc:
+        raise HTTPException(
+            status_code=402,
+            detail={"code": "CREDIT_LIMIT_REACHED", "message": str(exc)},
+        ) from exc
+    except BillingStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+    billing_estimate = {
+        "operation_id": reservation["operation_id"],
+        "reserved_credits": int(reservation["reserved_credits"]),
+        "maximum_charge_cents": int(reservation["maximum_charge_cents"]),
+    }
+    ctx.supabase.runs.create_or_update_run(
+        effective_run_id,
+        {
+            "billing_operation_id": reservation["operation_id"],
+            "billing_quoted_credits": int(reservation["reserved_credits"]),
+            "billing_rate_card_version": reservation["rate_card_version"],
+        },
+    )
+
+    if offload:
         try:
             _save_draft_state(
                 ctx=ctx,
@@ -1215,8 +1253,10 @@ async def process_excel(
                 require_persistent_queue=True,
             )
         except HTTPException:
+            billing_svc.release_credits(reservation["operation_id"], "queue_acceptance_failed")
             raise
         except Exception as exc:
+            billing_svc.release_credits(reservation["operation_id"], "queue_acceptance_failed")
             raise HTTPException(status_code=500, detail=str(exc))
         return JSONResponse(
             status_code=202,
@@ -1225,6 +1265,7 @@ async def process_excel(
                 "draft_id": draft_id,
                 "status": "queued",
                 "file_id": file_id,
+                "billing_estimate": billing_estimate,
             },
         )
 
@@ -1236,7 +1277,7 @@ async def process_excel(
         file_bytes=file_bytes_data,
         input_name=input_name,
         input_content_type=input_content_type,
-        run_id=run_id,
+        run_id=effective_run_id,
         collabora_url=collabora_url,
         extraction_mode=extraction_mode,
         shop_domain=tenant,
@@ -1244,7 +1285,7 @@ async def process_excel(
         enable_ai_enhancements=enable_ai_enhancements,
     )
 
-    return result
+    return {**result, "billing_estimate": billing_estimate}
 
 
 @router.get("/files/{file_id}", summary="Get file info")

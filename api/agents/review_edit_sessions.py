@@ -30,6 +30,9 @@ from application.domain.shopify_mutation_plan import (
     preserve_blank_fields,
     validate_product,
 )
+from application.domain.shopify_product_normalization import (
+    canonicalize_single_option_variant_titles,
+)
 from application.domain.extraction_quality import (
     QUALITY_STATUS_LIVE_PENDING,
     build_quality_report,
@@ -868,6 +871,7 @@ def _rebuild_working_preflight(
         if isinstance(item, dict) and isinstance(item.get("source_index"), int)
     }
     for product in products:
+        canonicalize_single_option_variant_titles(product)
         infer_positional_option_dimensions(product)
     quality_report = build_quality_report(
         products, status=QUALITY_STATUS_LIVE_PENDING

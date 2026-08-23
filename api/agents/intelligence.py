@@ -12,9 +12,67 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from app_context import AppContext, get_ctx
 from shared.observability import current_observability_fields
 from .utils import require_shop_domain, resolve_shop_access_token
+from api.agents.billing import _get_billing_svc, require_paid_processing
 
 router = APIRouter()
 PRODUCT_GID_RE = re.compile(r"^gid://shopify/Product/[1-9][0-9]*$")
+
+
+async def _reserve_intelligence_credits(
+    *,
+    request: Request,
+    ctx: AppContext,
+    shop_domain: str,
+    run_id: str,
+    operation_type: str,
+    products: int,
+) -> dict[str, Any]:
+    from services.credit_billing_service import BillingStorageUnavailable, CreditLimitReached
+    from services.metered_operations import quote_intelligence_operation
+    from shared.credit_billing import BillingRateUnavailable
+
+    service = _get_billing_svc(ctx)
+    billing_access = await require_paid_processing(request, service, shop_domain)
+    active_model = ctx.supabase.llm_configs.get_active_llm_model_config(shop_domain)
+    model_id = str((active_model or {}).get("model_id") or "gpt-5.6-luna")
+    try:
+        quote = quote_intelligence_operation(
+            operation_type, products=products, model=model_id
+        )
+        reservation = service.reserve_credits(
+            shop_domain=shop_domain,
+            operation_key=(request.headers.get("x-idempotency-key") or f"{operation_type}:{run_id}"),
+            operation_type=operation_type,
+            maximum_credits=quote.credits,
+            rate_card_version=quote.rate_card_version,
+            metadata={"products": products},
+            billing_mode=billing_access.mode,
+            plan_handle=billing_access.plan_handle,
+        )
+    except BillingRateUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "BILLING_RATE_UNAVAILABLE", "message": str(exc)},
+        ) from exc
+    except CreditLimitReached as exc:
+        raise HTTPException(
+            status_code=402,
+            detail={"code": "CREDIT_LIMIT_REACHED", "message": str(exc)},
+        ) from exc
+    except BillingStorageUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    ctx.supabase.runs.create_or_update_run(
+        run_id,
+        {
+            "billing_operation_id": reservation["operation_id"],
+            "billing_quoted_credits": reservation["reserved_credits"],
+            "billing_rate_card_version": reservation["rate_card_version"],
+        },
+    )
+    return reservation
 
 
 async def _review_request_payload(request: Request) -> dict[str, Any]:
@@ -319,6 +377,14 @@ async def run_product_intelligence_audit(
                 raise HTTPException(status_code=404, detail={"missing_product_ids": missing_ids})
         if not products:
             raise HTTPException(status_code=400, detail="No products found for audit")
+        billing_reservation = await _reserve_intelligence_credits(
+            request=request,
+            ctx=ctx,
+            shop_domain=shop_domain,
+            run_id=run_id_value,
+            operation_type="product_intelligence_audit",
+            products=len(products),
+        )
     except Exception as exc:
         reason = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
         emitter.emit_and_persist(phase="audit_failed", message="Catalog audit failed",
@@ -372,7 +438,14 @@ async def run_product_intelligence_audit(
             duration_ms=duration_ms,
         )
         ctx.services.tracing.complete_run(run_id_value)
-        return result
+        return {
+            **result,
+            "billing_estimate": {
+                "operation_id": billing_reservation["operation_id"],
+                "reserved_credits": billing_reservation["reserved_credits"],
+                "maximum_charge_cents": billing_reservation["maximum_charge_cents"],
+            },
+        }
     except ValueError as exc:
         emitter.emit_and_persist(
             phase="audit_error",
@@ -919,12 +992,25 @@ async def regenerate_product_intelligence_suggestion(
         if not isinstance(product, dict):
             raise HTTPException(status_code=502, detail="Unable to load current Shopify product")
         product.setdefault("id", gid)
+        billing_reservation = await _reserve_intelligence_credits(
+            request=request,
+            ctx=ctx,
+            shop_domain=shop_domain,
+            run_id=run_id,
+            operation_type="product_intelligence_regeneration",
+            products=1,
+        )
         result = await execute(supabase=ctx.supabase, suggestion_id=suggestion_id,
                                field=field, product=product, shop_domain=shop_domain,
                                trace_event=emitter.trace_event)
         emitter.emit_and_persist(phase="regeneration_completed", message="Fix regeneration completed")
         finish("succeeded")
         result["run_id"] = run_id
+        result["billing_estimate"] = {
+            "operation_id": billing_reservation["operation_id"],
+            "reserved_credits": billing_reservation["reserved_credits"],
+            "maximum_charge_cents": billing_reservation["maximum_charge_cents"],
+        }
         return result
     except HTTPException as exc:
         reason = str(exc.detail)

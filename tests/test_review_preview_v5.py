@@ -66,6 +66,62 @@ def test_v5_preview_authors_stable_cells_and_hides_default_title_scaffold():
     ), "single-variant Shopify scaffolds must not leak option-value cells"
 
 
+def test_v5_normalization_preserves_an_existing_preview_idempotently():
+    product = {
+        "title": "Stable shoe",
+        "options": [{"name": "Size", "values": ["8", "10"]}],
+        "variants": [
+            {"option1": "8", "sku": "SHOE-8", "price": 80},
+            {"option1": "10", "sku": "SHOE-10", "price": 90},
+        ],
+    }
+    item = _item(product)
+    first = normalize_review_plan_rows(
+        {"review_contract_version": 5, "items": [item]}
+    )
+    second = normalize_review_plan_rows(first)
+
+    assert second == first
+    assert len(second["items"][0]["review_preview"]["variants"]) == 2
+
+
+def test_structural_variant_blocker_only_blocks_affected_option_cells():
+    product = {
+        "title": "Blocked shoe",
+        "vendor": "Northwind",
+        "options": [{"name": "Size", "values": ["8", "10"]}],
+        "variants": [
+            {"title": "unknown", "sku": "SHOE-X", "price": 80},
+            {"option1": "10", "sku": "SHOE-10", "price": 90},
+        ],
+    }
+    proposed, blockers, unapplied = merge_structured_product(
+        None, product, {"title": product["title"], "vendor": product["vendor"]}
+    )
+    item = build_review_plan_item(
+        item_id="blocked-shoe",
+        currency_code="USD",
+        source_index=0,
+        source_product=product,
+        live_snapshot=None,
+        proposed=proposed,
+        operation="create",
+        blockers=blockers,
+        unapplied=unapplied,
+    )
+    item = normalize_review_plan_rows(
+        {"review_contract_version": 5, "items": [item]}
+    )["items"][0]
+
+    product_cells = item["review_preview"]["product"]["cells"]
+    first_variant = item["review_preview"]["variants"][0]["cells"]
+    assert item["operation"] == "blocked"
+    assert all(cell["disposition"] != "blocked" for cell in product_cells)
+    assert next(cell for cell in first_variant if cell["column_key"] == "option1Value")["disposition"] == "blocked"
+    assert next(cell for cell in first_variant if cell["column_key"] == "sku")["disposition"] == "applicable"
+    assert next(cell for cell in first_variant if cell["column_key"] == "price")["disposition"] == "applicable"
+
+
 def test_v5_preview_hydrates_unchanged_product_and_positional_variant_evidence():
     product = {
         "title": "Source Shirt",

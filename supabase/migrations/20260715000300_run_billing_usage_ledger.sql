@@ -84,8 +84,8 @@ BEGIN
   new_processed := cycle_usage.files_processed;
   IF billable AND new_processed > cycle_usage.files_included THEN
     UPDATE public.billing_usage_events SET
-      charge_amount = least(0.85, greatest(0, 500 - cycle_usage.overage_charges_recorded)),
-      charge_status = CASE WHEN cycle_usage.overage_charges_recorded < 500 THEN 'pending' ELSE 'not_required' END
+      charge_amount = 0,
+      charge_status = 'not_required'
     WHERE run_id = NEW.run_id;
   END IF;
   RETURN NEW;

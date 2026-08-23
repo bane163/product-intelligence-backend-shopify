@@ -47,7 +47,7 @@ class SeedDefaultsPayload(BaseModel):
     name: str = "OpenAI"
     provider: str = "openai"
     base_url: str = "https://api.openai.com/v1"
-    model_id: str = "gpt-5.4-mini"
+    model_id: str = "gpt-5.6-luna"
     version: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None

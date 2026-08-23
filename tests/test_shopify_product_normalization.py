@@ -2,9 +2,49 @@ from application.domain.shopify_product_normalization import (
     build_product_payload,
     build_product_set_identifier,
     build_product_set_input,
+    canonicalize_single_option_variant_titles,
     normalize_product_options,
     normalize_variant_inputs,
 )
+
+
+def test_single_option_variant_titles_are_canonicalized_without_guessing() -> None:
+    product = {
+        "options": [{"name": "Size", "values": ["8", "10"]}],
+        "variants": [
+            {"title": " 8 ", "sku": "GLOW-8"},
+            {"title": "10", "option1": "10", "sku": "GLOW-10"},
+            {"title": "12", "sku": "GLOW-12"},
+        ],
+    }
+
+    assert canonicalize_single_option_variant_titles(product)
+    assert [variant.get("option1") for variant in product["variants"]] == [
+        "8",
+        "10",
+        None,
+    ]
+    assert product["variants"][0]["title"] == " 8 "
+    assert not canonicalize_single_option_variant_titles(product)
+
+
+def test_single_option_variant_title_uses_declared_case_and_multi_option_is_untouched() -> None:
+    single = {
+        "productOptions": [{"name": "Color", "values": [{"name": "Forest Green"}]}],
+        "variants": [{"title": " forest green "}],
+    }
+    multiple = {
+        "options": [
+            {"name": "Color", "values": ["Blue"]},
+            {"name": "Size", "values": ["S"]},
+        ],
+        "variants": [{"title": "Blue / S"}],
+    }
+
+    assert canonicalize_single_option_variant_titles(single)
+    assert single["variants"][0]["option1"] == "Forest Green"
+    assert not canonicalize_single_option_variant_titles(multiple)
+    assert "option1" not in multiple["variants"][0]
 
 
 def test_build_product_payload_preserves_explicit_clear_values() -> None:

@@ -12,7 +12,7 @@ from .utils import parse_products_json, require_shop_domain, resolve_shop_domain
 router = APIRouter()
 
 
-def _enrich_token_usage(drafts: list[dict[str, Any]], ctx: AppContext, tenant: str) -> None:
+def _enrich_usage(drafts: list[dict[str, Any]], ctx: AppContext, tenant: str) -> None:
     related_by_draft: list[list[str]] = []
     all_ids: list[str] = []
     for draft in drafts:
@@ -32,6 +32,35 @@ def _enrich_token_usage(drafts: list[dict[str, Any]], ctx: AppContext, tenant: s
             "recorded_run_count": len(recorded),
             "related_run_count": len(ids),
         }
+        operations: dict[str, dict[str, Any]] = {}
+        for run_id in ids:
+            summary = summaries.get(run_id)
+            if not isinstance(summary, dict):
+                continue
+            operation_id = str(summary.get("billing_operation_id") or "").strip()
+            usage = summary.get("credit_usage")
+            if operation_id and isinstance(usage, dict):
+                operations[operation_id] = usage
+        if not operations:
+            draft["credit_usage"] = None
+            continue
+        usages = list(operations.values())
+        draft["credit_usage"] = {
+            "amount": sum(max(0, int(item.get("amount") or 0)) for item in usages),
+            "state": (
+                "estimated"
+                if any(item.get("state") == "estimated" for item in usages)
+                else "actual"
+            ),
+            "operation_count": len(usages),
+        }
+
+
+def _enrich_token_usage(
+    drafts: list[dict[str, Any]], ctx: AppContext, tenant: str
+) -> None:
+    """Backward-compatible name for callers that still request telemetry enrichment."""
+    _enrich_usage(drafts, ctx, tenant)
 
 
 @router.post("/product-drafts", summary="Save extracted products as draft")
@@ -84,7 +113,7 @@ async def list_product_drafts(
     from application.use_cases.drafts.list_product_drafts import execute as list_drafts_execute
     tenant = require_shop_domain(request, shop_domain)
     drafts = list_drafts_execute(supabase=ctx.supabase, limit=limit, offset=offset, search=search, sort_by=sort_by, sort_dir=sort_dir, shop_domain=tenant)
-    _enrich_token_usage(drafts, ctx, tenant)
+    _enrich_usage(drafts, ctx, tenant)
     return {"drafts": drafts}
 
 

@@ -29,12 +29,12 @@ query productsForAudit($first: Int!, $after: String, $query: String) {
           }
         }
         featuredImage {
-          url
+          url(transform: {maxWidth: 80, maxHeight: 80})
           altText
         }
         images(first: 10) {
           nodes {
-            url
+            url(transform: {maxWidth: 80, maxHeight: 80})
             altText
           }
         }

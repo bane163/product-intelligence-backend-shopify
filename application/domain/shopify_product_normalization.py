@@ -25,6 +25,69 @@ _CORE_PRODUCT_ALIASES = {
 }
 
 
+def canonicalize_single_option_variant_titles(product: Dict[str, Any]) -> bool:
+    """Copy an exact single-option title alias into its authoritative column.
+
+    Extractors occasionally place a variant's sole option value in ``title``.
+    Only the unambiguous one-dimension case is repaired: the title must match
+    one declared value after trimming and case-folding. The declared spelling
+    wins, and multi-option titles are deliberately never parsed or guessed.
+    """
+    raw_options = (
+        product.get("productOptions")
+        if isinstance(product.get("productOptions"), list)
+        else product.get("options")
+    )
+    if not isinstance(raw_options, list) or len(raw_options) != 1:
+        return False
+    option = raw_options[0]
+    if not isinstance(option, dict):
+        return False
+    raw_values = option.get("values")
+    if not isinstance(raw_values, list):
+        raw_values = option.get("optionValues")
+    if not isinstance(raw_values, list):
+        return False
+    declared: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for entry in raw_values:
+        value = entry.get("name") if isinstance(entry, dict) else entry
+        if not isinstance(value, str) or not value.strip():
+            continue
+        canonical = value.strip()
+        folded = canonical.casefold()
+        if folded in declared and declared[folded] != canonical:
+            ambiguous.add(folded)
+        else:
+            declared[folded] = canonical
+    for folded in ambiguous:
+        declared.pop(folded, None)
+
+    raw_variants = product.get("variants")
+    variants = (
+        raw_variants.get("nodes")
+        if isinstance(raw_variants, dict)
+        else raw_variants
+    )
+    if not isinstance(variants, list):
+        return False
+    changed = False
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        option1 = variant.get("option1")
+        if isinstance(option1, str) and option1.strip():
+            continue
+        title = variant.get("title")
+        if not isinstance(title, str):
+            continue
+        canonical = declared.get(title.strip().casefold())
+        if canonical is not None:
+            variant["option1"] = canonical
+            changed = True
+    return changed
+
+
 def normalize_core_product(product: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize extracted and Shopify product aliases to ProductSetInput keys."""
     result: Dict[str, Any] = {}
@@ -165,6 +228,21 @@ def build_product_set_input(product: Dict[str, Any]) -> Dict[str, Any]:
         payload["productOptions"] = normalize_product_options(raw_options)
     if isinstance(raw_variants, list):
         payload["variants"] = normalize_variant_inputs(raw_variants)
+    raw_files = product.get("files")
+    if isinstance(raw_files, list) and raw_files:
+        normalized_files = [
+            {
+                key: value
+                for key, value in item.items()
+                if key in {"id", "contentType", "originalSource", "alt", "filename"}
+                and value not in (None, "")
+            }
+            for item in raw_files
+            if isinstance(item, dict)
+            and (item.get("id") or item.get("originalSource"))
+        ]
+        if normalized_files:
+            payload["files"] = normalized_files
     return payload
 
 

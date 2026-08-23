@@ -100,6 +100,23 @@ class RunEventEmitter:
                     "total_tokens": self.usage_totals["total_tokens"],
                 },
             )
+            try:
+                service = getattr(self.supabase, "_service", None)
+                run = self.supabase.runs.get_run(self.run_id) or {}
+                operation_id = str(run.get("billing_operation_id") or "").strip()
+                if operation_id and service is not None:
+                    service.record_provider_usage_event(
+                        operation_id=operation_id,
+                        provider_call_key=f"{kwargs.get('phase', 'provider')}:{self.event_seq}",
+                        provider=str(metadata.get("provider") or "openai"),
+                        model=(str(metadata.get("model_name")) if metadata.get("model_name") else None),
+                        usage={**usage, **normalized_usage},
+                        succeeded=True,
+                    )
+            except Exception:
+                # Run usage totals are still retained and terminal settlement
+                # conservatively uses the reservation maximum if needed.
+                pass
 
         if isinstance(metadata, dict) and metadata.get("model_name"):
             self.supabase.runs.create_or_update_run(

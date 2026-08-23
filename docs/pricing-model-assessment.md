@@ -1,108 +1,49 @@
-# Pricing Model Assessment (Supabase + OpenAI + FastAPI)
+# Processing-credit pricing and rollout
 
-This document gives a production pricing framework for your app based on:
-- Supabase (database, storage, realtime)
-- OpenAI (LLM usage)
-- FastAPI backend deployment (API + worker)
+Stockpile uses Shopify App Pricing with one monthly meter named
+`processing_credits`. Merchants see credits; provider pages, tokens, runtime,
+and storage remain internal cost inputs.
 
-## 1) Recommended pricing model
+| Plan | Monthly price | Included credits | Overage |
+|---|---:|---:|---:|
+| Starter | $19 | 1,900 | $0.01/credit |
+| Growth | $49 | 5,400 | $0.01/credit |
+| Scale | $149 | 17,800 | $0.01/credit |
 
-Use a **hybrid model**: monthly platform subscription + usage overage.
+Credits reset on the monthly Shopify billing cycle and do not roll over. There
+is no processing trial or annual option at launch. Overage starts disabled and
+the merchant can set a hard monthly limit from $0 through $500.
 
-Why this fits your stack:
-- OpenAI costs are variable, so overage protects margins.
-- Supabase and backend have fixed monthly costs, so base subscription ensures predictable revenue.
-- Merchants still get predictable plan pricing with a clear included usage amount.
+## Cost conversion
 
----
-
-## 2) Target unit economics
-
-Target gross margin: **~80%**.
-
-Core formula:
+Every paid operation is quoted and settled against the immutable rate card that
+was effective when it was reserved:
 
 ```text
-blended_variable_cost_per_file =
-  openai_cost_per_file
-  + supabase_variable_cost_per_file
-  + backend_runtime_cost_per_file
-
-minimum_price_per_file_for_80_percent_margin =
-  blended_variable_cost_per_file / (1 - 0.80)
-  = blended_variable_cost_per_file * 5
+raw variable cost = model tokens + document-analysis pages + platform floor
+credits = ceil(raw variable cost × 1.25 ÷ 0.30 × 100)
 ```
 
-Practical rule:
-- Set overage price to **5x measured variable cost per file** (with a floor).
-- Recalculate monthly as token patterns change.
+GPT-5.6 Luna v1 uses $0.20 per million input tokens, $0.02 per million cached
+input tokens, and $1.20 per million output tokens. Cache writes cost 1.25 times
+uncached input. Requests above 272,000 input tokens use the full-request 2x
+input and 1.5x output multipliers. If cached-token telemetry is absent, all
+input is conservatively priced as uncached.
 
----
+Azure Document Intelligence's page rate and the calibrated operation platform
+floors are deployment configuration. Credit enforcement must remain disabled
+until the benchmark matrix confirms those inputs, complete paid-call capture,
+quotes at or above actual settlement, and at least 70% modeled variable margin.
 
-## 3) Cost structure to include in pricing
+## Billing behavior
 
-## Fixed monthly costs (baseline)
-- Supabase plan: typically **$25-$100+ / month** depending plan and usage.
-- FastAPI hosting (API + worker): typically **$40-$180 / month** for small-to-mid production.
-- Monitoring/logging/misc infra: typically **$20-$80 / month**.
+Unsupported, corrupt, and password-protected files are rejected before a
+reservation. Successful paid calls settle only consumed work up to the quoted
+maximum. Provider/platform failures release unused reservations; estimator
+misses are absorbed. Shopify writes, uploads, and review actions are not metered
+unless they invoke a paid provider.
 
-Estimated fixed baseline: **$85-$360 / month**.
-
-## Variable costs (per processed file/job)
-- OpenAI tokens (input + output) — usually the largest variable driver.
-- Supabase variable usage (storage growth, egress, heavy realtime usage).
-- Backend CPU time for processing/conversion/queue work.
-
----
-
-## 4) Recommended launch pricing (Hybrid)
-
-These numbers are designed for your selected **growth target (50-300 files/month)** and margin objective, assuming you keep blended variable cost near or below ~$0.17/file.
-
-| Plan | Monthly Price | Included Files | Overage |
-|---|---:|---:|---:|
-| Starter | $79 | 80 files | max($0.85, 5x measured variable cost/file) |
-| Growth | $219 | 250 files | max($0.85, 5x measured variable cost/file) |
-| Scale | $599 | 700 files | max($0.85, 5x measured variable cost/file) |
-
-Additional pricing policy:
-- Annual billing discount: **15%**.
-- If measured blended variable cost rises above **$0.17/file**, increase prices/overage using the formula above.
-
----
-
-## 5) Backend deployment recommendation (cost-aware)
-
-For early production, deploy:
-- **FastAPI API service** (always on)
-- **Worker service** (can scale independently)
-
-Use one platform for both (for simplicity), then split by workload later if needed.
-
-Recommended setup:
-1. Small always-on API instance.
-2. Separate worker instance with autoscaling based on queue depth.
-3. Keep Supabase managed; do not self-host Postgres initially.
-
-This gives better cost control than a single oversized instance and lets heavy jobs scale without overpaying for idle API capacity.
-
----
-
-## 6) Pricing operations checklist (monthly)
-
-1. Measure:
-   - Avg input/output tokens per file
-   - Avg compute time per file
-   - Supabase storage/egress growth
-2. Recompute `blended_variable_cost_per_file`.
-3. Verify overage >= `5x blended_variable_cost_per_file`.
-4. Check gross margin by plan (Starter/Growth/Scale).
-5. Adjust included limits or plan prices if margin drops below target.
-
----
-
-## 7) Immediate next actions
-
-1. Instrument cost telemetry per run (tokens, runtime, storage deltas).
-2. Launch with the 3 hybrid tiers above.
-3. Review actual margins after first full billing cycle and adjust overage first (before changing plan names/features).
+Shopify subscription state comes from the Partner API and usage is delivered
+through the App Events API outbox. `202 Accepted` means delivered but not yet
+validated, so operations must reconcile local delivered totals against Shopify
+aggregate usage and monitor Dev Dashboard validation failures.

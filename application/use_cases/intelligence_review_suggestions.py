@@ -70,7 +70,9 @@ async def preview(
             continue
         audited_product = _resolve_suggestion_product(suggestion, audit)
         gid = str(suggestion.get("product_id") or "").strip() or await _resolve_product_gid(shopify, audited_product)
-        live = _normalize_shopify_product(await shopify.get_product(gid)) if gid else {}
+        response = await shopify.get_product(gid) if gid else {}
+        currency = (response.get("data", {}).get("shop") or {}).get("currencyCode")
+        live = _normalize_shopify_product(response) if gid else {}
         fields: list[dict[str, Any]] = []
         for field, ai_value in patch.items():
             normalized_field = {"product_category": "product_type", "description": "body_html"}.get(field, field)
@@ -97,6 +99,7 @@ async def preview(
                 "audited_value": audited_value,
                 "current_value": current_value,
                 "proposed_value": edited.get(field, ai_value),
+                "value_metadata": {"current": {"currency_code": currency}, "proposed": {"currency_code": currency}},
                 "changed_since_audit": changed,
                 "actionable": policy["supported"] and not validation_errors,
                 "validation_errors": validation_errors,

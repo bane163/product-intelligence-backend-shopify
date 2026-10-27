@@ -1079,6 +1079,7 @@ def _review_row(
     disposition: str,
     change_kind: str,
     value_type: str | None = None,
+    value_metadata: dict[str, Any] | None = None,
     reason_codes: list[str] | None = None,
     subject_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1158,6 +1159,7 @@ def _review_row(
         "disposition": disposition,
         "change_kind": change_kind,
         "value_type": resolved_value_type,
+        **({"value_metadata": deepcopy(value_metadata)} if value_metadata else {}),
         "edit_schema": edit_schema,
     }
     if reason_codes:
@@ -1614,6 +1616,7 @@ def _preview_cell(
         "current": deepcopy(current),
         "proposed": deepcopy(proposed),
         "original_proposed": deepcopy(source.get("original_proposed", proposed)),
+        "value_metadata": deepcopy(source.get("value_metadata") or {"current": {"currency_code": item.get("currency_code")}, "proposed": {"currency_code": item.get("currency_code")}}),
         "change_id": change_id,
         "edit_target": edit_target,
         "included": bool(source.get("included", item.get("selected", False))),
@@ -2530,6 +2533,7 @@ def review_changes(
                         disposition=disposition,
                         change_kind=_kind(old or None, metafield),
                         value_type="metafield" if field == "value" else "text",
+                        value_metadata={"current": {"metafield_type": old.get("type")}, "proposed": {"metafield_type": metafield.get("type")}} if field == "value" else None,
                         reason_codes=reason_codes,
                     )
                 )
@@ -3589,6 +3593,10 @@ def build_review_plan_item(
         )
         blocker.setdefault("context", {"field": blocker.get("field")})
         blocker.setdefault("remedies", ["edit", "exclude_product"])
+    for row in exact_review:
+        metadata = row.setdefault("value_metadata", {})
+        for side in ("current", "proposed"):
+            metadata.setdefault(side, {}).setdefault("currency_code", str(currency_code))
     single_variant_match = proposed_copy.pop("_review_single_variant_match", None)
     item = {
         "item_id": str(item_id),

@@ -1,5 +1,5 @@
 """Canonical Catalog Health fields exposed with authenticated live Shopify values."""
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, NotRequired
 
 CatalogFieldId = Literal[
     'title', 'body_html', 'vendor', 'product_type', 'seo_title',
@@ -10,3 +10,4 @@ CatalogFieldId = Literal[
 class CatalogCurrentField(TypedDict):
     field: CatalogFieldId
     value: Any
+    value_metadata: NotRequired[dict[str, Any]]

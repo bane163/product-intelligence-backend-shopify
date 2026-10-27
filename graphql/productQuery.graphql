@@ -1,4 +1,5 @@
 query product($id: ID!) {
+  shop { currencyCode }
   node(id: $id) {
     ... on Product {
       id

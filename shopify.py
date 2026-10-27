@@ -466,8 +466,8 @@ class ShopifyClient:
                 cursor = next_cursor
             live[connection] = values
         fields = ("title", "body_html", "vendor", "product_type", "seo_title", "seo_description", "tags", "metafields")
-        return [{"field": field, "value": live.get(field)} for field in fields] + [
-            {"field": "variant_operations", "value": {"options": live.get("options", []), "variants": live["variants"]}}
+        return [{"field": field, "value": live.get(field), "value_metadata": {"currency_code": (response.get("data", {}).get("shop") or {}).get("currencyCode")}} for field in fields] + [
+            {"field": "variant_operations", "value": {"options": live.get("options", []), "variants": live["variants"]}, "value_metadata": {"currency_code": (response.get("data", {}).get("shop") or {}).get("currencyCode")}}
         ]
 
     async def set_product_variant_matrix(

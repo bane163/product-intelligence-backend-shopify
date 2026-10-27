@@ -2,13 +2,25 @@
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+import hmac
+import os
+from .utils import require_authenticated_shop_domain
 from pydantic import BaseModel, Field
 
 import auth
 from app_context import AppContext, get_ctx
 
-router = APIRouter()
+def require_model_service(request: Request) -> str:
+    expected = os.getenv("INTERNAL_SERVICE_KEY", "").strip()
+    supplied = request.headers.get("x-stockpile-service-key", "").strip()
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=401, detail="Invalid service authentication")
+    if not request.headers.get("x-shop-domain", "").strip():
+        raise HTTPException(status_code=400, detail="Missing authenticated shop_domain header")
+    return require_authenticated_shop_domain(request)
+
+router = APIRouter(dependencies=[Depends(require_model_service)])
 
 
 class LLMConfigCreatePayload(BaseModel):
@@ -47,7 +59,7 @@ class SeedDefaultsPayload(BaseModel):
     name: str = "OpenAI"
     provider: str = "openai"
     base_url: str = "https://api.openai.com/v1"
-    model_id: str = "gpt-5.6-luna"
+    model_id: str = "gpt-6-luna"
     version: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
@@ -62,16 +74,18 @@ class SeedPayload(BaseModel):
 
 
 @router.get("/llm-configs", summary="List llm model configs for shop")
-async def list_llm_configs(shop_domain: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
+async def list_llm_configs(shop_domain: str, ctx: AppContext = Depends(get_ctx), tenant: str = Depends(require_model_service)) -> dict[str, Any]:
     from application.use_cases.llm_configs.list_llm_configs import execute as list_llm_configs_execute
 
+    if shop_domain.lower() != tenant: raise HTTPException(status_code=403, detail="shop_domain mismatch")
     configs = list_llm_configs_execute(supabase=ctx.supabase, shop_domain=shop_domain)
     return {"configs": configs}
 
 
 @router.get("/llm-configs/active", summary="Get active llm model config for shop")
-async def get_active_llm_config(shop_domain: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
+async def get_active_llm_config(shop_domain: str, ctx: AppContext = Depends(get_ctx), tenant: str = Depends(require_model_service)) -> dict[str, Any]:
     from application.use_cases.llm_configs.get_active_llm_config import execute as get_active_execute
+    if shop_domain.lower() != tenant: raise HTTPException(status_code=403, detail="shop_domain mismatch")
     config = get_active_execute(supabase=ctx.supabase, shop_domain=shop_domain)
     if not config:
         return {"config": None}
@@ -101,7 +115,8 @@ async def get_active_llm_config(shop_domain: str, ctx: AppContext = Depends(get_
 
 
 @router.post("/llm-configs", summary="Create llm model config")
-async def create_llm_config(payload: LLMConfigCreatePayload, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
+async def create_llm_config(payload: LLMConfigCreatePayload, ctx: AppContext = Depends(get_ctx), tenant: str = Depends(require_model_service)) -> dict[str, Any]:
+    if payload.shop_domain.lower() != tenant: raise HTTPException(status_code=403, detail="shop_domain mismatch")
     try:
         from application.use_cases.llm_configs.create_llm_config import execute as create_llm_execute
         created = create_llm_execute(supabase=ctx.supabase, payload=payload.model_dump())
@@ -111,7 +126,8 @@ async def create_llm_config(payload: LLMConfigCreatePayload, ctx: AppContext = D
 
 
 @router.post("/llm-configs/seed", summary="Seed default OpenAI llm model config")
-async def seed_llm_config(payload: SeedPayload) -> dict[str, Any]:
+async def seed_llm_config(payload: SeedPayload, tenant: str = Depends(require_model_service)) -> dict[str, Any]:
+    if payload.shop_domain.lower() != tenant: raise HTTPException(status_code=403, detail="shop_domain mismatch")
     return auth._seed_default_llm_configs_on_install(
         payload.shop_domain,
         include_ollama=False,
@@ -126,11 +142,11 @@ async def seed_llm_config(payload: SeedPayload) -> dict[str, Any]:
 
 @router.patch("/llm-configs/{config_id}", summary="Update llm model config")
 async def update_llm_config(
-    config_id: str, payload: LLMConfigUpdatePayload, ctx: AppContext = Depends(get_ctx)
+    config_id: str, payload: LLMConfigUpdatePayload, ctx: AppContext = Depends(get_ctx), tenant: str = Depends(require_model_service)
 ) -> dict[str, Any]:
     try:
         from application.use_cases.llm_configs.update_llm_config import execute as update_llm_execute
-        updated = update_llm_execute(supabase=ctx.supabase, config_id=config_id, payload=payload.model_dump(exclude_unset=True))
+        updated = update_llm_execute(supabase=ctx.supabase, config_id=config_id, payload=payload.model_dump(exclude_unset=True), shop_domain=tenant)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     if not updated:
@@ -140,8 +156,9 @@ async def update_llm_config(
 
 @router.post("/llm-configs/{config_id}/activate", summary="Activate llm model config")
 async def activate_llm_config(
-    config_id: str, payload: ActivatePayload, ctx: AppContext = Depends(get_ctx)
+    config_id: str, payload: ActivatePayload, ctx: AppContext = Depends(get_ctx), tenant: str = Depends(require_model_service)
 ) -> dict[str, Any]:
+    if payload.shop_domain.lower() != tenant: raise HTTPException(status_code=403, detail="shop_domain mismatch")
     from application.use_cases.llm_configs.activate_llm_config import execute as activate_llm_execute
     updated = activate_llm_execute(supabase=ctx.supabase, config_id=config_id, shop_domain=payload.shop_domain)
     if not updated:
@@ -150,7 +167,8 @@ async def activate_llm_config(
 
 
 @router.delete("/llm-configs/{config_id}", summary="Delete llm model config")
-async def delete_llm_config(config_id: str, shop_domain: str, ctx: AppContext = Depends(get_ctx)) -> dict[str, Any]:
+async def delete_llm_config(config_id: str, shop_domain: str, ctx: AppContext = Depends(get_ctx), tenant: str = Depends(require_model_service)) -> dict[str, Any]:
+    if shop_domain.lower() != tenant: raise HTTPException(status_code=403, detail="shop_domain mismatch")
     from application.use_cases.llm_configs.delete_llm_config import execute as delete_llm_execute
     if not delete_llm_execute(supabase=ctx.supabase, config_id=config_id, shop_domain=shop_domain):
         raise HTTPException(status_code=404, detail="Config not found")

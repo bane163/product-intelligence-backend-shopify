@@ -112,7 +112,7 @@ def _seed_default_llm_configs_on_install(
         "name": "OpenAI (Default)",
         "provider": "openai",
         "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        "model_id": os.getenv("OPENAI_MODEL_ID", "gpt-5.6-luna"),
+        "model_id": os.getenv("OPENAI_MODEL_ID", "gpt-6-luna"),
         "version": None,
         "temperature": None,
         "max_tokens": None,

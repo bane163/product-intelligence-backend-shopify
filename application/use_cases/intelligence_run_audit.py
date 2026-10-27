@@ -62,7 +62,9 @@ def _add_finding(
     )
 
 
-def _score_product(product: dict[str, Any], *, product_index: int = 0) -> tuple[dict[str, int], list[dict[str, Any]]]:
+def _score_product(
+    product: dict[str, Any], *, product_index: int = 0
+) -> tuple[dict[str, int], list[dict[str, Any]]]:
     findings: list[dict[str, Any]] = []
     dimensions = {
         "completeness": 100,
@@ -83,195 +85,208 @@ def _score_product(product: dict[str, Any], *, product_index: int = 0) -> tuple[
     seo_description = _to_text(product.get("seo_description"))
     tags = _to_tags(product.get("tags"))
     status = _to_text(product.get("status")).lower()
-    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    variants = (
+        product.get("variants") if isinstance(product.get("variants"), list) else []
+    )
 
     if not _to_text(product.get("title")):
-            dimensions["completeness"] -= 20
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="completeness",
-                severity="high",
-                code="missing_title",
-                message="Product title is missing.",
-                suggestion="Provide a descriptive product title.",
-                field_path="title",
-                patch_payload={"title": title},
-            )
+        dimensions["completeness"] -= 20
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="completeness",
+            severity="high",
+            code="missing_title",
+            message="Product title is missing.",
+            suggestion="Provide a descriptive product title.",
+            field_path="title",
+            patch_payload={"title": title},
+        )
     if not vendor:
-            dimensions["completeness"] -= 8
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="completeness",
-                severity="medium",
-                code="missing_vendor",
-                message="Vendor is missing.",
-                suggestion="Set the product vendor/brand.",
-                field_path="vendor",
-                patch_payload={"vendor": "Unknown Vendor"},
-            )
+        dimensions["completeness"] -= 8
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="completeness",
+            severity="medium",
+            code="missing_vendor",
+            message="Vendor is missing.",
+            suggestion="Set the product vendor/brand.",
+            field_path="vendor",
+            patch_payload={"vendor": "Unknown Vendor"},
+        )
     if not body_html:
-            dimensions["completeness"] -= 10
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="completeness",
-                severity="high",
-                code="missing_description",
-                message="Product description is missing.",
-                suggestion="Add a detailed product description.",
-                field_path="body_html",
-            )
+        dimensions["completeness"] -= 10
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="completeness",
+            severity="high",
+            code="missing_description",
+            message="Product description is missing.",
+            suggestion="Add a detailed product description.",
+            field_path="body_html",
+        )
     if not product_type:
-            dimensions["completeness"] -= 6
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="completeness",
-                severity="low",
-                code="missing_product_type",
-                message="Product type/category is missing.",
-                suggestion="Set product_type to improve structure.",
-                field_path="product_type",
-                patch_payload={"product_type": "General"},
-            )
+        dimensions["completeness"] -= 6
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="completeness",
+            severity="low",
+            code="missing_product_type",
+            message="Product type/category is missing.",
+            suggestion="Set product_type to improve structure.",
+            field_path="product_type",
+            patch_payload={"product_type": "General"},
+        )
 
     if status and status not in {"active", "draft", "archived"}:
-            dimensions["consistency"] -= 12
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="consistency",
-                severity="medium",
-                code="unexpected_status",
-                message=f"Status '{status}' is non-standard.",
-                suggestion="Use active, draft, or archived.",
-                field_path="status",
-            )
-    if variants and all(not _to_text(v.get("sku")) for v in variants if isinstance(v, dict)):
-            dimensions["consistency"] -= 8
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="consistency",
-                severity="low",
-                code="missing_variant_sku",
-                message="Variants are present but SKUs are missing.",
-                suggestion="Add SKUs to improve catalog consistency.",
-                field_path="variants[].sku",
-            )
+        dimensions["consistency"] -= 12
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="consistency",
+            severity="medium",
+            code="unexpected_status",
+            message=f"Status '{status}' is non-standard.",
+            suggestion="Use active, draft, or archived.",
+            field_path="status",
+        )
+    if variants and all(
+        not _to_text(v.get("sku")) for v in variants if isinstance(v, dict)
+    ):
+        dimensions["consistency"] -= 8
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="consistency",
+            severity="low",
+            code="missing_variant_sku",
+            message="Variants are present but SKUs are missing.",
+            suggestion="Add SKUs to improve catalog consistency.",
+            field_path="variants[].sku",
+        )
 
     if len(_to_text(product.get("title"))) < 20:
-            dimensions["seo_readiness"] -= 12
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="seo_readiness",
-                severity="medium",
-                code="short_title",
-                message="Title is short for SEO.",
-                suggestion="Use a more descriptive, keyword-rich title.",
-                field_path="title",
-            )
+        dimensions["seo_readiness"] -= 12
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="seo_readiness",
+            severity="medium",
+            code="short_title",
+            message="Title is short for SEO.",
+            suggestion="Use a more descriptive, keyword-rich title.",
+            field_path="title",
+        )
     if not seo_title:
-            dimensions["seo_readiness"] -= 10
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="seo_readiness",
-                severity="low",
-                code="missing_seo_title",
-                message="SEO title is missing.",
-                suggestion="Provide an SEO title.",
-                field_path="seo_title",
-                patch_payload={"seo_title": title[:70]},
-            )
+        dimensions["seo_readiness"] -= 10
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="seo_readiness",
+            severity="low",
+            code="missing_seo_title",
+            message="SEO title is missing.",
+            suggestion="Provide an SEO title.",
+            field_path="seo_title",
+            patch_payload={"seo_title": title[:70]},
+        )
     if not seo_description and len(body_html) < 120:
-            dimensions["seo_readiness"] -= 12
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="seo_readiness",
-                severity="medium",
-                code="missing_or_short_seo_description",
-                message="SEO description is missing or too short.",
-                suggestion="Provide an SEO description around 140-160 chars.",
-                field_path="seo_description",
-                patch_payload={
-                    "seo_description": (
-                        (body_html[:157] + "...")
-                        if len(body_html) > 160
-                        else (body_html or f"Buy {title} from our catalog.")
-                    )
-                },
-            )
+        dimensions["seo_readiness"] -= 12
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="seo_readiness",
+            severity="medium",
+            code="missing_or_short_seo_description",
+            message="SEO description is missing or too short.",
+            suggestion="Provide an SEO description around 140-160 chars.",
+            field_path="seo_description",
+            patch_payload={
+                "seo_description": (
+                    (body_html[:157] + "...")
+                    if len(body_html) > 160
+                    else (body_html or f"Buy {title} from our catalog.")
+                )
+            },
+        )
 
     if not tags:
-            dimensions["ai_discoverability"] -= 10
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="ai_discoverability",
-                severity="low",
-                code="missing_tags",
-                message="Tags are missing.",
-                suggestion="Add structured tags to improve discoverability.",
-                field_path="tags",
-                patch_payload={"tags": ", ".join([t for t in [vendor, product_type] if t]) or "General"},
-            )
-    if not _to_text(product.get("product_category") or product.get("google_shopping_category")):
-            dimensions["ai_discoverability"] -= 12
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="ai_discoverability",
-                severity="medium",
-                code="missing_category_mapping",
-                message="No taxonomy/category mapping found.",
-                suggestion="Map to a product category/taxonomy.",
-                field_path="product_category",
-                patch_payload={"product_category": product_type or "General"},
-            )
+        dimensions["ai_discoverability"] -= 10
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="ai_discoverability",
+            severity="low",
+            code="missing_tags",
+            message="Tags are missing.",
+            suggestion="Add structured tags to improve discoverability.",
+            field_path="tags",
+            patch_payload={
+                "tags": ", ".join([t for t in [vendor, product_type] if t]) or "General"
+            },
+        )
+    if not _to_text(
+        product.get("product_category") or product.get("google_shopping_category")
+    ):
+        dimensions["ai_discoverability"] -= 12
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="ai_discoverability",
+            severity="medium",
+            code="missing_category_mapping",
+            message="No taxonomy/category mapping found.",
+            suggestion="Map to a product category/taxonomy.",
+            field_path="product_category",
+            patch_payload={"product_category": product_type or "General"},
+        )
 
     if any(word in body_html.lower() for word in ["guaranteed cure", "100% safe"]):
-            dimensions["compliance"] -= 20
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="compliance",
-                severity="high",
-                code="risky_claim",
-                message="Potentially risky claim language detected.",
-                suggestion="Review and moderate regulated or absolute claims.",
-                field_path="body_html",
-            )
+        dimensions["compliance"] -= 20
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="compliance",
+            severity="high",
+            code="risky_claim",
+            message="Potentially risky claim language detected.",
+            suggestion="Review and moderate regulated or absolute claims.",
+            field_path="body_html",
+        )
 
-    if body_html and "\n" not in body_html and "•" not in body_html and "- " not in body_html:
-            dimensions["enrichment"] -= 8
-            _add_finding(
-                findings,
-                product_index=index,
-                product_title=title,
-                category="enrichment",
-                severity="low",
-                code="missing_feature_bullets",
-                message="Description lacks structured feature bullets.",
-                suggestion="Add bullet-point features for readability.",
-                field_path="body_html",
-            )
+    if (
+        body_html
+        and "\n" not in body_html
+        and "•" not in body_html
+        and "- " not in body_html
+    ):
+        dimensions["enrichment"] -= 8
+        _add_finding(
+            findings,
+            product_index=index,
+            product_title=title,
+            category="enrichment",
+            severity="low",
+            code="missing_feature_bullets",
+            message="Description lacks structured feature bullets.",
+            suggestion="Add bullet-point features for readability.",
+            field_path="body_html",
+        )
 
     for key, value in dimensions.items():
         dimensions[key] = max(0, min(100, value))
@@ -287,7 +302,9 @@ def _score_products(
     """Compatibility helper returning catalog means and product-tagged findings."""
     results = _build_product_results(products)
     component_scores = {
-        key: int(round(sum(row["component_scores"][key] for row in results) / len(results)))
+        key: int(
+            round(sum(row["component_scores"][key] for row in results) / len(results))
+        )
         for key in COMPONENT_WEIGHTS
     }
     return component_scores, [finding for row in results for finding in row["findings"]]
@@ -297,20 +314,27 @@ def _build_product_results(products: list[dict[str, Any]]) -> list[dict[str, Any
     results: list[dict[str, Any]] = []
     for index, product in enumerate(products):
         component_scores, findings = _score_product(product, product_index=index)
-        score = int(round(sum(
-            component_scores[key] * weight
-            for key, weight in COMPONENT_WEIGHTS.items()
-        ) / 100))
-        results.append({
-            "product_id": _to_text(product.get("id")),
-            "product_title": _to_text(product.get("title")),
-            "score": score,
-            "component_scores": component_scores,
-            "findings_count": len(findings),
-            "audited_snapshot": dict(product),
-            "scoring_version": SCORING_VERSION,
-            "findings": findings,
-        })
+        score = int(
+            round(
+                sum(
+                    component_scores[key] * weight
+                    for key, weight in COMPONENT_WEIGHTS.items()
+                )
+                / 100
+            )
+        )
+        results.append(
+            {
+                "product_id": _to_text(product.get("id")),
+                "product_title": _to_text(product.get("title")),
+                "score": score,
+                "component_scores": component_scores,
+                "findings_count": len(findings),
+                "audited_snapshot": dict(product),
+                "scoring_version": SCORING_VERSION,
+                "findings": findings,
+            }
+        )
     return results
 
 
@@ -341,7 +365,12 @@ async def execute(
         )
     product_results = _build_product_results(products)
     component_scores = {
-        key: int(round(sum(row["component_scores"][key] for row in product_results) / len(product_results)))
+        key: int(
+            round(
+                sum(row["component_scores"][key] for row in product_results)
+                / len(product_results)
+            )
+        )
         for key in COMPONENT_WEIGHTS
     }
     findings = [finding for row in product_results for finding in row["findings"]]
@@ -354,13 +383,19 @@ async def execute(
                 "component_scores": component_scores,
             },
         )
-    overall_score = int(round(sum(row["score"] for row in product_results) / len(product_results)))
+    overall_score = int(
+        round(sum(row["score"] for row in product_results) / len(product_results))
+    )
 
     totals = {
         "products_analyzed": len(products),
-        "critical_findings": sum(1 for item in findings if item.get("severity") == "high"),
+        "critical_findings": sum(
+            1 for item in findings if item.get("severity") == "high"
+        ),
         "high_findings": sum(1 for item in findings if item.get("severity") == "high"),
-        "medium_findings": sum(1 for item in findings if item.get("severity") == "medium"),
+        "medium_findings": sum(
+            1 for item in findings if item.get("severity") == "medium"
+        ),
         "low_findings": sum(1 for item in findings if item.get("severity") == "low"),
         "audited_products": [
             {
@@ -375,21 +410,58 @@ async def execute(
                 "seo_description": product.get("seo_description"),
             }
             for product in products
-            if _to_text(product.get("title"))
         ],
     }
 
     # Generate every child in memory before creating a visible audit record.
-    normalization_settings = supabase.intelligence.get_product_intelligence_normalization_settings(
-        shop_domain=tenant,
+    normalization_settings = (
+        supabase.intelligence.get_product_intelligence_normalization_settings(
+            shop_domain=tenant,
+        )
     )
-    suggestions = await generate_suggestions_execute(
-        supabase=supabase,
-        products=products,
-        shop_domain=tenant,
-        normalization_settings=normalization_settings,
-        trace_event=trace_event if callable(trace_event) else None,
-    )
+    generation_kwargs = {
+        "supabase": supabase,
+        "products": products,
+        "shop_domain": tenant,
+        "normalization_settings": normalization_settings,
+        "trace_event": trace_event if callable(trace_event) else None,
+    }
+    try:
+        generation = await generate_suggestions_execute(
+            **generation_kwargs,
+            include_status=True,
+        )
+    except TypeError as exc:
+        # Preserve compatibility with older injected generators while the
+        # built-in generator returns the richer enhancement status envelope.
+        if "include_status" not in str(exc):
+            raise
+        generation = await generate_suggestions_execute(**generation_kwargs)
+    if isinstance(generation, dict):
+        suggestions = [
+            item for item in generation.get("suggestions", []) if isinstance(item, dict)
+        ]
+        enhancement_status = str(generation.get("enhancement_status") or "failed")
+        enhancement_error_code = generation.get("enhancement_error_code")
+        enhancement_error_message = generation.get("enhancement_error_message")
+        enhancement_attempts = int(generation.get("enhancement_attempts") or 0)
+        ai_suggestions_count = int(generation.get("ai_suggestions_count") or 0)
+        derived_suggestions_count = int(
+            generation.get("derived_suggestions_count") or 0
+        )
+    else:
+        # Compatibility for injected/test generators and older adapters.
+        suggestions = [item for item in generation if isinstance(item, dict)]
+        enhancement_status = "ready"
+        enhancement_error_code = None
+        enhancement_error_message = None
+        enhancement_attempts = 1
+        ai_suggestions_count = sum(
+            1 for item in suggestions if item.get("value_origin") == "ai_assisted"
+        )
+        derived_suggestions_count = sum(
+            1 for item in suggestions if item.get("value_origin") == "derived"
+        )
 
     audit_id = str(uuid.uuid4())
     audit_created = False
@@ -406,6 +478,16 @@ async def execute(
             totals=totals,
             shop_domain=tenant,
             scoring_version=SCORING_VERSION,
+            enhancement_status=enhancement_status,
+            enhancement_error_code=(
+                str(enhancement_error_code) if enhancement_error_code else None
+            ),
+            enhancement_error_message=(
+                str(enhancement_error_message) if enhancement_error_message else None
+            ),
+            enhancement_attempts=enhancement_attempts,
+            ai_suggestions_count=ai_suggestions_count,
+            derived_suggestions_count=derived_suggestions_count,
             require_persistence=True,
         )
         audit_created = True
@@ -416,17 +498,24 @@ async def execute(
                 payload_preview={"audit_id": audit_id, "run_id": run_id},
             )
         supabase.intelligence.save_product_intelligence_findings(
-            audit_id=audit_id, findings=findings, shop_domain=tenant,
+            audit_id=audit_id,
+            findings=findings,
+            shop_domain=tenant,
             require_persistence=True,
         )
         supabase.intelligence.save_product_intelligence_product_results(
             audit_id=audit_id,
-            results=[{key: value for key, value in row.items() if key != "findings"} for row in product_results],
+            results=[
+                {key: value for key, value in row.items() if key != "findings"}
+                for row in product_results
+            ],
             shop_domain=tenant,
             require_persistence=True,
         )
         supabase.intelligence.save_product_intelligence_suggestions(
-            audit_id=audit_id, suggestions=suggestions, shop_domain=tenant,
+            audit_id=audit_id,
+            suggestions=suggestions,
+            shop_domain=tenant,
             require_persistence=True,
         )
         if callable(trace_event):
@@ -438,14 +527,18 @@ async def execute(
                     "suggestions_count": len(suggestions),
                 },
             )
-        supabase.intelligence.supersede_pending_product_intelligence_suggestions(
-            product_ids=[str(product.get("id") or "") for product in products],
-            superseded_by_audit_id=audit_id,
-            shop_domain=tenant,
-            require_persistence=True,
-        )
+        if enhancement_status == "ready":
+            supabase.intelligence.supersede_pending_product_intelligence_suggestions(
+                product_ids=[str(product.get("id") or "") for product in products],
+                superseded_by_audit_id=audit_id,
+                shop_domain=tenant,
+                require_persistence=True,
+            )
+        final_status = "success" if enhancement_status == "ready" else "needs_attention"
         completed = supabase.intelligence.update_product_intelligence_audit_status(
-            audit_id=audit_id, status="success", shop_domain=tenant,
+            audit_id=audit_id,
+            status=final_status,
+            shop_domain=tenant,
             require_persistence=True,
         )
         if not completed:
@@ -454,11 +547,20 @@ async def execute(
         if audit_created:
             try:
                 supabase.intelligence.update_product_intelligence_audit_status(
-                    audit_id=audit_id, status="error", shop_domain=tenant,
+                    audit_id=audit_id,
+                    status="error",
+                    shop_domain=tenant,
                     require_persistence=False,
                 )
             except Exception:
                 pass
         raise
 
-    return {**audit, **completed, "status": "success", "findings": findings, "suggestions": suggestions}
+    return {
+        **audit,
+        **completed,
+        "status": final_status,
+        "review_required": True,
+        "findings": findings,
+        "suggestions": suggestions,
+    }

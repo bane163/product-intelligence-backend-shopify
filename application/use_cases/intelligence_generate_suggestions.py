@@ -51,12 +51,31 @@ _CHILDREN_SIZE_MAP: dict[str, str] = {
 _SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "1X", "2X", "3X"]
 
 _COLOR_TOKENS = (
-    "black", "white", "blue", "navy", "red", "green", "yellow", "orange",
-    "purple", "pink", "brown", "beige", "gray", "grey",
+    "black",
+    "white",
+    "blue",
+    "navy",
+    "red",
+    "green",
+    "yellow",
+    "orange",
+    "purple",
+    "pink",
+    "brown",
+    "beige",
+    "gray",
+    "grey",
 )
 
 _MATERIAL_TOKENS = (
-    "cotton", "polyester", "wool", "linen", "leather", "denim", "silk", "nylon",
+    "cotton",
+    "polyester",
+    "wool",
+    "linen",
+    "leather",
+    "denim",
+    "silk",
+    "nylon",
 )
 
 _NORMALIZATION_CATEGORIES = {
@@ -99,7 +118,9 @@ def _strip_markdown_json_fence(text: str) -> str:
     return stripped
 
 
-def _resolve_model_env(supabase: SupabaseNamespacedPort, shop_domain: str) -> dict[str, str]:
+def _resolve_model_env(
+    supabase: SupabaseNamespacedPort, shop_domain: str
+) -> dict[str, str]:
     active_model = supabase.llm_configs.get_active_llm_model_config(shop_domain)
     if not active_model:
         raise ValueError("No active LLM model config found for this shop")
@@ -148,7 +169,9 @@ def _strip_html(value: str) -> str:
 
 def _collect_variant_size_tokens(product: dict[str, Any]) -> list[str]:
     tokens: list[str] = []
-    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    variants = (
+        product.get("variants") if isinstance(product.get("variants"), list) else []
+    )
     for variant in variants:
         if not isinstance(variant, dict):
             continue
@@ -184,7 +207,9 @@ def _extract_existing_option_names(product: dict[str, Any]) -> set[str]:
         if name:
             names.add(name)
 
-    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    variants = (
+        product.get("variants") if isinstance(product.get("variants"), list) else []
+    )
     for variant in variants:
         if not isinstance(variant, dict):
             continue
@@ -215,11 +240,18 @@ def _extract_inferred_dimensions(
         if not raw or len(raw) < 2:
             continue
         if re.search(rf"\b{re.escape(raw)}\b", merged_text):
-            source = "title" if re.search(rf"\b{re.escape(raw)}\b", title_lower) else "description"
+            source = (
+                "title"
+                if re.search(rf"\b{re.escape(raw)}\b", title_lower)
+                else "description"
+            )
             size_hits.append((raw, canonical, source))
     if size_hits and "size" not in existing_option_names:
         detected = [item[0] for item in size_hits]
-        canonical_values = sorted({item[1] for item in size_hits}, key=lambda item: _SIZE_ORDER.index(item) if item in _SIZE_ORDER else 999)
+        canonical_values = sorted(
+            {item[1] for item in size_hits},
+            key=lambda item: _SIZE_ORDER.index(item) if item in _SIZE_ORDER else 999,
+        )
         evidence_sources = sorted({item[2] for item in size_hits})
         dimensions.append(
             {
@@ -231,26 +263,54 @@ def _extract_inferred_dimensions(
             }
         )
 
-    color_hits = [token for token in _COLOR_TOKENS if re.search(rf"\b{re.escape(token)}\b", merged_text)]
+    color_hits = [
+        token
+        for token in _COLOR_TOKENS
+        if re.search(rf"\b{re.escape(token)}\b", merged_text)
+    ]
     if color_hits and "color" not in existing_option_names:
         dimensions.append(
             {
                 "dimension": "Color",
                 "detected_values": color_hits,
                 "canonical_values": [item.title() for item in sorted(set(color_hits))],
-                "evidence_sources": ["title" if any(re.search(rf"\b{re.escape(t)}\b", title_lower) for t in color_hits) else "description"],
+                "evidence_sources": [
+                    (
+                        "title"
+                        if any(
+                            re.search(rf"\b{re.escape(t)}\b", title_lower)
+                            for t in color_hits
+                        )
+                        else "description"
+                    )
+                ],
                 "confidence": 0.84,
             }
         )
 
-    material_hits = [token for token in _MATERIAL_TOKENS if re.search(rf"\b{re.escape(token)}\b", merged_text)]
+    material_hits = [
+        token
+        for token in _MATERIAL_TOKENS
+        if re.search(rf"\b{re.escape(token)}\b", merged_text)
+    ]
     if material_hits and "material" not in existing_option_names:
         dimensions.append(
             {
                 "dimension": "Material",
                 "detected_values": material_hits,
-                "canonical_values": [item.title() for item in sorted(set(material_hits))],
-                "evidence_sources": ["title" if any(re.search(rf"\b{re.escape(t)}\b", title_lower) for t in material_hits) else "description"],
+                "canonical_values": [
+                    item.title() for item in sorted(set(material_hits))
+                ],
+                "evidence_sources": [
+                    (
+                        "title"
+                        if any(
+                            re.search(rf"\b{re.escape(t)}\b", title_lower)
+                            for t in material_hits
+                        )
+                        else "description"
+                    )
+                ],
                 "confidence": 0.82,
             }
         )
@@ -259,7 +319,9 @@ def _extract_inferred_dimensions(
 
 
 def _derive_sku_prefix(product: dict[str, Any], title: str) -> str:
-    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    variants = (
+        product.get("variants") if isinstance(product.get("variants"), list) else []
+    )
     for variant in variants:
         if not isinstance(variant, dict):
             continue
@@ -287,12 +349,20 @@ def _build_variant_operations(
     title: str,
     dimensions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    variants = product.get("variants") if isinstance(product.get("variants"), list) else []
+    variants = (
+        product.get("variants") if isinstance(product.get("variants"), list) else []
+    )
     baseline = variants[0] if variants and isinstance(variants[0], dict) else {}
-    return build_variant_matrix(dimensions=dimensions[:3], sku_prefix=_derive_sku_prefix(product, title), price=baseline.get("price", "0.00"))
+    return build_variant_matrix(
+        dimensions=dimensions[:3],
+        sku_prefix=_derive_sku_prefix(product, title),
+        price=baseline.get("price", "0.00"),
+    )
 
 
-def _metafield(namespace: str, key: str, value: Any, mf_type: str = "single_line_text_field") -> dict[str, str]:
+def _metafield(
+    namespace: str, key: str, value: Any, mf_type: str = "single_line_text_field"
+) -> dict[str, str]:
     return {
         "namespace": namespace,
         "key": key,
@@ -314,7 +384,11 @@ def _create_normalization_suggestion(
     shop_domain: str,
     patch_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = patch_payload if isinstance(patch_payload, dict) and patch_payload else {"metafields": metafields or []}
+    payload = (
+        patch_payload
+        if isinstance(patch_payload, dict) and patch_payload
+        else {"metafields": metafields or []}
+    )
     return {
         "suggestion_id": str(uuid.uuid4()),
         "finding_id": str(uuid.uuid4()),
@@ -340,7 +414,11 @@ def _build_normalization_suggestions(
         **_default_normalization_settings(),
         **(normalization_settings or {}),
     }
-    categories = settings.get("categories") if isinstance(settings.get("categories"), dict) else {}
+    categories = (
+        settings.get("categories")
+        if isinstance(settings.get("categories"), dict)
+        else {}
+    )
     threshold_raw = settings.get("confidence_threshold")
     confidence_threshold = (
         max(0.0, min(1.0, float(threshold_raw)))
@@ -362,7 +440,9 @@ def _build_normalization_suggestions(
 
     for index, product in enumerate(products):
         title = _to_text(product.get("title")) or f"Product #{index + 1}"
-        body = _strip_html(_to_text(product.get("body_html") or product.get("descriptionHtml")))
+        body = _strip_html(
+            _to_text(product.get("body_html") or product.get("descriptionHtml"))
+        )
         body_lower = body.lower()
         size_tokens = _collect_variant_size_tokens(product)
         existing_option_names = _extract_existing_option_names(product)
@@ -412,7 +492,9 @@ def _build_normalization_suggestions(
                         _metafield(
                             "extractor",
                             "normalized_size_alias_map",
-                            json.dumps({raw: canonical for raw, canonical in alias_pairs}),
+                            json.dumps(
+                                {raw: canonical for raw, canonical in alias_pairs}
+                            ),
                             "json",
                         ),
                     ],
@@ -437,13 +519,17 @@ def _build_normalization_suggestions(
                         _metafield(
                             "extractor",
                             "normalized_supplier_size_map",
-                            json.dumps({raw: canonical for raw, canonical in supplier_pairs}),
+                            json.dumps(
+                                {raw: canonical for raw, canonical in supplier_pairs}
+                            ),
                             "json",
                         ),
                     ],
                     details={
                         "detected_value": [raw for raw, _ in supplier_pairs],
-                        "canonical_value": [canonical for _, canonical in supplier_pairs],
+                        "canonical_value": [
+                            canonical for _, canonical in supplier_pairs
+                        ],
                     },
                     shop_domain=shop_domain,
                 )
@@ -462,19 +548,27 @@ def _build_normalization_suggestions(
                         _metafield(
                             "extractor",
                             "normalized_children_size_map",
-                            json.dumps({raw: canonical for raw, canonical in children_pairs}),
+                            json.dumps(
+                                {raw: canonical for raw, canonical in children_pairs}
+                            ),
                             "json",
                         ),
                     ],
                     details={
                         "detected_value": [raw for raw, _ in children_pairs],
-                        "canonical_value": [canonical for _, canonical in children_pairs],
+                        "canonical_value": [
+                            canonical for _, canonical in children_pairs
+                        ],
                     },
                     shop_domain=shop_domain,
                 )
             )
 
-        if has_numeric_size and has_text_size and allowed("structured_unstructured_size", 0.9):
+        if (
+            has_numeric_size
+            and has_text_size
+            and allowed("structured_unstructured_size", 0.9)
+        ):
             suggestions.append(
                 _create_normalization_suggestion(
                     product_index=index,
@@ -484,7 +578,12 @@ def _build_normalization_suggestions(
                     severity="low",
                     confidence=0.9,
                     metafields=[
-                        _metafield("extractor", "normalized_size_format", "hybrid", "single_line_text_field"),
+                        _metafield(
+                            "extractor",
+                            "normalized_size_format",
+                            "hybrid",
+                            "single_line_text_field",
+                        ),
                     ],
                     details={
                         "detected_value": "numeric_and_text_sizes",
@@ -522,7 +621,9 @@ def _build_normalization_suggestions(
                     )
                 )
 
-        unit_matches = re.findall(r"\b\d+(?:\.\d+)?\s*(inches|inch|in|cm|mm|m)\b", body_lower)
+        unit_matches = re.findall(
+            r"\b\d+(?:\.\d+)?\s*(inches|inch|in|cm|mm|m)\b", body_lower
+        )
         detected_units = sorted({match for match in unit_matches})
         canonical_unit = "cm" if unit_system == "metric" else "in"
         if len(detected_units) >= 2 and allowed("mixed_units", 0.92):
@@ -536,7 +637,9 @@ def _build_normalization_suggestions(
                     confidence=0.92,
                     metafields=[
                         _metafield("extractor", "normalized_unit_system", unit_system),
-                        _metafield("extractor", "normalized_dimension_unit", canonical_unit),
+                        _metafield(
+                            "extractor", "normalized_dimension_unit", canonical_unit
+                        ),
                     ],
                     details={
                         "detected_value": detected_units,
@@ -563,7 +666,9 @@ def _build_normalization_suggestions(
                     severity="low",
                     confidence=0.9,
                     metafields=[
-                        _metafield("extractor", "normalized_dimensions", canonical_dimension),
+                        _metafield(
+                            "extractor", "normalized_dimensions", canonical_dimension
+                        ),
                     ],
                     details={
                         "detected_value": dimension_match.group(0),
@@ -574,7 +679,10 @@ def _build_normalization_suggestions(
             )
 
         has_hidden_dimension = bool(
-            re.search(r"\b\d+(?:\.\d+)?\s*(inches|inch|in|cm|mm|m)\s*(tall|wide|deep|height|width|depth)\b", body_lower)
+            re.search(
+                r"\b\d+(?:\.\d+)?\s*(inches|inch|in|cm|mm|m)\s*(tall|wide|deep|height|width|depth)\b",
+                body_lower,
+            )
         )
         if has_hidden_dimension and allowed("description_extraction", 0.88):
             suggestions.append(
@@ -586,7 +694,9 @@ def _build_normalization_suggestions(
                     severity="low",
                     confidence=0.88,
                     metafields=[
-                        _metafield("extractor", "normalized_dimensions_extracted", body[:400]),
+                        _metafield(
+                            "extractor", "normalized_dimensions_extracted", body[:400]
+                        ),
                     ],
                     details={
                         "detected_value": body[:200],
@@ -601,8 +711,13 @@ def _build_normalization_suggestions(
             body=body,
             existing_option_names=existing_option_names,
         )
-        live_variants = product.get("variants") if isinstance(product.get("variants"), list) else []
-        default_only = len(live_variants) == 1 and _to_text(live_variants[0].get("title")).casefold() == "default title"
+        live_variants = (
+            product.get("variants") if isinstance(product.get("variants"), list) else []
+        )
+        default_only = (
+            len(live_variants) == 1
+            and _to_text(live_variants[0].get("title")).casefold() == "default title"
+        )
         if inferred_dimensions and default_only and allowed("missing_options", 0.86):
             evidence_sources = sorted(
                 {
@@ -646,8 +761,14 @@ def _build_normalization_suggestions(
                             ],
                         },
                         details={
-                            "detected_value": [item.get("detected_values") for item in inferred_dimensions],
-                            "canonical_value": [item.get("canonical_values") for item in inferred_dimensions],
+                            "detected_value": [
+                                item.get("detected_values")
+                                for item in inferred_dimensions
+                            ],
+                            "canonical_value": [
+                                item.get("canonical_values")
+                                for item in inferred_dimensions
+                            ],
                             "evidence_sources": evidence_sources,
                             "inferred_dimensions": inferred_dimensions,
                         },
@@ -688,7 +809,9 @@ def _build_persisted_suggestions(
                 "severity": item.severity,
                 "message": item.message.strip(),
                 "patch_payload": item.patch_payload.model_dump(exclude_none=True),
-                "details": item.details.model_dump(exclude_none=True) if item.details else {},
+                "details": (
+                    item.details.model_dump(exclude_none=True) if item.details else {}
+                ),
                 "status": "pending",
                 "shop_domain": shop_domain,
             }
@@ -703,7 +826,8 @@ async def execute(
     shop_domain: str,
     normalization_settings: dict[str, Any] | None = None,
     trace_event: Any | None = None,
-) -> list[dict[str, Any]]:
+    include_status: bool = False,
+) -> list[dict[str, Any]] | dict[str, Any]:
     if not products:
         raise ValueError("No products provided for intelligence suggestion generation")
 
@@ -715,42 +839,65 @@ async def execute(
         )
 
     llm_suggestions: list[dict[str, Any]] = []
-    model_env = _resolve_model_env(supabase, shop_domain)
-    indexed_products = [
-        {"_product_index": i, **p} for i, p in enumerate(products)
-    ]
+    generation_error: Exception | None = None
+    generation_attempts = 0
+    indexed_products = [{"_product_index": i, **p} for i, p in enumerate(products)]
     try:
-        response = await run_product_intelligence_suggestions(
-            products=indexed_products,
-            model_env=model_env,
-            trace_event=trace_event if callable(trace_event) else None,
-        )
-        payload = getattr(response, "value", None)
-        if payload is not None:
-            parsed = _parse_suggestion_payload(payload)
-        else:
-            response_text = str(getattr(response, "text", "") or "")
-            parsed = _parse_suggestion_text(response_text)
-        llm_suggestions = _build_persisted_suggestions(
-            products=products,
-            suggestions=parsed,
-            shop_domain=shop_domain,
-        )
-        for suggestion in llm_suggestions:
-            suggestion["value_origin"] = "ai_assisted"
+        model_env = _resolve_model_env(supabase, shop_domain)
     except Exception as exc:
+        if not include_status:
+            raise
+        generation_error = exc
+    if generation_error is None:
+        for attempt in range(2):
+            generation_attempts = attempt + 1
+            try:
+                response = await run_product_intelligence_suggestions(
+                    products=indexed_products,
+                    model_env=model_env,
+                    trace_event=trace_event if callable(trace_event) else None,
+                )
+                payload = getattr(response, "value", None)
+                if payload is not None:
+                    parsed = _parse_suggestion_payload(payload)
+                else:
+                    response_text = str(getattr(response, "text", "") or "")
+                    parsed = _parse_suggestion_text(response_text)
+                llm_suggestions = _build_persisted_suggestions(
+                    products=products,
+                    suggestions=parsed,
+                    shop_domain=shop_domain,
+                )
+                for suggestion in llm_suggestions:
+                    suggestion["value_origin"] = "ai_assisted"
+                generation_error = None
+                break
+            except Exception as exc:
+                generation_error = exc
+                if attempt == 0 and callable(trace_event):
+                    trace_event(
+                        phase="suggestions_llm_retry",
+                        message="AI suggestions were invalid or unavailable; retrying once",
+                        payload_preview={"error": str(exc), "attempt": 1},
+                        level="warning",
+                    )
+    if generation_error is not None:
         if callable(trace_event):
             trace_event(
-                phase="suggestions_llm_skipped",
-                message="Skipping LLM suggestions; continuing with deterministic normalization suggestions",
-                payload_preview={"error": str(exc)},
+                phase="suggestions_llm_failed",
+                message="AI enhancements need attention; deterministic findings remain available",
+                payload_preview={
+                    "error": str(generation_error),
+                    "attempts": generation_attempts,
+                },
                 level="warning",
             )
 
     deterministic_suggestions = _build_normalization_suggestions(
         products=products,
         shop_domain=shop_domain,
-        normalization_settings=normalization_settings or _default_normalization_settings(),
+        normalization_settings=normalization_settings
+        or _default_normalization_settings(),
     )
     for suggestion in deterministic_suggestions:
         suggestion["value_origin"] = "derived"
@@ -758,31 +905,69 @@ async def execute(
     combined = [*llm_suggestions, *deterministic_suggestions]
     # Model-authored variant payloads are evidence only. Rebuild executable matrices
     # from inferred dimensions, and retain one deterministic best candidate/product.
-    variant_candidates: dict[int, list[tuple[tuple[float, int, int], dict[str, Any]]]] = {}
+    variant_candidates: dict[
+        int, list[tuple[tuple[float, int, int], dict[str, Any]]]
+    ] = {}
     retained: list[dict[str, Any]] = []
     for suggestion in combined:
-        patch = suggestion.get("patch_payload") if isinstance(suggestion.get("patch_payload"), dict) else {}
+        patch = (
+            suggestion.get("patch_payload")
+            if isinstance(suggestion.get("patch_payload"), dict)
+            else {}
+        )
         if "variant_operations" not in patch:
             retained.append(suggestion)
             continue
-        try: index = int(suggestion.get("product_index", -1))
-        except (TypeError, ValueError): index = -1
-        details = suggestion.get("details") if isinstance(suggestion.get("details"), dict) else {}
-        dimensions = details.get("inferred_dimensions") if isinstance(details.get("inferred_dimensions"), list) else []
-        live_variants = products[index].get("variants") if 0 <= index < len(products) and isinstance(products[index].get("variants"), list) else []
-        default_only = len(live_variants) == 1 and _to_text(live_variants[0].get("title")).casefold() == "default title"
         try:
-            if not dimensions or not default_only: raise ValueError("not actionable")
-            rebuilt = _build_variant_operations(product=products[index], title=_to_text(products[index].get("title")), dimensions=dimensions)
+            index = int(suggestion.get("product_index", -1))
+        except (TypeError, ValueError):
+            index = -1
+        details = (
+            suggestion.get("details")
+            if isinstance(suggestion.get("details"), dict)
+            else {}
+        )
+        dimensions = (
+            details.get("inferred_dimensions")
+            if isinstance(details.get("inferred_dimensions"), list)
+            else []
+        )
+        live_variants = (
+            products[index].get("variants")
+            if 0 <= index < len(products)
+            and isinstance(products[index].get("variants"), list)
+            else []
+        )
+        default_only = (
+            len(live_variants) == 1
+            and _to_text(live_variants[0].get("title")).casefold() == "default title"
+        )
+        try:
+            if not dimensions or not default_only:
+                raise ValueError("not actionable")
+            rebuilt = _build_variant_operations(
+                product=products[index],
+                title=_to_text(products[index].get("title")),
+                dimensions=dimensions,
+            )
         except (ValueError, IndexError):
             patch.pop("variant_operations", None)
-            if patch: retained.append(suggestion)
+            if patch:
+                retained.append(suggestion)
             continue
         suggestion["patch_payload"] = {**patch, "variant_operations": rebuilt}
         confidence = float(details.get("confidence") or 0)
-        coverage = sum(len(x.get("canonical_values", [])) for x in dimensions if isinstance(x, dict))
-        deterministic = int(str(suggestion.get("category") or "").startswith("normalization_"))
-        variant_candidates.setdefault(index, []).append(((confidence, coverage, deterministic), suggestion))
+        coverage = sum(
+            len(x.get("canonical_values", []))
+            for x in dimensions
+            if isinstance(x, dict)
+        )
+        deterministic = int(
+            str(suggestion.get("category") or "").startswith("normalization_")
+        )
+        variant_candidates.setdefault(index, []).append(
+            ((confidence, coverage, deterministic), suggestion)
+        )
     for candidates in variant_candidates.values():
         retained.append(max(candidates, key=lambda item: item[0])[1])
     combined = retained
@@ -806,4 +991,25 @@ async def execute(
                 "suggestions_count": len(combined),
             },
         )
+    if include_status:
+        error_message = str(generation_error) if generation_error is not None else None
+        if error_message and "model config" in error_message.lower():
+            error_code = "AI_CONFIG_UNAVAILABLE"
+        elif error_message and (
+            "malformed" in error_message.lower() or "payload" in error_message.lower()
+        ):
+            error_code = "AI_RESPONSE_INVALID"
+        elif error_message:
+            error_code = "AI_ENHANCEMENT_UNAVAILABLE"
+        else:
+            error_code = None
+        return {
+            "suggestions": combined,
+            "enhancement_status": "failed" if generation_error is not None else "ready",
+            "enhancement_error_code": error_code,
+            "enhancement_error_message": error_message,
+            "enhancement_attempts": generation_attempts,
+            "ai_suggestions_count": len(llm_suggestions),
+            "derived_suggestions_count": len(deterministic_suggestions),
+        }
     return combined

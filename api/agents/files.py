@@ -30,7 +30,11 @@ from .schemas import (
     BulkUploadItem,
     BulkUploadResult,
 )
-from .utils import require_internal_service_key, require_shop_domain, resolve_dev_billing_simulator_plan
+from .utils import (
+    require_internal_service_key,
+    require_shop_domain,
+    resolve_dev_billing_simulator_plan,
+)
 from api.agents.billing import _get_billing_svc, require_paid_processing
 
 router = APIRouter()
@@ -38,7 +42,44 @@ LOG = logging.getLogger(__name__)
 MERCHANT_UPLOAD_FILE_ORIGIN = "merchant_upload"
 
 
-@router.get("/files/{file_id:path}/content", summary="Get tenant-owned original file content")
+@router.get(
+    "/media-assets/{asset_id}", summary="Get a tenant-owned product media asset"
+)
+async def get_product_media_asset(
+    asset_id: str, request: Request, ctx: AppContext = Depends(get_ctx)
+) -> Response:
+    require_internal_service_key(request)
+    tenant = require_shop_domain(request)
+    from application.services.product_media_ingestion import PRODUCT_MEDIA_FILE_ORIGIN
+    from application.use_cases.files.get_file import execute as get_file_execute
+
+    file_data = get_file_execute(
+        supabase=ctx.supabase, file_id=asset_id, shop_domain=tenant
+    )
+    if not file_data or file_data.get("file_origin") != PRODUCT_MEDIA_FILE_ORIGIN:
+        raise HTTPException(status_code=404, detail="Media asset not found")
+    content = file_data.get("content")
+    content_type = str(file_data.get("content_type") or "")
+    if not isinstance(content, (bytes, bytearray)) or content_type not in {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }:
+        raise HTTPException(status_code=500, detail="Stored media asset is invalid")
+    return Response(
+        content=bytes(content),
+        media_type=content_type,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "Content-Disposition": "inline",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get(
+    "/files/{file_id:path}/content", summary="Get tenant-owned original file content"
+)
 async def get_original_file_content(
     file_id: str, request: Request, ctx: AppContext = Depends(get_ctx)
 ) -> Response:
@@ -77,7 +118,9 @@ async def record_source_link_trace_event(
     from services.source_link_trace import record, valid_attempt_id
 
     if not valid_attempt_id(attempt_id):
-        raise HTTPException(status_code=422, detail="Invalid source-link trace attempt id")
+        raise HTTPException(
+            status_code=422, detail="Invalid source-link trace attempt id"
+        )
     details: dict[str, Any] = {}
     if details_json:
         try:
@@ -128,7 +171,9 @@ def _draft_products(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
 def _draft_ai_enhancements_enabled(
     entry: dict[str, Any] | None, fallback: bool = True
 ) -> bool:
-    if isinstance(entry, dict) and isinstance(entry.get("ai_enhancements_enabled"), bool):
+    if isinstance(entry, dict) and isinstance(
+        entry.get("ai_enhancements_enabled"), bool
+    ):
         return entry["ai_enhancements_enabled"]
     return fallback
 
@@ -164,7 +209,9 @@ def _resolved_draft_name(
 def _find_active_import_draft_for_file(
     *, ctx: AppContext, file_id: str, shop_domain: str | None = None
 ) -> dict[str, Any] | None:
-    from application.use_cases.drafts.list_product_drafts import execute as list_drafts_execute
+    from application.use_cases.drafts.list_product_drafts import (
+        execute as list_drafts_execute,
+    )
 
     def _is_matching_active_draft(draft: dict[str, Any]) -> bool:
         if _optional_str(draft, "input_file_id") != file_id:
@@ -215,8 +262,12 @@ def _save_draft_state(
     submit_error: str | None = None,
     ai_enhancements_enabled: bool | None = None,
 ) -> None:
-    from application.use_cases.drafts.get_product_draft import execute as get_draft_execute
-    from application.use_cases.drafts.save_product_draft import execute as save_draft_execute
+    from application.use_cases.drafts.get_product_draft import (
+        execute as get_draft_execute,
+    )
+    from application.use_cases.drafts.save_product_draft import (
+        execute as save_draft_execute,
+    )
 
     existing = (
         get_draft_execute(
@@ -281,20 +332,34 @@ def _save_draft_state(
             else existing_extraction_run_id
         ),
         extraction_error=(
-            extraction_error if extraction_error is not None else existing_extraction_error
+            extraction_error
+            if extraction_error is not None
+            else existing_extraction_error
         ),
         quality_gate_status=(
-            quality_gate_status if quality_gate_status is not None else existing_quality_gate_status
+            quality_gate_status
+            if quality_gate_status is not None
+            else existing_quality_gate_status
         ),
         quality_report=(
-            quality_report if quality_report is not None else existing.get("quality_report")
+            quality_report
+            if quality_report is not None
+            else existing.get("quality_report")
         ),
         quality_checked_at=(
-            quality_checked_at if quality_checked_at is not None else _optional_str(existing, "quality_checked_at")
+            quality_checked_at
+            if quality_checked_at is not None
+            else _optional_str(existing, "quality_checked_at")
         ),
-        submit_status=submit_status if submit_status is not None else existing_submit_status,
-        submit_run_id=submit_run_id if submit_run_id is not None else existing_submit_run_id,
-        submit_error=submit_error if submit_error is not None else existing_submit_error,
+        submit_status=(
+            submit_status if submit_status is not None else existing_submit_status
+        ),
+        submit_run_id=(
+            submit_run_id if submit_run_id is not None else existing_submit_run_id
+        ),
+        submit_error=(
+            submit_error if submit_error is not None else existing_submit_error
+        ),
         require_lifecycle_columns=True,
         ai_enhancements_enabled=(
             ai_enhancements_enabled
@@ -379,7 +444,8 @@ async def _run_import_in_background(
             quality_gate_status="live_validation_pending",
             quality_report=(
                 {**quality_report, "status": "live_validation_pending"}
-                if quality_report else None
+                if quality_report
+                else None
             ),
             quality_checked_at=(
                 str(quality_report.get("generated_at")) if quality_report else None
@@ -441,7 +507,11 @@ def _record_failed_upload_activity(
         run_id = str(uuid.uuid4())
         ended_at = datetime.now(timezone.utc)
         message = str(error.detail) if isinstance(error, HTTPException) else str(error)
-        failure_code = _upload_failure_code(error) if isinstance(error, Exception) else "upload_failed"
+        failure_code = (
+            _upload_failure_code(error)
+            if isinstance(error, Exception)
+            else "upload_failed"
+        )
         observability = current_observability_fields()
         duration_ms = max(0, int((ended_at - started_at).total_seconds() * 1000))
         ctx.supabase.runs.create_or_update_run(
@@ -513,7 +583,9 @@ def _queue_batch_extract_submit_for_file(
             _optional_str(active_draft, "extraction_run_id"),
             _optional_str(active_draft, "run_id"),
         ) or str(uuid.uuid4())
-        submit_run_id = _first_non_empty_str(_optional_str(active_draft, "submit_run_id"))
+        submit_run_id = _first_non_empty_str(
+            _optional_str(active_draft, "submit_run_id")
+        )
         if auto_submit and not submit_run_id:
             submit_run_id = str(uuid.uuid4())
         if auto_submit and submit_run_id:
@@ -676,11 +748,13 @@ async def _prepare_uploaded_file(
     elif document_format.kind == "spreadsheet_legacy":
         collabora_url = os.getenv("COLLABORA_URL", "http://localhost:9980")
         try:
-            file_bytes = await ctx.services.collabora.convert_document_to_xlsx_collabora(
-                file_bytes,
-                filename=original_name,
-                content_type=original_content_type or "application/octet-stream",
-                collabora_base_url=collabora_url,
+            file_bytes = (
+                await ctx.services.collabora.convert_document_to_xlsx_collabora(
+                    file_bytes,
+                    filename=original_name,
+                    content_type=original_content_type or "application/octet-stream",
+                    collabora_base_url=collabora_url,
+                )
             )
         except Exception as exc:
             raise HTTPException(
@@ -749,17 +823,22 @@ async def get_collabora_url(
         payload = get_collabora_execute(collabora=ctx.services.collabora)
         from urllib.parse import urlparse
         from services.source_link_trace import record
+
         record(
             component="backend",
             stage="viewer_url_resolved",
             status="ok",
             attempt_id=trace_attempt_id,
             shop_domain=request.headers.get("x-shop-domain"),
-            details={"url_host": urlparse(str(payload.get("collabora_url") or "")).hostname or ""},
+            details={
+                "url_host": urlparse(str(payload.get("collabora_url") or "")).hostname
+                or ""
+            },
         )
         return payload
     except RuntimeError as exc:
         from services.source_link_trace import record
+
         record(
             component="backend",
             stage="viewer_url_unavailable",
@@ -1032,7 +1111,9 @@ async def process_excel(
     if file_id:
         from application.use_cases.files.get_file import execute as get_file_execute
 
-        file_entry = get_file_execute(supabase=ctx.supabase, file_id=file_id, shop_domain=tenant)
+        file_entry = get_file_execute(
+            supabase=ctx.supabase, file_id=file_id, shop_domain=tenant
+        )
         if not file_entry:
             raise HTTPException(status_code=404, detail="File not found")
         file_content = file_entry.get("content")
@@ -1045,6 +1126,7 @@ async def process_excel(
         file_bytes_data = await file.read()
         file_id = str(uuid.uuid4())
         from application.use_cases.files.save_file import execute as save_file_execute
+
         save_file_execute(
             supabase=ctx.supabase,
             file_id=file_id,
@@ -1143,12 +1225,18 @@ async def process_excel(
     else:
         draft_id = None
 
-    from services.credit_billing_service import BillingStorageUnavailable, CreditLimitReached
+    from services.credit_billing_service import (
+        BillingStorageUnavailable,
+        CreditLimitReached,
+    )
     from services.metered_operations import quote_document_import
     from shared.credit_billing import BillingRateUnavailable
 
     active_model = ctx.supabase.llm_configs.get_active_llm_model_config(tenant)
-    model_id = str((active_model or {}).get("model_id") or os.getenv("OPENAI_MODEL", "gpt-5.6-luna"))
+    model_id = str(
+        (active_model or {}).get("model_id")
+        or os.getenv("OPENAI_MODEL", "gpt-6-luna")
+    )
     try:
         quote, quote_metadata = quote_document_import(
             content=file_bytes_data,
@@ -1158,11 +1246,18 @@ async def process_excel(
         )
         reservation = billing_svc.reserve_credits(
             shop_domain=tenant,
-            operation_key=(request.headers.get("x-idempotency-key") or f"document_import:{effective_run_id}"),
+            operation_key=(
+                request.headers.get("x-idempotency-key")
+                or f"document_import:{effective_run_id}"
+            ),
             operation_type="document_import",
             maximum_credits=quote.credits,
             rate_card_version=quote.rate_card_version,
-            metadata={**quote_metadata, "source_file_id": file_id, "filename": input_name},
+            metadata={
+                **quote_metadata,
+                "source_file_id": file_id,
+                "filename": input_name,
+            },
             billing_mode=billing_access.mode,
             plan_handle=billing_access.plan_handle,
         )
@@ -1253,10 +1348,14 @@ async def process_excel(
                 require_persistent_queue=True,
             )
         except HTTPException:
-            billing_svc.release_credits(reservation["operation_id"], "queue_acceptance_failed")
+            billing_svc.release_credits(
+                reservation["operation_id"], "queue_acceptance_failed"
+            )
             raise
         except Exception as exc:
-            billing_svc.release_credits(reservation["operation_id"], "queue_acceptance_failed")
+            billing_svc.release_credits(
+                reservation["operation_id"], "queue_acceptance_failed"
+            )
             raise HTTPException(status_code=500, detail=str(exc))
         return JSONResponse(
             status_code=202,
@@ -1359,7 +1458,10 @@ async def create_source_highlight(
 
     tenant = require_shop_domain(request)
     from application.use_cases.files.get_file import execute as get_file_execute
-    source_file = get_file_execute(supabase=ctx.supabase, file_id=file_id, shop_domain=tenant)
+
+    source_file = get_file_execute(
+        supabase=ctx.supabase, file_id=file_id, shop_domain=tenant
+    )
     if not source_file:
         raise HTTPException(status_code=404, detail="File not found")
     source_format = classify_document(
@@ -1373,6 +1475,7 @@ async def create_source_highlight(
             detail="Source highlighting is available only for spreadsheet cell or range references",
         )
     from services.source_link_trace import record as record_source_link_trace
+
     trace_fields = current_observability_fields()
     record_source_link_trace(
         component="backend",
@@ -1385,6 +1488,7 @@ async def create_source_highlight(
         correlation_id=trace_fields.get("correlation_id"),
         details={"range_count": len(parsed_source_refs or [])},
     )
+
     def record_highlight_failure(exc: Exception) -> None:
         record_source_link_trace(
             component="backend",
@@ -1460,16 +1564,41 @@ def _referencing_imports(
 
     references: list[dict[str, str]] = []
     collections = (
-        ("draft", list_drafts(supabase=ctx.supabase, limit=5000, offset=0, shop_domain=shop_domain)),
-        ("submitted", list_submitted(supabase=ctx.supabase, limit=5000, offset=0, shop_domain=shop_domain)),
+        (
+            "draft",
+            list_drafts(
+                supabase=ctx.supabase, limit=5000, offset=0, shop_domain=shop_domain
+            ),
+        ),
+        (
+            "submitted",
+            list_submitted(
+                supabase=ctx.supabase, limit=5000, offset=0, shop_domain=shop_domain
+            ),
+        ),
     )
     for kind, rows in collections:
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            if row.get("input_file_id") == file_id or _contains_file_reference(row.get("products"), file_id):
-                identifier = str(row.get("draft_id") or row.get("submitted_id") or row.get("id") or "")
-                references.append({"kind": kind, "id": identifier, "name": str(row.get("draft_name") or row.get("name") or identifier)})
+            if row.get("input_file_id") == file_id or _contains_file_reference(
+                row.get("products"), file_id
+            ):
+                identifier = str(
+                    row.get("draft_id")
+                    or row.get("submitted_id")
+                    or row.get("id")
+                    or ""
+                )
+                references.append(
+                    {
+                        "kind": kind,
+                        "id": identifier,
+                        "name": str(
+                            row.get("draft_name") or row.get("name") or identifier
+                        ),
+                    }
+                )
     return references
 
 
@@ -1538,9 +1667,7 @@ async def get_file_preview(
     file_name = _required_str(file_entry, "name")
     file_content_type = _required_str(file_entry, "content_type")
 
-    thumbnail_bytes = get_file_thumb_execute(
-        supabase=ctx.supabase, file_id=file_id
-    )
+    thumbnail_bytes = get_file_thumb_execute(supabase=ctx.supabase, file_id=file_id)
     if thumbnail_bytes:
         return Response(content=thumbnail_bytes, media_type="image/png")
 
@@ -1557,12 +1684,18 @@ async def get_file_preview(
             execute as save_thumb_execute,
         )
 
-        save_thumb_execute(
-            supabase=ctx.supabase, file_id=file_id, content=preview_png
-        )
+        save_thumb_execute(supabase=ctx.supabase, file_id=file_id, content=preview_png)
 
         return Response(content=preview_png, media_type="image/png")
     except Exception as exc:
         message = str(exc).strip() or type(exc).__name__
-        code = "COLLABORA_TIMEOUT" if "timeout" in message.lower() else "COLLABORA_UNAVAILABLE"
-        return JSONResponse(status_code=503, content={"code": code, "detail": f"Preview generation failed: {message}"}, headers={"Cache-Control": "no-store"})
+        code = (
+            "COLLABORA_TIMEOUT"
+            if "timeout" in message.lower()
+            else "COLLABORA_UNAVAILABLE"
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"code": code, "detail": f"Preview generation failed: {message}"},
+            headers={"Cache-Control": "no-store"},
+        )

@@ -133,6 +133,40 @@ class _FakeShopifyApply:
         return None
 
 
+@pytest.mark.asyncio
+async def test_apply_seo_suggestion_preserves_live_sibling_field():
+    supabase = _FakeSupabaseApply()
+    supabase.get_product_intelligence_suggestion = lambda suggestion_id, shop_domain=None: {
+        "suggestion_id": suggestion_id,
+        "status": "pending",
+        "audit_id": "audit-1",
+        "product_index": 0,
+        "product_title": "Catalog Product",
+        "patch_payload": {"seo_title": "Reviewed SEO title"},
+    }
+    shopify = _FakeShopifyApply()
+
+    async def get_product(gid: str):
+        payload = await _FakeShopifyApply().get_product(gid)
+        payload["data"]["node"]["seo"] = {
+            "title": "Existing title",
+            "description": "Existing description",
+        }
+        return payload
+
+    shopify.get_product = get_product
+
+    await apply_execute(
+        supabase=supabase,
+        shopify=shopify,
+        suggestion_id="sug-seo",
+        shop_domain="store.myshopify.com",
+    )
+
+    assert shopify.updated_payload["seo_title"] == "Reviewed SEO title"
+    assert shopify.updated_payload["seo_description"] == "Existing description"
+
+
 class _FakeSupabaseRevert:
     def __init__(self) -> None:
         self.pending_calls = 0

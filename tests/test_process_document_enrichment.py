@@ -216,7 +216,9 @@ def _patch_canonical_pdf(monkeypatch, content: bytes) -> None:
             cache_hit=False,
         )
 
-    monkeypatch.setattr(process_document_uc, "ensure_canonical_pdf", fake_ensure_canonical_pdf)
+    monkeypatch.setattr(
+        process_document_uc, "ensure_canonical_pdf", fake_ensure_canonical_pdf
+    )
 
 
 @pytest.mark.asyncio
@@ -276,7 +278,71 @@ async def test_process_document_enriches_products_during_import(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_document_skips_suggestions_when_ai_enhancements_disabled(monkeypatch):
+async def test_product_media_stays_attached_to_the_final_enriched_payload(monkeypatch):
+    async def fake_generate_suggestions_execute(**_kwargs):
+        return [
+            {
+                "product_index": 0,
+                "patch_payload": {"vendor": "Enriched Vendor"},
+                "value_origin": "ai_assisted",
+            }
+        ]
+
+    async def fake_attach_product_media(*, products, pdf_content, **_kwargs):
+        assert pdf_content is None
+        products[0]["media_gallery"] = [
+            {
+                "review_media_id": "media-1",
+                "asset_id": "asset-1.jpg",
+                "source_kind": "external_url",
+                "validation_status": "ready",
+                "assignment_status": "assigned",
+                "included": True,
+                "position": 1,
+            }
+        ]
+        return {"ready": 1, "invalid": 0, "ambiguous": 0, "embedded": 0}
+
+    monkeypatch.setattr(
+        process_document_uc,
+        "generate_suggestions_execute",
+        fake_generate_suggestions_execute,
+    )
+    monkeypatch.setattr(
+        process_document_uc,
+        "attach_product_media",
+        fake_attach_product_media,
+    )
+
+    result = await process_document_uc.execute(
+        supabase=_FakeSupabase(
+            model_config={
+                "base_url": "http://localhost:11434/v1/",
+                "model_id": "deepseek-r1:8b",
+                "api_key": "secret",
+                "provider": "ollama",
+            }
+        ),
+        llm=_FakeLLM(payload={"products": [{"title": "Demo Product"}]}),
+        tracing=_FakeTracing(),
+        ctx=SimpleNamespace(),
+        file_bytes=_valid_xlsx_bytes(),
+        input_name="catalog.xlsx",
+        input_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        source_file_id="catalog-file",
+        run_id="run-import-media-after-enrichment",
+        shop_domain="store.myshopify.com",
+    )
+
+    product = result["result"]["products"][0]
+    assert product["vendor"] == "Enriched Vendor"
+    assert product["media_gallery"][0]["asset_id"] == "asset-1.jpg"
+
+
+@pytest.mark.asyncio
+async def test_process_document_skips_suggestions_when_ai_enhancements_disabled(
+    monkeypatch,
+):
     async def fail_generate_suggestions_execute(**kwargs):
         _ = kwargs
         raise AssertionError("disabled processing must not generate suggestions")
@@ -327,7 +393,9 @@ async def test_process_document_normalizes_products_list_result_shape():
 
 
 @pytest.mark.asyncio
-async def test_process_document_returns_enriched_products_without_workbook_output(monkeypatch):
+async def test_process_document_returns_enriched_products_without_workbook_output(
+    monkeypatch,
+):
     async def fake_generate_suggestions_execute(
         *,
         supabase,
@@ -575,31 +643,47 @@ async def test_process_document_persists_observability_ids_from_context():
 
 
 @pytest.mark.asyncio
-async def test_pdf_evidence_feedback_retries_with_complete_payload_and_resolves_index(monkeypatch):
+async def test_pdf_evidence_feedback_retries_with_complete_payload_and_resolves_index(
+    monkeypatch,
+):
     pdf = _minimal_pdf_bytes()
     _patch_canonical_pdf(monkeypatch, pdf)
-    llm = _SequenceLLM([
-        {"products": [{
-            "title": "Classic Cotton T-Shirt",
-            "vendor": "Unsupported optional vendor",
-            "images": [{"src": "https://example.com/catalog.jpg"}],
-            "source_refs": [
-                {"value_path": "title", "evidence_index": 1},
-                {"value_path": "images[0].src", "evidence_index": 1},
-            ],
-        }]},
-        {"products": [{
-            "title": "Classic Cotton T-Shirt",
-            "source_refs": [{"value_path": "title", "evidence_index": 1}],
-        }]},
-    ])
+    llm = _SequenceLLM(
+        [
+            {
+                "products": [
+                    {
+                        "title": "Classic Cotton T-Shirt",
+                        "vendor": "Unsupported optional vendor",
+                        "images": [{"src": "https://example.com/catalog.jpg"}],
+                        "source_refs": [
+                            {"value_path": "title", "evidence_index": 1},
+                            {"value_path": "images[0].src", "evidence_index": 1},
+                        ],
+                    }
+                ]
+            },
+            {
+                "products": [
+                    {
+                        "title": "Classic Cotton T-Shirt",
+                        "source_refs": [{"value_path": "title", "evidence_index": 1}],
+                    }
+                ]
+            },
+        ]
+    )
     tracing = _FakeTracing()
 
     result = await process_document_uc.execute(
         supabase=_FakeSupabase(),
         llm=llm,
         tracing=tracing,
-        ctx=SimpleNamespace(services=SimpleNamespace(document_layout=_PdfLayoutService(), collabora=None)),
+        ctx=SimpleNamespace(
+            services=SimpleNamespace(
+                document_layout=_PdfLayoutService(), collabora=None
+            )
+        ),
         file_bytes=pdf,
         input_name="source.pdf",
         input_content_type="application/pdf",
@@ -625,23 +709,33 @@ async def test_pdf_evidence_feedback_retries_with_complete_payload_and_resolves_
 
 
 @pytest.mark.asyncio
-async def test_pdf_evidence_gets_exactly_two_corrections_then_fails_without_output(monkeypatch):
+async def test_pdf_evidence_gets_exactly_two_corrections_then_fails_without_output(
+    monkeypatch,
+):
     pdf = _minimal_pdf_bytes()
     _patch_canonical_pdf(monkeypatch, pdf)
-    llm = _SequenceLLM([
-        {"products": [{"title": "Unlinked"}]},
-        {"products": [{"title": "Still unlinked"}]},
-        {"products": [{"title": "Never linked"}]},
-    ])
+    llm = _SequenceLLM(
+        [
+            {"products": [{"title": "Unlinked"}]},
+            {"products": [{"title": "Still unlinked"}]},
+            {"products": [{"title": "Never linked"}]},
+        ]
+    )
     supabase = _FakeSupabase()
     tracing = _FakeTracing()
 
-    with pytest.raises(SourceEvidenceValidationFailed, match="SOURCE_EVIDENCE_VALIDATION_FAILED"):
+    with pytest.raises(
+        SourceEvidenceValidationFailed, match="SOURCE_EVIDENCE_VALIDATION_FAILED"
+    ):
         await process_document_uc.execute(
             supabase=supabase,
             llm=llm,
             tracing=tracing,
-            ctx=SimpleNamespace(services=SimpleNamespace(document_layout=_PdfLayoutService(), collabora=None)),
+            ctx=SimpleNamespace(
+                services=SimpleNamespace(
+                    document_layout=_PdfLayoutService(), collabora=None
+                )
+            ),
             file_bytes=pdf,
             input_name="source.pdf",
             input_content_type="application/pdf",
@@ -659,7 +753,9 @@ async def test_pdf_evidence_gets_exactly_two_corrections_then_fails_without_outp
 
 
 @pytest.mark.asyncio
-async def test_pdf_third_response_sanitizes_optional_fields_and_keeps_all_products(monkeypatch):
+async def test_pdf_third_response_sanitizes_optional_fields_and_keeps_all_products(
+    monkeypatch,
+):
     pdf = _minimal_pdf_bytes()
     _patch_canonical_pdf(monkeypatch, pdf)
 
@@ -669,16 +765,12 @@ async def test_pdf_third_response_sanitizes_optional_fields_and_keeps_all_produc
                 {
                     "title": "Classic Cotton T-Shirt",
                     "seo_title": f"Unsupported SEO A {suffix}",
-                    "source_refs": [
-                        {"value_path": "title", "evidence_index": 1}
-                    ],
+                    "source_refs": [{"value_path": "title", "evidence_index": 1}],
                 },
                 {
                     "title": "Second Catalog Product",
                     "seo_description": f"Unsupported SEO B {suffix}",
-                    "source_refs": [
-                        {"value_path": "title", "evidence_index": 1}
-                    ],
+                    "source_refs": [{"value_path": "title", "evidence_index": 1}],
                 },
             ]
         }

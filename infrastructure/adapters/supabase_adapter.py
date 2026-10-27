@@ -129,7 +129,9 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     ) -> list[dict[str, Any]]:
         return self._service.list_runs(limit, offset, status, shop_domain)
 
-    def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None:
+    def get_run(
+        self, run_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None:
         return self._service.get_run(run_id, shop_domain=shop_domain)
 
     def get_run_summaries(
@@ -140,8 +142,16 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool:
         return self._service.delete_run(run_id, shop_domain=shop_domain)
 
-    def get_run_history(self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True) -> dict[str, Any]:
-        return self._service.get_run_history(run_id, shop_domain=shop_domain, include_messages=include_messages)
+    def get_run_history(
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        include_messages: bool = True,
+    ) -> dict[str, Any]:
+        return self._service.get_run_history(
+            run_id, shop_domain=shop_domain, include_messages=include_messages
+        )
 
     def enqueue_offload_job(
         self,
@@ -180,13 +190,22 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         return self._service.cancel_run_cascade(run_id, shop_domain)
 
     def transition_offload_workflow(
-        self, job_id: str, target_status: str, *, error: str | None = None,
-        failure_code: str | None = None, result: dict[str, Any] | None = None,
+        self,
+        job_id: str,
+        target_status: str,
+        *,
+        error: str | None = None,
+        failure_code: str | None = None,
+        result: dict[str, Any] | None = None,
         available_at: str | None = None,
     ):
         return self._service.transition_offload_workflow(
-            job_id, target_status, error=error, failure_code=failure_code,
-            result=result, available_at=available_at,
+            job_id,
+            target_status,
+            error=error,
+            failure_code=failure_code,
+            result=result,
+            available_at=available_at,
         )
 
     def get_offload_job(self, job_id: str) -> dict[str, Any] | None:
@@ -355,6 +374,12 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         totals: dict[str, Any],
         shop_domain: str | None = None,
         scoring_version: str = "legacy-catalog-v1",
+        enhancement_status: str = "legacy_unknown",
+        enhancement_error_code: str | None = None,
+        enhancement_error_message: str | None = None,
+        enhancement_attempts: int = 0,
+        ai_suggestions_count: int = 0,
+        derived_suggestions_count: int = 0,
         require_persistence: bool = False,
     ) -> dict[str, Any]:
         return self._service.save_product_intelligence_audit(
@@ -369,33 +394,54 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             totals=totals,
             shop_domain=shop_domain,
             scoring_version=scoring_version,
+            enhancement_status=enhancement_status,
+            enhancement_error_code=enhancement_error_code,
+            enhancement_error_message=enhancement_error_message,
+            enhancement_attempts=enhancement_attempts,
+            ai_suggestions_count=ai_suggestions_count,
+            derived_suggestions_count=derived_suggestions_count,
             require_persistence=require_persistence,
         )
 
     def update_product_intelligence_audit_status(
-        self, *, audit_id: str, status: str, shop_domain: str | None = None,
+        self,
+        *,
+        audit_id: str,
+        status: str,
+        shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> dict[str, Any] | None:
         return self._service.update_product_intelligence_audit_status(
-            audit_id=audit_id, status=status, shop_domain=shop_domain,
+            audit_id=audit_id,
+            status=status,
+            shop_domain=shop_domain,
             require_persistence=require_persistence,
         )
 
     def save_product_intelligence_product_results(
-        self, *, audit_id: str, results: list[dict[str, Any]],
+        self,
+        *,
+        audit_id: str,
+        results: list[dict[str, Any]],
         shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> int:
         return self._service.save_product_intelligence_product_results(
-            audit_id=audit_id, results=results, shop_domain=shop_domain,
+            audit_id=audit_id,
+            results=results,
+            shop_domain=shop_domain,
             require_persistence=require_persistence,
         )
 
     def list_product_intelligence_product_results(
-        self, *, product_ids: list[str], shop_domain: str | None = None,
+        self,
+        *,
+        product_ids: list[str],
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]:
         return self._service.list_product_intelligence_product_results(
-            product_ids=product_ids, shop_domain=shop_domain,
+            product_ids=product_ids,
+            shop_domain=shop_domain,
         )
 
     def save_product_intelligence_findings(
@@ -474,6 +520,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             shop_domain=shop_domain,
         )
 
+    def list_product_intelligence_product_suggestions(
+        self, *, product_id: str, shop_domain: str,
+    ) -> list[dict[str, Any]]:
+        return self._service.list_product_intelligence_product_suggestions(
+            product_id=product_id, shop_domain=shop_domain,
+        )
+
     def get_product_intelligence_suggestion(
         self,
         suggestion_id: str,
@@ -523,21 +576,32 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         )
 
     def mark_product_intelligence_suggestion_reverted(
-        self, *, suggestion_id: str, shop_domain: str | None = None,
+        self,
+        *,
+        suggestion_id: str,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
         return self._service.mark_product_intelligence_suggestion_reverted(
-            suggestion_id=suggestion_id, shop_domain=shop_domain,
+            suggestion_id=suggestion_id,
+            shop_domain=shop_domain,
         )
 
     def mark_product_intelligence_suggestion_superseded(
-        self, *, suggestion_id: str, shop_domain: str | None = None,
+        self,
+        *,
+        suggestion_id: str,
+        shop_domain: str | None = None,
     ) -> dict[str, Any] | None:
         return self._service.mark_product_intelligence_suggestion_superseded(
-            suggestion_id=suggestion_id, shop_domain=shop_domain,
+            suggestion_id=suggestion_id,
+            shop_domain=shop_domain,
         )
 
     def supersede_pending_product_intelligence_suggestions(
-        self, *, product_ids: list[str], superseded_by_audit_id: str,
+        self,
+        *,
+        product_ids: list[str],
+        superseded_by_audit_id: str,
         shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> int:
@@ -638,6 +702,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         self,
         config_id: str,
         *,
+        shop_domain: str,
         name: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,
@@ -651,6 +716,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     ) -> dict[str, Any] | None:
         return self._service.update_llm_model_config(
             config_id,
+            shop_domain=shop_domain,
             name=name,
             provider=provider,
             base_url=base_url,
@@ -669,9 +735,9 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     def activate_llm_model_config(
         self, config_id: str, *, shop_domain: str
     ) -> dict[str, Any] | None:
-        return self._service.activate_llm_model_config(config_id, shop_domain=shop_domain)
+        return self._service.activate_llm_model_config(
+            config_id, shop_domain=shop_domain
+        )
 
-    def get_active_llm_model_config(
-        self, shop_domain: str
-    ) -> dict[str, Any] | None:
+    def get_active_llm_model_config(self, shop_domain: str) -> dict[str, Any] | None:
         return self._service.get_active_llm_model_config(shop_domain)

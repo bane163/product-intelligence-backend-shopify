@@ -165,7 +165,7 @@ helper script.
 3. The backend will be available at: `http://localhost:8000`
    - **Swagger UI**: `http://localhost:8000/docs`
    - **Collabora**: `http://localhost:9980` (running as a sidecar service)
-   - **LLM**: OpenAI `gpt-5.6-luna` is seeded by default. Custom compatible
+   - **LLM**: OpenAI `gpt-6-luna` is seeded by default. Custom compatible
      endpoints, including Ollama, can still be configured in Settings.
 
 ### Offload Queue Worker
@@ -304,3 +304,14 @@ Before submitting to Shopify, make sure this workspace includes current values f
 
 Use `specs/001-app-store-readiness/quickstart.md` as the release verification
 and reviewer rehearsal script.
+
+### GPT-6 Luna rollout
+
+Deploy the frontend and backend together with the same `INTERNAL_SERVICE_KEY`;
+the backend requires `SUPABASE_SERVICE_ROLE_KEY` for protected settings and
+model configuration. Set `NODE_ENV=production` on both production services;
+use `NODE_ENV=development` only in an isolated development environment. Before
+release, pause paid processing, drain existing operations, apply the GPT-6 Luna
+migration (including its rate card), verify credentials and any `OPENAI_MODEL`
+or `OPENAI_MODEL_ID` overrides, then resume processing. Historical reservations
+retain their original rate-card version.

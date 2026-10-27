@@ -258,3 +258,26 @@ async def test_app_events_202_delivery_and_409_retry(monkeypatch):
     event_status = 409
     assert await drain_app_event_outbox(manager, client, max_attempts=2) == 0
     assert manager._outbox[f"pc:v1:{second['operation_id']}:s"]["status"] == "retry"
+
+
+def test_gpt6_quotes_and_settlement_use_reservation_rate(monkeypatch):
+    from shared.credit_billing import GPT_6_LUNA_V1
+    from services.metered_operations import quote_intelligence_operation, settle_terminal_run
+
+    monkeypatch.setenv("CREDIT_ENFORCEMENT_ENABLED", "false")
+    assert quote_intelligence_operation("product_intelligence_audit", products=1).rate_card_version == GPT_6_LUNA_V1.version
+    usage = ProviderUsage(input_tokens=300_000, cached_input_tokens=50_000, cache_write_tokens=10_000, output_tokens=100_000)
+    cost = calculate_cost(usage=usage, openai_rate=GPT_6_LUNA_V1, azure_page_rate_usd=None, platform_cost_usd=0)
+    assert cost.openai_cost_usd == Decimal("0.1265")
+
+    class Service:
+        def __init__(self, version): self.version = version
+        def get_credit_operation(self, _): return {"status": "reserved", "rate_card_version": self.version}
+        def list_provider_usage_events(self, _): return [{"succeeded": True}]
+        def settle_credits(self, **kwargs): return kwargs
+
+    run = {"billing_operation_id": "op", "status": "succeeded", "prompt_tokens": 100_000, "completion_tokens": 100_000}
+    old = settle_terminal_run(Service(GPT_5_6_LUNA_V1.version), run)
+    new = settle_terminal_run(Service(GPT_6_LUNA_V1.version), run)
+    assert Decimal(old["cost_breakdown"]["openai_cost_usd"]) == Decimal("0.14")
+    assert Decimal(new["cost_breakdown"]["openai_cost_usd"]) == Decimal("0.06")

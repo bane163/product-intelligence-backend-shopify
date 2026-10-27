@@ -28,7 +28,9 @@ class SupabasePort(Protocol):
 
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None: ...
 
-    def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None: ...
+    def append_run_event(
+        self, run_id: str, event: dict[str, Any], seq: int
+    ) -> None: ...
 
     def get_latest_run_event_seq(self, run_id: str) -> int: ...
 
@@ -60,7 +62,9 @@ class SupabasePort(Protocol):
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None: ...
+    def get_run(
+        self, run_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
 
     def get_run_summaries(
         self, run_ids: list[str], *, shop_domain: str | None = None
@@ -68,7 +72,13 @@ class SupabasePort(Protocol):
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool: ...
 
-    def get_run_history(self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True) -> dict[str, Any]: ...
+    def get_run_history(
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        include_messages: bool = True,
+    ) -> dict[str, Any]: ...
 
     def enqueue_offload_job(
         self,
@@ -193,11 +203,21 @@ class SupabasePort(Protocol):
         totals: dict[str, Any],
         shop_domain: str | None = None,
         scoring_version: str = "legacy-catalog-v1",
+        enhancement_status: str = "legacy_unknown",
+        enhancement_error_code: str | None = None,
+        enhancement_error_message: str | None = None,
+        enhancement_attempts: int = 0,
+        ai_suggestions_count: int = 0,
+        derived_suggestions_count: int = 0,
         require_persistence: bool = False,
     ) -> dict[str, Any]: ...
 
     def update_product_intelligence_audit_status(
-        self, *, audit_id: str, status: str, shop_domain: str | None = None,
+        self,
+        *,
+        audit_id: str,
+        status: str,
+        shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> dict[str, Any] | None: ...
 
@@ -211,13 +231,19 @@ class SupabasePort(Protocol):
     ) -> int: ...
 
     def save_product_intelligence_product_results(
-        self, *, audit_id: str, results: list[dict[str, Any]],
+        self,
+        *,
+        audit_id: str,
+        results: list[dict[str, Any]],
         shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> int: ...
 
     def list_product_intelligence_product_results(
-        self, *, product_ids: list[str], shop_domain: str | None = None,
+        self,
+        *,
+        product_ids: list[str],
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def list_product_intelligence_audits(
@@ -258,6 +284,10 @@ class SupabasePort(Protocol):
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def list_product_intelligence_product_suggestions(
+        self, *, product_id: str, shop_domain: str,
+    ) -> list[dict[str, Any]]: ...
+
     def get_product_intelligence_suggestion(
         self,
         suggestion_id: str,
@@ -282,7 +312,10 @@ class SupabasePort(Protocol):
     ) -> dict[str, Any] | None: ...
 
     def supersede_pending_product_intelligence_suggestions(
-        self, *, product_ids: list[str], superseded_by_audit_id: str,
+        self,
+        *,
+        product_ids: list[str],
+        superseded_by_audit_id: str,
         shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> int: ...
@@ -354,6 +387,7 @@ class SupabasePort(Protocol):
         self,
         config_id: str,
         *,
+        shop_domain: str,
         name: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,
@@ -406,7 +440,9 @@ class SupabaseFileNamespacePort(Protocol):
 class SupabaseRunsNamespacePort(Protocol):
     def create_or_update_run(self, run_id: str, fields: dict[str, Any]) -> None: ...
 
-    def append_run_event(self, run_id: str, event: dict[str, Any], seq: int) -> None: ...
+    def append_run_event(
+        self, run_id: str, event: dict[str, Any], seq: int
+    ) -> None: ...
 
     def get_latest_run_event_seq(self, run_id: str) -> int: ...
 
@@ -438,7 +474,9 @@ class SupabaseRunsNamespacePort(Protocol):
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
-    def get_run(self, run_id: str, *, shop_domain: str | None = None) -> dict[str, Any] | None: ...
+    def get_run(
+        self, run_id: str, *, shop_domain: str | None = None
+    ) -> dict[str, Any] | None: ...
 
     def get_run_summaries(
         self, run_ids: list[str], *, shop_domain: str | None = None
@@ -446,7 +484,13 @@ class SupabaseRunsNamespacePort(Protocol):
 
     def delete_run(self, run_id: str, *, shop_domain: str | None = None) -> bool: ...
 
-    def get_run_history(self, run_id: str, *, shop_domain: str | None = None, include_messages: bool = True) -> dict[str, Any]: ...
+    def get_run_history(
+        self,
+        run_id: str,
+        *,
+        shop_domain: str | None = None,
+        include_messages: bool = True,
+    ) -> dict[str, Any]: ...
 
     def enqueue_offload_job(
         self,
@@ -572,11 +616,21 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         totals: dict[str, Any],
         shop_domain: str | None = None,
         scoring_version: str = "legacy-catalog-v1",
+        enhancement_status: str = "legacy_unknown",
+        enhancement_error_code: str | None = None,
+        enhancement_error_message: str | None = None,
+        enhancement_attempts: int = 0,
+        ai_suggestions_count: int = 0,
+        derived_suggestions_count: int = 0,
         require_persistence: bool = False,
     ) -> dict[str, Any]: ...
 
     def update_product_intelligence_audit_status(
-        self, *, audit_id: str, status: str, shop_domain: str | None = None,
+        self,
+        *,
+        audit_id: str,
+        status: str,
+        shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> dict[str, Any] | None: ...
 
@@ -590,13 +644,19 @@ class SupabaseIntelligenceNamespacePort(Protocol):
     ) -> int: ...
 
     def save_product_intelligence_product_results(
-        self, *, audit_id: str, results: list[dict[str, Any]],
+        self,
+        *,
+        audit_id: str,
+        results: list[dict[str, Any]],
         shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> int: ...
 
     def list_product_intelligence_product_results(
-        self, *, product_ids: list[str], shop_domain: str | None = None,
+        self,
+        *,
+        product_ids: list[str],
+        shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def list_product_intelligence_audits(
@@ -637,6 +697,10 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def list_product_intelligence_product_suggestions(
+        self, *, product_id: str, shop_domain: str,
+    ) -> list[dict[str, Any]]: ...
+
     def get_product_intelligence_suggestion(
         self,
         suggestion_id: str,
@@ -661,7 +725,10 @@ class SupabaseIntelligenceNamespacePort(Protocol):
     ) -> dict[str, Any] | None: ...
 
     def supersede_pending_product_intelligence_suggestions(
-        self, *, product_ids: list[str], superseded_by_audit_id: str,
+        self,
+        *,
+        product_ids: list[str],
+        superseded_by_audit_id: str,
         shop_domain: str | None = None,
         require_persistence: bool = False,
     ) -> int: ...
@@ -735,6 +802,7 @@ class SupabaseLlmConfigsNamespacePort(Protocol):
         self,
         config_id: str,
         *,
+        shop_domain: str,
         name: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,

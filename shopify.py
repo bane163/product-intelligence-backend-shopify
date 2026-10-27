@@ -1,3 +1,4 @@
+from application.domain.catalog_fields import CatalogCurrentField
 import logging
 import os
 import asyncio
@@ -94,13 +95,19 @@ def _extract_throttle_message(errors: Any) -> str | None:
         )
         message = str(item.get("message") or "").strip()
         lowered = message.lower()
-        if code == "THROTTLED" or "throttle" in lowered or "too many requests" in lowered:
+        if (
+            code == "THROTTLED"
+            or "throttle" in lowered
+            or "too many requests" in lowered
+        ):
             return message or "Shopify GraphQL throttled"
     return None
 
 
 class _ShopifyThrottledError(RuntimeError):
-    def __init__(self, message: str, *, retry_after_seconds: float | None = None) -> None:
+    def __init__(
+        self, message: str, *, retry_after_seconds: float | None = None
+    ) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
 
@@ -121,7 +128,9 @@ class ShopifyClient:
         self._explicit_shop = _normalize_shop(shop)
         self.shop = self._explicit_shop or _normalize_shop(os.getenv("SHOPIFY_STORE"))
         # token may be provided directly; otherwise resolved lazily
-        self._token = token or (None if self._explicit_shop else os.getenv("SHOPIFY_ACCESS_TOKEN"))
+        self._token = token or (
+            None if self._explicit_shop else os.getenv("SHOPIFY_ACCESS_TOKEN")
+        )
 
         # HTTPX async client will be created on first request once token is
         # available. Keep it None for now.
@@ -155,9 +164,8 @@ class ShopifyClient:
             try:
                 resp = await self._client.post(self.url, json=payload)
                 if resp.status_code == 429:
-                    request_id = (
-                        resp.headers.get("x-request-id")
-                        or resp.headers.get("x-request-id".title())
+                    request_id = resp.headers.get("x-request-id") or resp.headers.get(
+                        "x-request-id".title()
                     )
                     message = "Shopify GraphQL throttled (HTTP 429)"
                     if request_id:
@@ -187,20 +195,15 @@ class ShopifyClient:
                                 else None
                             )
                             if isinstance(msg, str) and msg.strip():
-                                messages.append(
-                                    f"{msg} (code={code})" if code else msg
-                                )
+                                messages.append(f"{msg} (code={code})" if code else msg)
                     if not messages:
                         messages = [str(top_level_errors)]
-                    request_id = (
-                        resp.headers.get("x-request-id")
-                        or resp.headers.get("x-request-id".title())
+                    request_id = resp.headers.get("x-request-id") or resp.headers.get(
+                        "x-request-id".title()
                     )
                     if request_id:
                         messages.append(f"request_id={request_id}")
-                    raise RuntimeError(
-                        "Shopify GraphQL error: " + " | ".join(messages)
-                    )
+                    raise RuntimeError("Shopify GraphQL error: " + " | ".join(messages))
                 return body
             except self._RETRYABLE_ERRORS as exc:
                 last_exc = exc
@@ -214,9 +217,11 @@ class ShopifyClient:
                         shop=self.shop,
                         attempt=attempt,
                         max_attempts=self._MAX_RETRIES,
-                        reason="throttled"
-                        if isinstance(exc, _ShopifyThrottledError)
-                        else "retryable_error",
+                        reason=(
+                            "throttled"
+                            if isinstance(exc, _ShopifyThrottledError)
+                            else "retryable_error"
+                        ),
                         retry_after_seconds=retry_after_seconds,
                         error=str(exc),
                     )
@@ -273,7 +278,11 @@ class ShopifyClient:
             try:
                 self._token = shopify_session_store.get_offline_access_token(self.shop)
             except Exception as exc:
-                LOG.warning("Shopify offline session unavailable shop=%s error=%s", self.shop, exc)
+                LOG.warning(
+                    "Shopify offline session unavailable shop=%s error=%s",
+                    self.shop,
+                    exc,
+                )
                 raise RuntimeError(SHOPIFY_REAUTH_REQUIRED) from exc
 
         if not self._token:
@@ -303,7 +312,9 @@ class ShopifyClient:
         """
         self._token = token
         if persist:
-            raise RuntimeError("Shopify credentials are persisted by the canonical app session store")
+            raise RuntimeError(
+                "Shopify credentials are persisted by the canonical app session store"
+            )
         # If client already exists, update its header in-place
         if self._client is not None:
             self._client.headers["X-Shopify-Access-Token"] = token
@@ -340,11 +351,15 @@ class ShopifyClient:
         return normalize_tags(tags, allow_empty=allow_empty)
 
     @staticmethod
-    def _build_product_payload(product: Dict[str, Any], *, include_id: bool) -> Dict[str, Any]:
+    def _build_product_payload(
+        product: Dict[str, Any], *, include_id: bool
+    ) -> Dict[str, Any]:
         return build_product_payload(product, include_id=include_id)
 
     @staticmethod
-    def _extract_metafields_inputs(product: Dict[str, Any], owner_id: str) -> list[Dict[str, str]]:
+    def _extract_metafields_inputs(
+        product: Dict[str, Any], owner_id: str
+    ) -> list[Dict[str, str]]:
         raw = product.get("metafields")
         if not isinstance(raw, list):
             return []
@@ -356,7 +371,10 @@ class ShopifyClient:
             key = item.get("key")
             value = item.get("value")
             mf_type = item.get("type") or "single_line_text_field"
-            if not all(isinstance(v, str) and v.strip() for v in [namespace, key, value, mf_type]):
+            if not all(
+                isinstance(v, str) and v.strip()
+                for v in [namespace, key, value, mf_type]
+            ):
                 continue
             inputs.append(
                 {
@@ -369,7 +387,9 @@ class ShopifyClient:
             )
         return inputs
 
-    async def set_product_metafields(self, owner_id: str, metafields: list[Dict[str, str]]) -> Dict[str, Any]:
+    async def set_product_metafields(
+        self, owner_id: str, metafields: list[Dict[str, str]]
+    ) -> Dict[str, Any]:
         if not metafields:
             return {"data": {"metafieldsSet": {"metafields": [], "userErrors": []}}}
         mutation = _load_graphql("metafieldsSet.graphql")
@@ -391,14 +411,18 @@ class ShopifyClient:
             if isinstance(response, dict)
             else {}
         )
-        owner_id = result_product.get("id") if isinstance(result_product, dict) else None
+        owner_id = (
+            result_product.get("id") if isinstance(result_product, dict) else None
+        )
         if isinstance(owner_id, str) and owner_id:
             metafields = self._extract_metafields_inputs(product, owner_id)
             if metafields:
                 await self.set_product_metafields(owner_id, metafields)
         return response
 
-    async def create_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
+    async def create_product_from_input(
+        self, product: Dict[str, Any]
+    ) -> Dict[str, Any]:
         return await self._run_product_mutation_from_input(
             mutation_file="productCreate.graphql",
             response_key="productCreate",
@@ -410,13 +434,53 @@ class ShopifyClient:
         query = _load_graphql("productQuery.graphql")
         return await self.graphql(query, {"id": gid})
 
-    async def set_product_variant_matrix(self, gid: str, options: List[Dict[str, Any]], variants: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def get_product_review_fields(self, gid: str) -> list[CatalogCurrentField]:
+        from application.use_cases.intelligence_apply_suggestion import _normalize_shopify_product
+
+        response = await self.get_product(gid)
+        node = (response.get("data") or {}).get("node")
+        if response.get("errors") or not isinstance(node, dict):
+            raise RuntimeError("Could not load the current Shopify product. Refresh to retry.")
+        live = _normalize_shopify_product(response)
+        for connection, selection in (
+            ("metafields", "namespace key type value"),
+            ("variants", "id title sku price selectedOptions { name value }"),
+        ):
+            values: list[Dict[str, Any]] = []
+            cursor = None
+            while True:
+                query = ("query ReviewValues($id: ID!, $after: String) { node(id: $id) { ... on Product { "
+                         + connection + "(first: 250, after: $after) { nodes { " + selection
+                         + " } pageInfo { hasNextPage endCursor } } } } }")
+                page = await self.graphql(query, {"id": gid, "after": cursor})
+                data = ((page.get("data") or {}).get("node") or {}).get(connection)
+                if page.get("errors") or not isinstance(data, dict):
+                    raise RuntimeError("Could not load current Shopify values. Refresh to retry.")
+                values.extend(data.get("nodes") or [])
+                info = data.get("pageInfo") or {}
+                if not info.get("hasNextPage"):
+                    break
+                next_cursor = info.get("endCursor")
+                if not next_cursor or next_cursor == cursor:
+                    raise RuntimeError("Could not load all Shopify values. Refresh to retry.")
+                cursor = next_cursor
+            live[connection] = values
+        fields = ("title", "body_html", "vendor", "product_type", "seo_title", "seo_description", "tags", "metafields")
+        return [{"field": field, "value": live.get(field)} for field in fields] + [
+            {"field": "variant_operations", "value": {"options": live.get("options", []), "variants": live["variants"]}}
+        ]
+
+    async def set_product_variant_matrix(
+        self, gid: str, options: List[Dict[str, Any]], variants: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         mutation = _load_graphql("productSet.graphql")
         input_payload = {
             "productOptions": normalize_product_options(options),
             "variants": normalize_variant_inputs(variants),
         }
-        return await self.graphql(mutation, {"identifier": {"id": gid}, "input": input_payload})
+        return await self.graphql(
+            mutation, {"identifier": {"id": gid}, "input": input_payload}
+        )
 
     async def get_product_metafields(
         self, gid: str, identifiers: List[Dict[str, str]]
@@ -432,9 +496,7 @@ class ShopifyClient:
             if isinstance(item, dict)
         ]
         requested_pairs = [
-            (namespace, key)
-            for namespace, key in requested_pairs
-            if namespace and key
+            (namespace, key) for namespace, key in requested_pairs if namespace and key
         ]
         keys = [f"{namespace}.{key}" for namespace, key in requested_pairs]
         if not keys:
@@ -506,7 +568,9 @@ class ShopifyClient:
         if not normalized_ids:
             return {"data": {"productVariantsBulkDelete": {"userErrors": []}}}
         mutation = _load_graphql("productVariantsBulkDelete.graphql")
-        return await self.graphql(mutation, {"productId": product_id, "variantsIds": normalized_ids})
+        return await self.graphql(
+            mutation, {"productId": product_id, "variantsIds": normalized_ids}
+        )
 
     async def update_product(
         self, gid: str, title: Optional[str] = None, body_html: Optional[str] = None
@@ -519,7 +583,9 @@ class ShopifyClient:
             input_payload["descriptionHtml"] = body_html
         return await self.graphql(mutation, {"product": input_payload})
 
-    async def update_product_from_input(self, product: Dict[str, Any]) -> Dict[str, Any]:
+    async def update_product_from_input(
+        self, product: Dict[str, Any]
+    ) -> Dict[str, Any]:
         return await self._run_product_mutation_from_input(
             mutation_file="productUpdate.graphql",
             response_key="productUpdate",
@@ -583,12 +649,24 @@ class ShopifyClient:
                 if not isinstance(node, dict):
                     continue
                 seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
-                options = node.get("options") if isinstance(node.get("options"), list) else []
-                images = node.get("images") if isinstance(node.get("images"), dict) else {}
-                image_nodes = images.get("nodes") if isinstance(images.get("nodes"), list) else []
-                variants = node.get("variants") if isinstance(node.get("variants"), dict) else {}
+                options = (
+                    node.get("options") if isinstance(node.get("options"), list) else []
+                )
+                images = (
+                    node.get("images") if isinstance(node.get("images"), dict) else {}
+                )
+                image_nodes = (
+                    images.get("nodes") if isinstance(images.get("nodes"), list) else []
+                )
+                variants = (
+                    node.get("variants")
+                    if isinstance(node.get("variants"), dict)
+                    else {}
+                )
                 variant_nodes = (
-                    variants.get("nodes") if isinstance(variants.get("nodes"), list) else []
+                    variants.get("nodes")
+                    if isinstance(variants.get("nodes"), list)
+                    else []
                 )
                 collected.append(
                     {
@@ -607,9 +685,11 @@ class ShopifyClient:
                                 "id": option.get("id"),
                                 "name": option.get("name"),
                                 "position": option.get("position"),
-                                "values": option.get("optionValues")
-                                if isinstance(option.get("optionValues"), list)
-                                else [],
+                                "values": (
+                                    option.get("optionValues")
+                                    if isinstance(option.get("optionValues"), list)
+                                    else []
+                                ),
                             }
                             for option in options
                             if isinstance(option, dict)
@@ -637,9 +717,11 @@ class ShopifyClient:
                                 "sku": item.get("sku"),
                                 "price": item.get("price"),
                                 "inventory_quantity": item.get("inventoryQuantity"),
-                                "selectedOptions": item.get("selectedOptions")
-                                if isinstance(item.get("selectedOptions"), list)
-                                else [],
+                                "selectedOptions": (
+                                    item.get("selectedOptions")
+                                    if isinstance(item.get("selectedOptions"), list)
+                                    else []
+                                ),
                             }
                             for item in variant_nodes
                             if isinstance(item, dict)
@@ -650,7 +732,9 @@ class ShopifyClient:
                 if remaining <= 0:
                     break
 
-            page_info = products.get("pageInfo", {}) if isinstance(products, dict) else {}
+            page_info = (
+                products.get("pageInfo", {}) if isinstance(products, dict) else {}
+            )
             has_next = bool(page_info.get("hasNextPage"))
             after = page_info.get("endCursor") if has_next else None
             if not has_next or not after:
@@ -658,29 +742,55 @@ class ShopifyClient:
 
         return collected
 
-    async def list_products_by_ids(self, product_ids: list[str]) -> list[Dict[str, Any]]:
+    async def list_products_by_ids(
+        self, product_ids: list[str]
+    ) -> list[Dict[str, Any]]:
         """Fetch exact products without trusting a browser-supplied snapshot."""
-        normalized_ids = list(dict.fromkeys(
-            str(value or "").strip() for value in product_ids
-            if str(value or "").startswith("gid://shopify/Product/")
-        ))
+        normalized_ids = list(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in product_ids
+                if str(value or "").startswith("gid://shopify/Product/")
+            )
+        )
         products: list[Dict[str, Any]] = []
         for gid in normalized_ids:
             response = await self.get_product(gid)
-            node = response.get("data", {}).get("node") if isinstance(response, dict) else None
+            node = (
+                response.get("data", {}).get("node")
+                if isinstance(response, dict)
+                else None
+            )
             if not isinstance(node, dict):
                 continue
             seo = node.get("seo") if isinstance(node.get("seo"), dict) else {}
-            variants = node.get("variants") if isinstance(node.get("variants"), dict) else {}
-            products.append({
-                "id": node.get("id"), "title": node.get("title"),
-                "handle": node.get("handle"), "vendor": node.get("vendor"),
-                "product_type": node.get("productType"), "status": node.get("status"),
-                "tags": node.get("tags"), "body_html": node.get("descriptionHtml"),
-                "seo_title": seo.get("title"), "seo_description": seo.get("description"),
-                "options": node.get("options") if isinstance(node.get("options"), list) else [],
-                "variants": variants.get("nodes") if isinstance(variants.get("nodes"), list) else [],
-            })
+            variants = (
+                node.get("variants") if isinstance(node.get("variants"), dict) else {}
+            )
+            products.append(
+                {
+                    "id": node.get("id"),
+                    "title": node.get("title"),
+                    "handle": node.get("handle"),
+                    "vendor": node.get("vendor"),
+                    "product_type": node.get("productType"),
+                    "status": node.get("status"),
+                    "tags": node.get("tags"),
+                    "body_html": node.get("descriptionHtml"),
+                    "seo_title": seo.get("title"),
+                    "seo_description": seo.get("description"),
+                    "options": (
+                        node.get("options")
+                        if isinstance(node.get("options"), list)
+                        else []
+                    ),
+                    "variants": (
+                        variants.get("nodes")
+                        if isinstance(variants.get("nodes"), list)
+                        else []
+                    ),
+                }
+            )
         return products
 
     # ── Bulk Operation helpers ──────────────────────────────────────────
@@ -689,14 +799,19 @@ class ShopifyClient:
         """Create a staged upload target for a JSONL file used in bulk mutations."""
         mutation = _load_graphql("stagedUploadsCreate.graphql")
         try:
-            resp = await self.graphql(mutation, {
-                "input": [{
-                    "resource": "BULK_MUTATION_VARIABLES",
-                    "filename": "bulk_import.jsonl",
-                    "mimeType": "text/jsonl",
-                    "httpMethod": "POST",
-                }]
-            })
+            resp = await self.graphql(
+                mutation,
+                {
+                    "input": [
+                        {
+                            "resource": "BULK_MUTATION_VARIABLES",
+                            "filename": "bulk_import.jsonl",
+                            "mimeType": "text/jsonl",
+                            "httpMethod": "POST",
+                        }
+                    ]
+                },
+            )
         except Exception:
             LOG.exception(
                 "create_staged_upload failed shop=%s url=%s",
@@ -704,8 +819,12 @@ class ShopifyClient:
                 self.url,
             )
             raise
-        targets = resp.get("data", {}).get("stagedUploadsCreate", {}).get("stagedTargets", [])
-        errors = resp.get("data", {}).get("stagedUploadsCreate", {}).get("userErrors", [])
+        targets = (
+            resp.get("data", {}).get("stagedUploadsCreate", {}).get("stagedTargets", [])
+        )
+        errors = (
+            resp.get("data", {}).get("stagedUploadsCreate", {}).get("userErrors", [])
+        )
         if errors:
             raise RuntimeError(f"Staged upload creation failed: {errors}")
         if not targets:
@@ -729,14 +848,143 @@ class ShopifyClient:
             resp = await upload_client.post(url, data=form_fields, files=files)
             resp.raise_for_status()
 
+    async def create_staged_image_upload(
+        self, *, filename: str, mime_type: str, file_size: int
+    ) -> Dict[str, Any]:
+        """Create a temporary Shopify upload target for one product image."""
+
+        mutation = _load_graphql("stagedUploadsCreate.graphql")
+        resp = await self.graphql(
+            mutation,
+            {
+                "input": [
+                    {
+                        "resource": "PRODUCT_IMAGE",
+                        "filename": filename,
+                        "mimeType": mime_type,
+                        "fileSize": str(file_size),
+                        "httpMethod": "POST",
+                    }
+                ]
+            },
+        )
+        payload = resp.get("data", {}).get("stagedUploadsCreate", {})
+        errors = payload.get("userErrors", [])
+        if errors:
+            raise RuntimeError(f"Image staged upload creation failed: {errors}")
+        targets = payload.get("stagedTargets", [])
+        if not targets:
+            raise RuntimeError("No image staged upload target returned")
+        return targets[0]
+
+    async def upload_bytes_to_staged_url(
+        self,
+        *,
+        url: str,
+        parameters: List[Dict[str, str]],
+        content: bytes,
+        filename: str,
+        mime_type: str,
+        http_method: str = "POST",
+    ) -> None:
+        fields = {
+            str(param.get("name")): str(param.get("value"))
+            for param in parameters
+            if param.get("name")
+        }
+        async with httpx.AsyncClient(timeout=60.0, trust_env=False) as upload_client:
+            if http_method.upper() == "PUT":
+                response = await upload_client.put(
+                    url,
+                    content=content,
+                    headers={**fields, "Content-Type": mime_type},
+                )
+            else:
+                response = await upload_client.post(
+                    url,
+                    data=fields,
+                    files={"file": (filename, content, mime_type)},
+                )
+            response.raise_for_status()
+
+    async def get_product_media(self, product_id: str) -> list[Dict[str, Any]]:
+        query = """query ProductMediaStatus($id: ID!) {
+          product(id: $id) {
+            media(first: 250) { nodes {
+              id status mediaContentType
+              ... on MediaImage {
+                fileStatus
+                image { url altText }
+              }
+            } }
+          }
+        }"""
+        response = await self.graphql(query, {"id": product_id})
+        media = response.get("data", {}).get("product", {}).get("media", {})
+        nodes = media.get("nodes") if isinstance(media, dict) else []
+        return (
+            [item for item in nodes if isinstance(item, dict)]
+            if isinstance(nodes, list)
+            else []
+        )
+
+    async def wait_for_product_media(
+        self,
+        product_id: str,
+        *,
+        existing_media_ids: list[str],
+        expected_new_count: int,
+        poll_interval: float = 2.0,
+        timeout: float = 120.0,
+    ) -> Dict[str, Any]:
+        existing = set(existing_media_ids)
+        elapsed = 0.0
+        latest: list[Dict[str, Any]] = []
+        while elapsed <= timeout:
+            latest = await self.get_product_media(product_id)
+            incoming = [
+                item for item in latest if str(item.get("id") or "") not in existing
+            ]
+            failed = [
+                item
+                for item in incoming
+                if "FAILED"
+                in {
+                    str(item.get("status") or "").upper(),
+                    str(item.get("fileStatus") or "").upper(),
+                }
+            ]
+            if failed:
+                return {"status": "failed", "media": incoming, "failed": failed}
+            ready = [
+                item
+                for item in incoming
+                if str(item.get("status") or "").upper() == "READY"
+                and isinstance(item.get("image"), dict)
+                and item["image"].get("url")
+            ]
+            if len(incoming) >= expected_new_count and len(ready) >= expected_new_count:
+                return {"status": "ready", "media": incoming, "ready": ready}
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+        return {
+            "status": "timeout",
+            "media": [
+                item for item in latest if str(item.get("id") or "") not in existing
+            ],
+        }
+
     async def run_bulk_mutation(self, staged_upload_path: str) -> Dict[str, Any]:
         """Start a bulk mutation operation using the productSet mutation."""
         product_set_mutation = _load_graphql("productSet.graphql")
         mutation = _load_graphql("bulkOperationRunMutation.graphql")
-        resp = await self.graphql(mutation, {
-            "mutation": product_set_mutation,
-            "stagedUploadPath": staged_upload_path,
-        })
+        resp = await self.graphql(
+            mutation,
+            {
+                "mutation": product_set_mutation,
+                "stagedUploadPath": staged_upload_path,
+            },
+        )
         payload = resp.get("data", {}).get("bulkOperationRunMutation", {})
         errors = payload.get("userErrors", [])
         if errors:
@@ -769,9 +1017,7 @@ class ShopifyClient:
                 return status
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
-        raise RuntimeError(
-            f"Bulk operation {operation_id} timed out after {timeout}s"
-        )
+        raise RuntimeError(f"Bulk operation {operation_id} timed out after {timeout}s")
 
     @staticmethod
     def build_product_set_jsonl(products: List[Dict[str, Any]]) -> str:

@@ -128,6 +128,7 @@ class SupabaseDomainAccessors:
                 "save_product_intelligence_suggestions",
                 "supersede_pending_product_intelligence_suggestions",
                 "list_product_intelligence_suggestions",
+                "list_product_intelligence_product_suggestions",
                 "get_product_intelligence_suggestion",
                 "create_product_intelligence_suggestion",
                 "mark_product_intelligence_suggestion_applied",

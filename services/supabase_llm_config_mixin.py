@@ -185,6 +185,7 @@ class SupabaseLlmConfigMixin:
         self,
         config_id: str,
         *,
+        shop_domain: str,
         name: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,
@@ -226,6 +227,7 @@ class SupabaseLlmConfigMixin:
                     client.table("llm_model_configs")
                     .update(update_fields)
                     .eq("id", config_id)
+                    .eq("shop_domain", shop_domain)
                     .execute()
                 )
                 rows = res.data or []
@@ -234,7 +236,7 @@ class SupabaseLlmConfigMixin:
                 LOG.exception("Failed updating llm_model_config=%s", config_id)
 
         config = self.llm_model_configs.get(config_id)
-        if not config:
+        if not config or config.get("shop_domain") != shop_domain:
             return None
         config.update(update_fields)
         return self._sanitize_llm_model_config(config)
@@ -263,6 +265,8 @@ class SupabaseLlmConfigMixin:
     def activate_llm_model_config(
         self, config_id: str, *, shop_domain: str
     ) -> dict[str, Any] | None:
+        if not any(item.get("id") == config_id for item in self.list_llm_model_configs(shop_domain)):
+            return None
         client = self._get_supabase_client()
         if client:
             try:

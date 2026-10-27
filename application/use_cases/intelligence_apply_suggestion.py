@@ -464,6 +464,12 @@ async def execute(
     shopify_patch_payload = {
         key: value for key, value in effective_patch_payload.items() if key != "variant_operations"
     }
+    # Shopify treats ``seo`` as a replace-together object. Preserve the live
+    # sibling when a reviewed suggestion changes only one SEO field.
+    if "seo_title" in shopify_patch_payload and "seo_description" not in shopify_patch_payload:
+        shopify_patch_payload["seo_description"] = live_product.get("seo_description") or ""
+    if "seo_description" in shopify_patch_payload and "seo_title" not in shopify_patch_payload:
+        shopify_patch_payload["seo_title"] = live_product.get("seo_title") or ""
     if shopify_patch_payload:
         await shopify.update_product_from_input({"id": gid, **shopify_patch_payload})
 

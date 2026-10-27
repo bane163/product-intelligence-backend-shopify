@@ -27,7 +27,11 @@ def _variants(product: dict[str, Any]) -> list[dict[str, Any]]:
     raw = product.get("variants")
     if isinstance(raw, dict):
         raw = raw.get("nodes")
-    return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    return (
+        [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, list)
+        else []
+    )
 
 
 def _price(variant: dict[str, Any]) -> Any:
@@ -78,83 +82,168 @@ def build_quality_report(
     handle_owners: dict[str, int] = {}
 
     if not products:
-        issues.append(_issue(
-            severity="blocker", code="NO_PRODUCTS_EXTRACTED", product_index=None,
-            value_path=None, message="No products could be extracted from this document.",
-            remedy="retry_extraction",
-        ))
+        issues.append(
+            _issue(
+                severity="blocker",
+                code="NO_PRODUCTS_EXTRACTED",
+                product_index=None,
+                value_path=None,
+                message="No products could be extracted from this document.",
+                remedy="retry_extraction",
+            )
+        )
 
     for product_index, product in enumerate(products):
         title = _text(product.get("title"))
         if not title:
-            issues.append(_issue(
-                severity="blocker", code="TITLE_REQUIRED", product_index=product_index,
-                value_path="title", message="Enter a product title.", remedy="edit",
-            ))
+            issues.append(
+                _issue(
+                    severity="blocker",
+                    code="TITLE_REQUIRED",
+                    product_index=product_index,
+                    value_path="title",
+                    message="Enter a product title.",
+                    remedy="edit",
+                )
+            )
         elif not _has_value_evidence(product, "title"):
-            issues.append(_issue(
-                severity="warning", code="SOURCE_EVIDENCE_MISSING", product_index=product_index,
-                value_path="title", message="The product title could not be linked to one exact source location.",
-                remedy="view_source",
-            ))
+            issues.append(
+                _issue(
+                    severity="warning",
+                    code="SOURCE_EVIDENCE_MISSING",
+                    product_index=product_index,
+                    value_path="title",
+                    message="The product title could not be linked to one exact source location.",
+                    remedy="view_source",
+                )
+            )
 
         handle = _text(product.get("handle")).lower()
         if handle:
             if not _HANDLE_RE.fullmatch(handle):
-                issues.append(_issue(
-                    severity="blocker", code="INVALID_HANDLE", product_index=product_index,
-                    value_path="handle", message="Use lowercase letters, numbers, and single hyphens only.",
-                    remedy="edit",
-                ))
+                issues.append(
+                    _issue(
+                        severity="blocker",
+                        code="INVALID_HANDLE",
+                        product_index=product_index,
+                        value_path="handle",
+                        message="Use lowercase letters, numbers, and single hyphens only.",
+                        remedy="edit",
+                    )
+                )
             elif handle in handle_owners:
-                issues.append(_issue(
-                    severity="blocker", code="DUPLICATE_IMPORT_HANDLE", product_index=product_index,
-                    value_path="handle", message="Each product in this import must have a unique handle.",
-                    remedy="edit",
-                ))
+                issues.append(
+                    _issue(
+                        severity="blocker",
+                        code="DUPLICATE_IMPORT_HANDLE",
+                        product_index=product_index,
+                        value_path="handle",
+                        message="Each product in this import must have a unique handle.",
+                        remedy="edit",
+                    )
+                )
             else:
                 handle_owners[handle] = product_index
 
         status_value = _text(product.get("status"))
         if status_value and status_value.upper() not in _VALID_STATUSES:
-            issues.append(_issue(
-                severity="blocker", code="INVALID_STATUS", product_index=product_index,
-                value_path="status", message="Choose Active, Draft, Archived, or Unlisted.", remedy="edit",
-            ))
+            issues.append(
+                _issue(
+                    severity="blocker",
+                    code="INVALID_STATUS",
+                    product_index=product_index,
+                    value_path="status",
+                    message="Choose Active, Draft, Archived, or Unlisted.",
+                    remedy="edit",
+                )
+            )
 
         if not _text(product.get("vendor")):
-            issues.append(_issue(
-                severity="warning", code="VENDOR_MISSING", product_index=product_index,
-                value_path="vendor", message="No vendor was extracted for this product.", remedy="edit",
-            ))
-        if resolve_extracted_image(product) is None:
-            issues.append(_issue(
-                severity="warning", code="IMAGE_MISSING", product_index=product_index,
-                value_path="images", message="No product image was extracted.", remedy="edit",
-            ))
+            issues.append(
+                _issue(
+                    severity="warning",
+                    code="VENDOR_MISSING",
+                    product_index=product_index,
+                    value_path="vendor",
+                    message="No vendor was extracted for this product.",
+                    remedy="edit",
+                )
+            )
+        media_gallery = (
+            product.get("media_gallery")
+            if isinstance(product.get("media_gallery"), list)
+            else []
+        )
+        ready_media = [
+            item
+            for item in media_gallery
+            if isinstance(item, dict)
+            and item.get("validation_status") == "ready"
+            and item.get("included") is True
+        ]
+        invalid_media = [
+            item
+            for item in media_gallery
+            if isinstance(item, dict) and item.get("validation_status") == "invalid"
+        ]
+        if not ready_media and resolve_extracted_image(product) is None:
+            issues.append(
+                _issue(
+                    severity="warning",
+                    code="IMAGE_MISSING",
+                    product_index=product_index,
+                    value_path="images",
+                    message=(
+                        str(
+                            invalid_media[0].get("issue_message")
+                            or "The extracted image is invalid."
+                        )
+                        if invalid_media
+                        else "No product image was extracted."
+                    ),
+                    remedy="review",
+                )
+            )
 
         variants = _variants(product)
         if not variants:
-            issues.append(_issue(
-                severity="blocker", code="SELLABLE_VARIANT_REQUIRED", product_index=product_index,
-                value_path="variants", message="Add at least one variant with a SKU and price.", remedy="edit",
-            ))
+            issues.append(
+                _issue(
+                    severity="blocker",
+                    code="SELLABLE_VARIANT_REQUIRED",
+                    product_index=product_index,
+                    value_path="variants",
+                    message="Add at least one variant with a SKU and price.",
+                    remedy="edit",
+                )
+            )
         for variant_index, variant in enumerate(variants):
             prefix = f"variants[{variant_index}]"
             sku = _text(variant.get("sku"))
             if not sku:
-                issues.append(_issue(
-                    severity="blocker", code="SKU_REQUIRED", product_index=product_index,
-                    value_path=f"{prefix}.sku", message="Enter a SKU for every variant.", remedy="edit",
-                ))
+                issues.append(
+                    _issue(
+                        severity="blocker",
+                        code="SKU_REQUIRED",
+                        product_index=product_index,
+                        value_path=f"{prefix}.sku",
+                        message="Enter a SKU for every variant.",
+                        remedy="edit",
+                    )
+                )
             else:
                 folded_sku = sku.casefold()
                 if folded_sku in sku_owners:
-                    issues.append(_issue(
-                        severity="blocker", code="DUPLICATE_IMPORT_SKU", product_index=product_index,
-                        value_path=f"{prefix}.sku", message="Each variant in this import must have a unique SKU.",
-                        remedy="edit",
-                    ))
+                    issues.append(
+                        _issue(
+                            severity="blocker",
+                            code="DUPLICATE_IMPORT_SKU",
+                            product_index=product_index,
+                            value_path=f"{prefix}.sku",
+                            message="Each variant in this import must have a unique SKU.",
+                            remedy="edit",
+                        )
+                    )
                 else:
                     sku_owners[folded_sku] = (product_index, variant_index)
 
@@ -164,34 +253,52 @@ def build_quality_report(
             except (TypeError, ValueError):
                 price = math.nan
             if raw_price in (None, "") or not math.isfinite(price) or price < 0:
-                issues.append(_issue(
-                    severity="blocker", code="PRICE_REQUIRED", product_index=product_index,
-                    value_path=f"{prefix}.price", message="Enter a finite price that is zero or greater.", remedy="edit",
-                ))
+                issues.append(
+                    _issue(
+                        severity="blocker",
+                        code="PRICE_REQUIRED",
+                        product_index=product_index,
+                        value_path=f"{prefix}.price",
+                        message="Enter a finite price that is zero or greater.",
+                        remedy="edit",
+                    )
+                )
             compare = variant.get("compare_at_price", variant.get("compareAtPrice"))
             if compare not in (None, ""):
                 try:
                     compare_value = float(compare)
                 except (TypeError, ValueError):
                     compare_value = math.nan
-                if not math.isfinite(compare_value) or (math.isfinite(price) and compare_value < price):
-                    issues.append(_issue(
-                        severity="blocker", code="INVALID_COMPARE_AT_PRICE", product_index=product_index,
-                        value_path=f"{prefix}.compare_at_price",
-                        message="Compare-at price must be finite and at least the selling price.", remedy="edit",
-                    ))
+                if not math.isfinite(compare_value) or (
+                    math.isfinite(price) and compare_value < price
+                ):
+                    issues.append(
+                        _issue(
+                            severity="blocker",
+                            code="INVALID_COMPARE_AT_PRICE",
+                            product_index=product_index,
+                            value_path=f"{prefix}.compare_at_price",
+                            message="Compare-at price must be finite and at least the selling price.",
+                            remedy="edit",
+                        )
+                    )
 
         deferred = product.get("inventory_quantity")
         if deferred not in (None, ""):
-            issues.append(_issue(
-                severity="warning", code="FIELD_DEFERRED", product_index=product_index,
-                value_path="inventory_quantity",
-                message="Inventory quantities require a Shopify fulfillment location and will not be applied yet.",
-                remedy="review",
-            ))
+            issues.append(
+                _issue(
+                    severity="warning",
+                    code="FIELD_DEFERRED",
+                    product_index=product_index,
+                    value_path="inventory_quantity",
+                    message="Inventory quantities require a Shopify fulfillment location and will not be applied yet.",
+                    remedy="review",
+                )
+            )
 
     blocker_products = {
-        int(item["product_index"]) for item in issues
+        int(item["product_index"])
+        for item in issues
         if item["severity"] == "blocker" and isinstance(item.get("product_index"), int)
     }
     blocker_count = sum(item["severity"] == "blocker" for item in issues)
@@ -211,10 +318,13 @@ def build_quality_report(
     }
 
 
-def issues_for_product(report: dict[str, Any] | None, product_index: int) -> list[dict[str, Any]]:
+def issues_for_product(
+    report: dict[str, Any] | None, product_index: int
+) -> list[dict[str, Any]]:
     if not isinstance(report, dict) or not isinstance(report.get("issues"), list):
         return []
     return [
-        item for item in report["issues"]
+        item
+        for item in report["issues"]
         if isinstance(item, dict) and item.get("product_index") == product_index
     ]

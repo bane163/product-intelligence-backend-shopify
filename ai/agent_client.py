@@ -13,6 +13,7 @@ from typing import Any, Callable
 from agent_framework.github import GitHubCopilotAgent
 from copilot import CopilotClient
 
+from ai.models import ProductIntelligenceSuggestionsList
 from application.ports.llm_port import ModelConfiguration
 from services.llm_service import map_copilot_provider, scoped_permission_handler
 from shared.token_usage import normalize_reported_token_usage
@@ -31,28 +32,44 @@ async def run_product_intelligence_suggestions(
 ):
     env = model_env or {}
     model = ModelConfiguration(
-        provider="openai" if "api.openai.com" in str(env.get("OLLAMA_CLOUD_URL", "")) else "ollama/openai-compat",
+        provider=(
+            "openai"
+            if "api.openai.com" in str(env.get("OLLAMA_CLOUD_URL", ""))
+            else "ollama/openai-compat"
+        ),
         base_url=str(env.get("OLLAMA_CLOUD_URL") or ""),
         model_id=str(env.get("OLLAMA_MODEL_ID") or ""),
         api_key=str(env.get("OLLAMA_API_KEY") or ""),
     )
     prompt = (
-        "Return only JSON matching ProductIntelligenceSuggestionsList. Analyze these indexed "
-        "Shopify products and propose conservative, reviewable catalog improvements. Never "
-        "claim source evidence that is not present. Products:\n" + json.dumps(products, ensure_ascii=False)
+        "Return only JSON matching this JSON Schema:\n"
+        + json.dumps(
+            ProductIntelligenceSuggestionsList.model_json_schema(),
+            ensure_ascii=False,
+        )
+        + "\nAnalyze these indexed Shopify products and propose conservative, reviewable "
+        "catalog improvements. Never claim source evidence that is not present. Products:\n"
+        + json.dumps(products, ensure_ascii=False)
     )
     image_count = sum(
-        1 for product in products for image in (product.get("images") or [])
+        1
+        for product in products
+        for image in (product.get("images") or [])
         if isinstance(image, dict) and str(image.get("src") or "").strip()
     )
     _trace(
         trace_event,
         phase="llm_request",
         message="Calling Copilot BYOK for product intelligence suggestions",
-        payload_preview={"products_count": len(products), "image_uris_count": image_count},
+        payload_preview={
+            "products_count": len(products),
+            "image_uris_count": image_count,
+        },
     )
     with TemporaryDirectory(prefix="stockpile-intelligence-") as runtime_dir:
-        client = CopilotClient(mode="empty", base_directory=runtime_dir, use_logged_in_user=False, env={})
+        client = CopilotClient(
+            mode="empty", base_directory=runtime_dir, use_logged_in_user=False, env={}
+        )
         agent = GitHubCopilotAgent(
             instructions="You return strict JSON only and have no tools or host capabilities.",
             client=client,
@@ -60,7 +77,9 @@ async def run_product_intelligence_suggestions(
                 "model": model.model_id,
                 "provider": map_copilot_provider(model),
                 "available_tools": [],
-                "on_permission_request": scoped_permission_handler(frozenset(), trace_event),
+                "on_permission_request": scoped_permission_handler(
+                    frozenset(), trace_event
+                ),
             },
         )
         try:

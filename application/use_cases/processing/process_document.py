@@ -19,7 +19,10 @@ from application.domain.shopify_product_normalization import (
 from application.ports.llm_port import ExtractionRequest, LLMPort, ModelConfiguration
 from application.ports.supabase_port import SupabaseNamespacedPort
 from application.ports.tracing_port import TracingPort
-from application.services.document_formats import classify_document, validate_document_content
+from application.services.document_formats import (
+    classify_document,
+    validate_document_content,
+)
 from application.services.canonical_pdf import (
     DocumentTextEvidenceUnavailable,
     ensure_canonical_pdf,
@@ -33,6 +36,7 @@ from application.services.pdf_evidence_index import (
     resolve_indexed_pdf_source_refs,
     validate_indexed_pdf_evidence,
 )
+from application.services.product_media_ingestion import attach_product_media
 from application.use_cases.intelligence_generate_suggestions import (
     execute as generate_suggestions_execute,
 )
@@ -84,16 +88,19 @@ async def execute(
             return None
 
     if manage_lifecycle:
-        supabase.runs.create_or_update_run(run_id, {
-            "status": "queued",
-            "source": "document_import",
-            "started_at": started_at.isoformat(),
-            "prompt": DEFAULT_IMPORT_AGENT_PROMPT,
-            "writer_prompt": DEFAULT_IMPORT_WRITER_PROMPT,
-            "attempt": 1,
-            "shop_domain": shop_domain,
-            **observability_fields,
-        })
+        supabase.runs.create_or_update_run(
+            run_id,
+            {
+                "status": "queued",
+                "source": "document_import",
+                "started_at": started_at.isoformat(),
+                "prompt": DEFAULT_IMPORT_AGENT_PROMPT,
+                "writer_prompt": DEFAULT_IMPORT_WRITER_PROMPT,
+                "attempt": 1,
+                "shop_domain": shop_domain,
+                **observability_fields,
+            },
+        )
     try:
         emit_and_persist(
             phase="request_received",
@@ -107,14 +114,14 @@ async def execute(
         # Persist input metadata
         if manage_lifecycle:
             supabase.runs.create_or_update_run(
-            run_id,
-            {
-                "input_file_id": source_file_id,
-                "input_filename": input_name,
-                "input_content_type": input_content_type,
-                "input_size_bytes": len(file_bytes),
-            },
-        )
+                run_id,
+                {
+                    "input_file_id": source_file_id,
+                    "input_filename": input_name,
+                    "input_content_type": input_content_type,
+                    "input_size_bytes": len(file_bytes),
+                },
+            )
 
         document_format = classify_document(
             filename=input_name,
@@ -129,7 +136,7 @@ async def execute(
         model_config = ModelConfiguration(
             provider="openai",
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model_id=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
+            model_id=os.getenv("OPENAI_MODEL", "gpt-6-luna"),
             api_key=os.getenv("OPENAI_API_KEY", ""),
         )
         if shop_domain:
@@ -140,9 +147,21 @@ async def execute(
                     base_url=str(active_model.get("base_url") or ""),
                     model_id=str(active_model.get("model_id") or ""),
                     api_key=str(active_model.get("api_key") or ""),
-                    max_tokens=(int(active_model["max_tokens"]) if active_model.get("max_tokens") is not None else None),
-                    timeout_seconds=(float(active_model["timeout_seconds"]) if active_model.get("timeout_seconds") is not None else None),
-                    extra=(active_model.get("extra") if isinstance(active_model.get("extra"), dict) else None),
+                    max_tokens=(
+                        int(active_model["max_tokens"])
+                        if active_model.get("max_tokens") is not None
+                        else None
+                    ),
+                    timeout_seconds=(
+                        float(active_model["timeout_seconds"])
+                        if active_model.get("timeout_seconds") is not None
+                        else None
+                    ),
+                    extra=(
+                        active_model.get("extra")
+                        if isinstance(active_model.get("extra"), dict)
+                        else None
+                    ),
                 )
                 supabase.runs.create_or_update_run(
                     run_id,
@@ -170,19 +189,21 @@ async def execute(
         )
         if manage_lifecycle:
             supabase.runs.create_or_update_run(
-            run_id,
-            {
-                "status": "running",
-                "shop_domain": shop_domain,
-            },
-        )
+                run_id,
+                {
+                    "status": "running",
+                    "shop_domain": shop_domain,
+                },
+            )
 
         pdf_layout = None
         evidence_catalog: EvidenceCatalog | None = None
         canonical_source_file_id = source_file_id
         if document_format.kind in {"pdf", "docx", "pptx", "image"}:
             if not source_file_id or not shop_domain:
-                raise RuntimeError("Canonical sources require a persisted tenant-owned input file")
+                raise RuntimeError(
+                    "Canonical sources require a persisted tenant-owned input file"
+                )
             emit_and_persist(
                 phase="canonicalization_start",
                 message="Resolving canonical PDF source",
@@ -195,7 +216,8 @@ async def execute(
                     source_file_id=source_file_id,
                     source_content=file_bytes,
                     source_name=input_name or source_file_id,
-                    source_content_type=input_content_type or "application/octet-stream",
+                    source_content_type=input_content_type
+                    or "application/octet-stream",
                     document_format=document_format,
                     shop_domain=shop_domain,
                     collabora_base_url=collabora_url,
@@ -213,14 +235,26 @@ async def execute(
             input_name = canonical.filename
             input_content_type = canonical.content_type
             emit_and_persist(
-                phase="canonicalization_cache_hit" if canonical.cache_hit else "canonicalization_success",
-                message="Reused canonical PDF" if canonical.cache_hit else "Created canonical PDF",
+                phase=(
+                    "canonicalization_cache_hit"
+                    if canonical.cache_hit
+                    else "canonicalization_success"
+                ),
+                message=(
+                    "Reused canonical PDF"
+                    if canonical.cache_hit
+                    else "Created canonical PDF"
+                ),
                 payload_preview={"canonical_file_id": canonical.file_id},
             )
             layout_service = ctx.services.document_layout
             if layout_service is None:
-                raise RuntimeError("PDF_LAYOUT_UNAVAILABLE: document layout service is not registered")
-            pdf_layout = await layout_service.analyze_pdf(file_bytes, canonical_source_file_id)
+                raise RuntimeError(
+                    "PDF_LAYOUT_UNAVAILABLE: document layout service is not registered"
+                )
+            pdf_layout = await layout_service.analyze_pdf(
+                file_bytes, canonical_source_file_id
+            )
             if document_format.kind == "image" and not pdf_layout.anchors:
                 emit_and_persist(
                     phase="canonicalization_no_text",
@@ -234,7 +268,12 @@ async def execute(
             emit_and_persist(
                 phase="pdf_page_coverage",
                 message="Resolved PDF layout coverage",
-                payload_preview={"provider": pdf_layout.provider, "expected": list(pdf_layout.expected_pages), "covered": list(pdf_layout.covered_pages), "anchors": len(pdf_layout.anchors)},
+                payload_preview={
+                    "provider": pdf_layout.provider,
+                    "expected": list(pdf_layout.expected_pages),
+                    "covered": list(pdf_layout.covered_pages),
+                    "anchors": len(pdf_layout.anchors),
+                },
                 metadata={
                     "provider": "azure_document_intelligence",
                     "model_name": "prebuilt-layout:2024-11-30",
@@ -264,7 +303,11 @@ async def execute(
                     model=model_config,
                     evidence_catalog=evidence_catalog,
                     validation_feedback=validation_feedback,
-                    extraction_mode=("first_sheet" if extraction_mode.strip().lower() == "first_sheet" else "per_sheet"),
+                    extraction_mode=(
+                        "first_sheet"
+                        if extraction_mode.strip().lower() == "first_sheet"
+                        else "per_sheet"
+                    ),
                     collabora_base_url=collabora_url,
                     trace_event=trace_event,
                 )
@@ -273,7 +316,9 @@ async def execute(
                 result = {
                     "products": [
                         item
-                        for item in result.model_dump(mode="json", exclude_none=True).get("products", [])
+                        for item in result.model_dump(
+                            mode="json", exclude_none=True
+                        ).get("products", [])
                         if isinstance(item, dict)
                     ]
                 }
@@ -304,7 +349,9 @@ async def execute(
                         "products": sanitation_diagnostics,
                     },
                 )
-            validation = validate_indexed_pdf_evidence(candidate_products, evidence_catalog)
+            validation = validate_indexed_pdf_evidence(
+                candidate_products, evidence_catalog
+            )
             if validation.valid:
                 # Sanitation mutates the model-dumped dictionaries. Verify that
                 # pruning optional leaves did not invalidate the ProductsList
@@ -331,7 +378,9 @@ async def execute(
                         },
                         error=feedback,
                     )
-                    raise SourceEvidenceValidationFailed(schema_paths, feedback) from exc
+                    raise SourceEvidenceValidationFailed(
+                        schema_paths, feedback
+                    ) from exc
                 resolution_stats: dict[str, int] = {}
                 resolved = resolve_indexed_pdf_source_refs(
                     candidate_products,
@@ -415,16 +464,32 @@ async def execute(
                     products, file_bytes, input_name, source_file_id=source_file_id
                 )
             for product in products:
-                refs = product.get("source_refs") if isinstance(product.get("source_refs"), list) else []
-                origins = product.get("value_origins") if isinstance(product.get("value_origins"), dict) else {}
+                refs = (
+                    product.get("source_refs")
+                    if isinstance(product.get("source_refs"), list)
+                    else []
+                )
+                origins = (
+                    product.get("value_origins")
+                    if isinstance(product.get("value_origins"), dict)
+                    else {}
+                )
                 for ref in refs:
-                    if isinstance(ref, dict) and isinstance(ref.get("field"), str) and ref["field"]:
-                        origins.setdefault(str(ref.get("value_path") or ref["field"]), "source")
+                    if (
+                        isinstance(ref, dict)
+                        and isinstance(ref.get("field"), str)
+                        and ref["field"]
+                    ):
+                        origins.setdefault(
+                            str(ref.get("value_path") or ref["field"]), "source"
+                        )
                 if origins:
                     product["value_origins"] = origins
             if products and enable_ai_enhancements:
                 if not shop_domain:
-                    enrichment_warning = "Import enrichment skipped: missing shop_domain"
+                    enrichment_warning = (
+                        "Import enrichment skipped: missing shop_domain"
+                    )
                     emit_and_persist(
                         phase="import_enrichment_skipped",
                         message=enrichment_warning,
@@ -437,7 +502,8 @@ async def execute(
                         normalization_settings = None
                         intelligence = getattr(supabase, "intelligence", None)
                         if intelligence and hasattr(
-                            intelligence, "get_product_intelligence_normalization_settings"
+                            intelligence,
+                            "get_product_intelligence_normalization_settings",
                         ):
                             normalization_settings = intelligence.get_product_intelligence_normalization_settings(
                                 shop_domain=shop_domain
@@ -469,6 +535,7 @@ async def execute(
                                     VARIANT_OPERATIONS_FIELD
                                 ] = variant_operations
                         result["products"] = enriched_products
+                        products = enriched_products
                         enrichment_applied = bool(enrichment_suggestions_count)
                     except Exception as exc:
                         enrichment_warning = f"Import enrichment skipped: {exc}"
@@ -482,6 +549,35 @@ async def execute(
                         enrichment_duration_ms = int(
                             (perf_counter() - enrichment_started_at) * 1000
                         )
+            if products and shop_domain and source_file_id:
+                try:
+                    media_stats = await attach_product_media(
+                        supabase=supabase,
+                        products=products,
+                        source_file_id=canonical_source_file_id or source_file_id,
+                        shop_domain=shop_domain,
+                        pdf_content=(
+                            file_bytes if document_format.kind == "pdf" else None
+                        ),
+                    )
+                    emit_and_persist(
+                        phase="product_media_ingested",
+                        message="Prepared tenant-owned product media for review",
+                        payload_preview=media_stats,
+                    )
+                except Exception as exc:
+                    # Media is reviewable but non-blocking. Preserve the product
+                    # extraction and surface the ingestion failure as an invalid
+                    # gallery item instead of failing the whole document.
+                    for product in products:
+                        if not isinstance(product.get("media_gallery"), list):
+                            product["media_gallery"] = []
+                    emit_and_persist(
+                        phase="product_media_ingestion_failed",
+                        message="Product media could not be prepared",
+                        level="warning",
+                        error=str(exc),
+                    )
             result["enrichment_attempted"] = enrichment_attempted
             result["enrichment_applied"] = enrichment_applied
             result["enrichment_suggestions_count"] = enrichment_suggestions_count

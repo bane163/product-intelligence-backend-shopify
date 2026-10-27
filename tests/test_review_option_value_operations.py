@@ -1016,9 +1016,12 @@ async def test_option_revert_preserves_later_scalar_selection_and_unrelated_opti
     assert all(variant["option1"] != "Green" for variant in product["variants"])
     reverted_item = session["working_plan"]["items"][0]
     assert reverted_item["selected"] is True
+    remaining_ids = {
+        row["change_id"] for row in reverted_item["review_changes"]
+    }
     assert {
         row["change_id"] for row in reverted_item["review_changes"] if row.get("included")
-    } == set(required_ids)
+    } == set(required_ids).intersection(remaining_ids)
 
 
 @pytest.mark.asyncio

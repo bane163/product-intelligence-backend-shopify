@@ -42,7 +42,9 @@ def test_product_intelligence_schema_is_openai_strict_compatible():
 async def test_generate_suggestions_from_llm_payload(monkeypatch):
     captured = {}
 
-    async def fake_run_product_intelligence_suggestions(*, products, model_env, trace_event=None):
+    async def fake_run_product_intelligence_suggestions(
+        *, products, model_env, trace_event=None
+    ):
         _ = trace_event
         captured["products"] = products
         captured["model_env"] = model_env
@@ -91,7 +93,9 @@ async def test_generate_suggestions_from_llm_payload(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_generate_suggestions_persists_nested_payload_and_details(monkeypatch):
-    async def fake_run_product_intelligence_suggestions(*, products, model_env, trace_event=None):
+    async def fake_run_product_intelligence_suggestions(
+        *, products, model_env, trace_event=None
+    ):
         _ = products, model_env, trace_event
         return SimpleNamespace(
             value={
@@ -108,11 +112,13 @@ async def test_generate_suggestions_persists_nested_payload_and_details(monkeypa
                                     "namespace": "extractor",
                                     "key": "inferred_option_candidates",
                                     "type": "json",
-                                    "value": "{\"dimension\":\"Size\"}",
+                                    "value": '{"dimension":"Size"}',
                                 }
                             ],
                             "variant_operations": {
-                                "create_options": [{"name": "Size", "values": ["S", "M"]}],
+                                "create_options": [
+                                    {"name": "Size", "values": ["S", "M"]}
+                                ],
                                 "create_variants": [
                                     {
                                         "option_values": [
@@ -134,8 +140,8 @@ async def test_generate_suggestions_persists_nested_payload_and_details(monkeypa
                             "inferred_dimensions": [
                                 {
                                     "dimension": "Size",
-                                        "detected_values": ["Small", "Medium"],
-                                        "canonical_values": ["S", "M"],
+                                    "detected_values": ["Small", "Medium"],
+                                    "canonical_values": ["S", "M"],
                                     "confidence": 0.92,
                                     "source": "title",
                                 }
@@ -160,14 +166,33 @@ async def test_generate_suggestions_persists_nested_payload_and_details(monkeypa
     )
     suggestions = await execute(
         supabase=supabase,
-        products=[{"id": "gid://shopify/Product/1", "title": "Catalog Product", "variants": [{"title": "Default Title", "sku": "SKU", "price": "10.00"}]}],
+        products=[
+            {
+                "id": "gid://shopify/Product/1",
+                "title": "Catalog Product",
+                "variants": [
+                    {"title": "Default Title", "sku": "SKU", "price": "10.00"}
+                ],
+            }
+        ],
         shop_domain="store.myshopify.com",
     )
 
-    assert suggestions[0]["patch_payload"]["variant_operations"]["create_options"][0]["name"] == "Size"
+    assert (
+        suggestions[0]["patch_payload"]["variant_operations"]["create_options"][0][
+            "name"
+        ]
+        == "Size"
+    )
     assert suggestions[0]["details"]["evidence_sources"] == ["title", "image"]
-    assert suggestions[0]["details"]["inferred_dimensions"][0]["canonical_values"] == ["S", "M"]
-    assert len(suggestions[0]["patch_payload"]["variant_operations"]["create_variants"]) == 2
+    assert suggestions[0]["details"]["inferred_dimensions"][0]["canonical_values"] == [
+        "S",
+        "M",
+    ]
+    assert (
+        len(suggestions[0]["patch_payload"]["variant_operations"]["create_variants"])
+        == 2
+    )
 
 
 @pytest.mark.asyncio
@@ -182,15 +207,19 @@ async def test_generate_suggestions_requires_active_model_config():
 
 
 @pytest.mark.asyncio
-async def test_product_intelligence_suggestions_trace_payload_uses_image_uris(monkeypatch):
+async def test_product_intelligence_suggestions_trace_payload_uses_image_uris(
+    monkeypatch,
+):
     traces = []
+    agent_options = {}
+    captured_prompt = {}
     run_product_intelligence_suggestions = (
         intelligence_generate_suggestions_uc.run_product_intelligence_suggestions
     )
 
     class _FakeAgent:
         def __init__(self, **kwargs):
-            _ = kwargs
+            agent_options.update(kwargs.get("default_options") or {})
 
         async def __aenter__(self):
             return self
@@ -199,7 +228,7 @@ async def test_product_intelligence_suggestions_trace_payload_uses_image_uris(mo
             _ = args
 
         async def run(self, user_message):
-            _ = user_message
+            captured_prompt["value"] = user_message
             return SimpleNamespace(value={"suggestions": []}, text="", usage=None)
 
     class _FakeClient:
@@ -221,12 +250,23 @@ async def test_product_intelligence_suggestions_trace_payload_uses_image_uris(mo
     )
 
     response = await run_product_intelligence_suggestions(
-        products=[{"title": "Catalog Product", "images": [{"src": "data:image/png;base64,AAAA"}]}],
-        model_env={"OLLAMA_API_KEY": "secret", "OLLAMA_MODEL_ID": "gpt-test", "OLLAMA_CLOUD_URL": "https://api.openai.com/v1"},
+        products=[
+            {
+                "title": "Catalog Product",
+                "images": [{"src": "data:image/png;base64,AAAA"}],
+            }
+        ],
+        model_env={
+            "OLLAMA_API_KEY": "secret",
+            "OLLAMA_MODEL_ID": "gpt-test",
+            "OLLAMA_CLOUD_URL": "https://api.openai.com/v1",
+        },
         trace_event=lambda **kwargs: traces.append(kwargs),
     )
 
     assert response.value == {"suggestions": []}
+    assert "response_format" not in agent_options
+    assert '"suggestions"' in captured_prompt["value"]
     request_trace = next(item for item in traces if item.get("phase") == "llm_request")
     assert request_trace["payload_preview"]["image_uris_count"] == 1
 
@@ -246,21 +286,27 @@ async def test_llm_receives_products_with_explicit_index_annotations(monkeypatch
         fake_run,
     )
     supabase = _FakeSupabase(
-        {"base_url": "http://localhost:11434/v1/", "model_id": "deepseek-r1:8b", "api_key": "s"}
+        {
+            "base_url": "http://localhost:11434/v1/",
+            "model_id": "deepseek-r1:8b",
+            "api_key": "s",
+        }
     )
     products = [
         {"title": "Product A"},
         {"title": "Product B"},
         {"title": "Product C"},
     ]
-    await execute(supabase=supabase, products=products, shop_domain="store.myshopify.com")
+    await execute(
+        supabase=supabase, products=products, shop_domain="store.myshopify.com"
+    )
 
     sent = captured["products"]
     assert len(sent) == 3
     for idx, item in enumerate(sent):
-        assert item["_product_index"] == idx, (
-            f"Product at position {idx} should have _product_index={idx}"
-        )
+        assert (
+            item["_product_index"] == idx
+        ), f"Product at position {idx} should have _product_index={idx}"
 
 
 @pytest.mark.asyncio
@@ -306,16 +352,95 @@ async def test_multi_product_llm_suggestions_preserve_distinct_indices(monkeypat
         fake_run,
     )
     supabase = _FakeSupabase(
-        {"base_url": "http://localhost:11434/v1/", "model_id": "deepseek-r1:8b", "api_key": "s"}
+        {
+            "base_url": "http://localhost:11434/v1/",
+            "model_id": "deepseek-r1:8b",
+            "api_key": "s",
+        }
     )
     products = [
         {"title": "Product A"},
         {"title": "Product B"},
         {"title": "Product C"},
     ]
-    suggestions = await execute(supabase=supabase, products=products, shop_domain="store.myshopify.com")
+    suggestions = await execute(
+        supabase=supabase, products=products, shop_domain="store.myshopify.com"
+    )
 
-    llm_suggestions = [s for s in suggestions if not s["category"].startswith("normalization_")]
+    llm_suggestions = [
+        s for s in suggestions if not s["category"].startswith("normalization_")
+    ]
     assert len(llm_suggestions) == 3
     indices = [s["product_index"] for s in llm_suggestions]
     assert indices == [0, 1, 2], f"Expected distinct indices [0,1,2], got {indices}"
+
+
+@pytest.mark.asyncio
+async def test_invalid_ai_response_retries_once_and_returns_explicit_failure(
+    monkeypatch,
+):
+    attempts = 0
+    traces = []
+
+    async def invalid_response(**_kwargs):
+        nonlocal attempts
+        attempts += 1
+        return SimpleNamespace(value={"unexpected": []}, text="")
+
+    monkeypatch.setattr(
+        "application.use_cases.intelligence_generate_suggestions.run_product_intelligence_suggestions",
+        invalid_response,
+    )
+    result = await execute(
+        supabase=_FakeSupabase(
+            {
+                "base_url": "http://localhost:11434/v1/",
+                "model_id": "deepseek-r1:8b",
+                "api_key": "secret",
+            }
+        ),
+        products=[
+            {
+                "id": "gid://shopify/Product/1",
+                "title": "Small Cotton Shirt",
+                "variants": [
+                    {"title": "Default Title", "sku": "SHIRT", "price": "10.00"}
+                ],
+            }
+        ],
+        shop_domain="store.myshopify.com",
+        include_status=True,
+        trace_event=lambda **event: traces.append(event),
+    )
+
+    assert attempts == 2
+    assert result["enhancement_status"] == "failed"
+    assert result["enhancement_error_code"] == "AI_RESPONSE_INVALID"
+    assert result["enhancement_attempts"] == 2
+    assert result["ai_suggestions_count"] == 0
+    assert result["derived_suggestions_count"] > 0
+    assert [event["phase"] for event in traces].count("suggestions_llm_retry") == 1
+    assert [event["phase"] for event in traces].count("suggestions_llm_failed") == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_model_config_is_reviewable_during_an_audit():
+    result = await execute(
+        supabase=_FakeSupabase(None),
+        products=[
+            {
+                "id": "gid://shopify/Product/1",
+                "title": "Small Cotton Shirt",
+                "variants": [
+                    {"title": "Default Title", "sku": "SHIRT", "price": "10.00"}
+                ],
+            }
+        ],
+        shop_domain="store.myshopify.com",
+        include_status=True,
+    )
+
+    assert result["enhancement_status"] == "failed"
+    assert result["enhancement_error_code"] == "AI_CONFIG_UNAVAILABLE"
+    assert result["enhancement_attempts"] == 0
+    assert result["derived_suggestions_count"] > 0

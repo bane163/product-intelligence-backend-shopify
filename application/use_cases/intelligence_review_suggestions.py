@@ -73,7 +73,7 @@ async def preview(
         live = _normalize_shopify_product(await shopify.get_product(gid)) if gid else {}
         fields: list[dict[str, Any]] = []
         for field, ai_value in patch.items():
-            normalized_field = "product_type" if field == "product_category" else field
+            normalized_field = {"product_category": "product_type", "description": "body_html"}.get(field, field)
             audited_value = audited_product.get(normalized_field)
             current_value = live.get(normalized_field)
             if field == "metafields":

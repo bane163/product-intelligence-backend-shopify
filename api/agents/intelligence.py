@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import uuid
 import re
 from datetime import datetime, timezone
@@ -37,7 +38,7 @@ async def _reserve_intelligence_credits(
     service = _get_billing_svc(ctx)
     billing_access = await require_paid_processing(request, service, shop_domain)
     active_model = ctx.supabase.llm_configs.get_active_llm_model_config(shop_domain)
-    model_id = str((active_model or {}).get("model_id") or "gpt-5.6-luna")
+    model_id = str((active_model or {}).get("model_id") or "gpt-6-luna")
     try:
         quote = quote_intelligence_operation(
             operation_type, products=products, model=model_id
@@ -196,14 +197,22 @@ async def get_product_intelligence_overview(
             status_code=400, detail="review view requires exactly one product"
         )
     tenant = require_shop_domain(request, payload.get("shop_domain"))
-    return {
-        "products": execute(
-            supabase=ctx.supabase,
-            product_ids=product_ids,
-            shop_domain=tenant,
-            view=view,
+    products = execute(
+        supabase=ctx.supabase, product_ids=product_ids, shop_domain=tenant, view=view,
+    )
+    if view == "review":
+        token = resolve_shop_access_token(request, shop_domain=tenant)
+        if not token:
+            raise HTTPException(status_code=401, detail="Reopen the app in Shopify Admin to restore your session.")
+        shopify = _resolve_shopify_client(
+            ctx=ctx, shop_domain=tenant, shop_access_token=token,
         )
-    }
+        for product in products:
+            product["current_fields"] = await shopify.get_product_review_fields(product["product_id"])
+            title = next((entry["value"] for entry in product["current_fields"] if entry["field"] == "title"), None)
+            if title is not None:
+                product["product_title"] = title
+    return {"products": products}
 
 
 def _default_unit_system_from_request(request: Request) -> str:
@@ -1281,6 +1290,8 @@ async def upsert_product_intelligence_normalization_settings(
         if isinstance(payload.get("settings"), dict)
         else payload
     )
+    if os.getenv("NODE_ENV", os.getenv("APP_ENV", os.getenv("ENVIRONMENT", ""))).lower() != "development":
+        settings_payload = {k: v for k, v in settings_payload.items() if k != "confidence_threshold"}
     current = ctx.supabase.intelligence.get_product_intelligence_normalization_settings(
         shop_domain=tenant,
     )

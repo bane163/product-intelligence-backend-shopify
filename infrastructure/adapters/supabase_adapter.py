@@ -520,6 +520,13 @@ class SupabaseAdapter(SupabaseNamespacedPort):
             shop_domain=shop_domain,
         )
 
+    def list_product_intelligence_product_suggestions(
+        self, *, product_id: str, shop_domain: str,
+    ) -> list[dict[str, Any]]:
+        return self._service.list_product_intelligence_product_suggestions(
+            product_id=product_id, shop_domain=shop_domain,
+        )
+
     def get_product_intelligence_suggestion(
         self,
         suggestion_id: str,
@@ -695,6 +702,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
         self,
         config_id: str,
         *,
+        shop_domain: str,
         name: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,
@@ -708,6 +716,7 @@ class SupabaseAdapter(SupabaseNamespacedPort):
     ) -> dict[str, Any] | None:
         return self._service.update_llm_model_config(
             config_id,
+            shop_domain=shop_domain,
             name=name,
             provider=provider,
             base_url=base_url,

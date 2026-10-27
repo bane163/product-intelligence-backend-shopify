@@ -805,6 +805,24 @@ class SupabaseRunsMixin:
         rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
         return rows[:normalized_limit]
 
+    def _activity_run_expired(self, row: dict[str, Any], *, now: datetime | None = None) -> bool:
+        if row.get("status") not in self.TERMINAL_WORKFLOW_STATUSES:
+            return False
+        timestamp = row.get("ended_at") or row.get("created_at")
+        try:
+            completed = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+            if completed.tzinfo is None:
+                completed = completed.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return False
+        if completed >= (now or datetime.now(timezone.utc)) - timedelta(days=30):
+            return False
+        return not any(
+            job.get("run_id") == row.get("run_id")
+            and job.get("status") not in self.TERMINAL_WORKFLOW_STATUSES
+            for job in getattr(self, "offload_jobs", {}).values()
+        )
+
     def list_runs(
         self,
         limit: int = 50,
@@ -819,6 +837,7 @@ class SupabaseRunsMixin:
                 dict(row)
                 for row in getattr(self, "llm_runs", {}).values()
                 if isinstance(row, dict)
+                and not self._activity_run_expired(row)
                 and (
                     not normalized_shop_domain
                     or self._normalize_shop_domain(row.get("shop_domain"))
@@ -835,7 +854,7 @@ class SupabaseRunsMixin:
             return rows
         try:
             query = (
-                client.table("llm_runs")
+                client.table("retained_activity_runs")
                 .select("*")
                 .order("created_at", desc=True)
                 .range(offset, offset + limit - 1)

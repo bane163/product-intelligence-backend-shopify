@@ -1,8 +1,11 @@
+from application.domain.catalog_fields import CatalogCurrentField
 from typing import Any, Dict, List, Optional, Protocol
 
 
 class ShopifyPort(Protocol):
     async def get_product(self, gid: str) -> Dict[str, Any]: ...
+
+    async def get_product_review_fields(self, gid: str) -> list[CatalogCurrentField]: ...
 
     async def get_product_metafields(
         self, gid: str, identifiers: list[Dict[str, str]]

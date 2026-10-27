@@ -1,3 +1,4 @@
+from application.domain.catalog_fields import CatalogCurrentField
 import shopify as _shopify
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,9 @@ class ShopifyAdapter:
 
     async def get_product(self, gid: str) -> Dict[str, Any]:
         return await self._client.get_product(gid)
+
+    async def get_product_review_fields(self, gid: str) -> list[CatalogCurrentField]:
+        return await self._client.get_product_review_fields(gid)
 
     async def get_product_metafields(
         self, gid: str, identifiers: list[Dict[str, str]]

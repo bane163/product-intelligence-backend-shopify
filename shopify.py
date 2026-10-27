@@ -1,3 +1,4 @@
+from application.domain.catalog_fields import CatalogCurrentField
 import logging
 import os
 import asyncio
@@ -432,6 +433,42 @@ class ShopifyClient:
     async def get_product(self, gid: str) -> Dict[str, Any]:
         query = _load_graphql("productQuery.graphql")
         return await self.graphql(query, {"id": gid})
+
+    async def get_product_review_fields(self, gid: str) -> list[CatalogCurrentField]:
+        from application.use_cases.intelligence_apply_suggestion import _normalize_shopify_product
+
+        response = await self.get_product(gid)
+        node = (response.get("data") or {}).get("node")
+        if response.get("errors") or not isinstance(node, dict):
+            raise RuntimeError("Could not load the current Shopify product. Refresh to retry.")
+        live = _normalize_shopify_product(response)
+        for connection, selection in (
+            ("metafields", "namespace key type value"),
+            ("variants", "id title sku price selectedOptions { name value }"),
+        ):
+            values: list[Dict[str, Any]] = []
+            cursor = None
+            while True:
+                query = ("query ReviewValues($id: ID!, $after: String) { node(id: $id) { ... on Product { "
+                         + connection + "(first: 250, after: $after) { nodes { " + selection
+                         + " } pageInfo { hasNextPage endCursor } } } } }")
+                page = await self.graphql(query, {"id": gid, "after": cursor})
+                data = ((page.get("data") or {}).get("node") or {}).get(connection)
+                if page.get("errors") or not isinstance(data, dict):
+                    raise RuntimeError("Could not load current Shopify values. Refresh to retry.")
+                values.extend(data.get("nodes") or [])
+                info = data.get("pageInfo") or {}
+                if not info.get("hasNextPage"):
+                    break
+                next_cursor = info.get("endCursor")
+                if not next_cursor or next_cursor == cursor:
+                    raise RuntimeError("Could not load all Shopify values. Refresh to retry.")
+                cursor = next_cursor
+            live[connection] = values
+        fields = ("title", "body_html", "vendor", "product_type", "seo_title", "seo_description", "tags", "metafields")
+        return [{"field": field, "value": live.get(field)} for field in fields] + [
+            {"field": "variant_operations", "value": {"options": live.get("options", []), "variants": live["variants"]}}
+        ]
 
     async def set_product_variant_matrix(
         self, gid: str, options: List[Dict[str, Any]], variants: List[Dict[str, Any]]

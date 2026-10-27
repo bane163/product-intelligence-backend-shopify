@@ -61,6 +61,17 @@ GPT_5_6_LUNA_V1 = OpenAIRate(
 )
 
 
+GPT_6_LUNA_V1 = OpenAIRate(
+    provider="openai", model="gpt-6-luna", version="openai:gpt-6-luna:v1",
+    effective_at=datetime(2026, 10, 26, tzinfo=timezone.utc),
+    input_per_million_usd=Decimal("0.10"),
+    cached_input_per_million_usd=Decimal("0.01"),
+    output_per_million_usd=Decimal("0.50"),
+)
+OPENAI_RATES_BY_MODEL = {rate.model: rate for rate in (GPT_5_6_LUNA_V1, GPT_6_LUNA_V1)}
+OPENAI_RATES_BY_VERSION = {rate.version: rate for rate in OPENAI_RATES_BY_MODEL.values()}
+
+
 @dataclass(frozen=True)
 class ProviderUsage:
     input_tokens: int = 0

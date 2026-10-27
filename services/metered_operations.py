@@ -11,6 +11,8 @@ from application.services.document_formats import classify_document
 from shared.credit_billing import (
     BillingRateUnavailable,
     GPT_5_6_LUNA_V1,
+    OPENAI_RATES_BY_MODEL,
+    OPENAI_RATES_BY_VERSION,
     ProviderUsage,
     calculate_cost,
     configured_platform_floors,
@@ -66,11 +68,11 @@ def quote_document_import(
     content: bytes,
     filename: str | None,
     content_type: str | None,
-    model: str = "gpt-5.6-luna",
+    model: str = "gpt-6-luna",
 ) -> tuple[Any, dict[str, int]]:
     pages, rows = _document_dimensions(content, filename, content_type)
     enforcement = os.getenv("CREDIT_ENFORCEMENT_ENABLED", "false").lower() == "true"
-    if model != GPT_5_6_LUNA_V1.model and enforcement:
+    if model not in OPENAI_RATES_BY_MODEL and enforcement:
         raise BillingRateUnavailable(f"No effective billing rate for openai/{model}")
     azure_rate_raw = os.getenv("AZURE_DOCUMENT_INTELLIGENCE_PAGE_RATE_USD", "").strip()
     azure_rate = Decimal(azure_rate_raw) if azure_rate_raw else (None if enforcement else Decimal("0"))
@@ -80,7 +82,7 @@ def quote_document_import(
     usage = estimate_usage("document_import", pages=pages, rows=rows)
     quote = calculate_cost(
         usage=usage,
-        openai_rate=GPT_5_6_LUNA_V1,
+        openai_rate=OPENAI_RATES_BY_MODEL.get(model, GPT_5_6_LUNA_V1),
         azure_page_rate_usd=azure_rate,
         platform_cost_usd=configured_platform_floors(os.environ)["document_import"],
     )
@@ -88,17 +90,17 @@ def quote_document_import(
 
 
 def quote_intelligence_operation(
-    operation_type: str, *, products: int, model: str = "gpt-5.6-luna"
+    operation_type: str, *, products: int, model: str = "gpt-6-luna"
 ) -> Any:
     enforcement = os.getenv("CREDIT_ENFORCEMENT_ENABLED", "false").lower() == "true"
-    if model != GPT_5_6_LUNA_V1.model and enforcement:
+    if model not in OPENAI_RATES_BY_MODEL and enforcement:
         raise BillingRateUnavailable(f"No effective billing rate for openai/{model}")
     floor_key = f"BILLING_PLATFORM_FLOOR_{operation_type.upper()}_USD"
     if enforcement and not os.getenv(floor_key, "").strip():
         raise BillingRateUnavailable(f"The calibrated {operation_type} platform floor is not configured")
     return calculate_cost(
         usage=estimate_usage(operation_type, products=products),
-        openai_rate=GPT_5_6_LUNA_V1,
+        openai_rate=OPENAI_RATES_BY_MODEL.get(model, GPT_5_6_LUNA_V1),
         azure_page_rate_usd=None,
         platform_cost_usd=configured_platform_floors(os.environ).get(operation_type, Decimal("0")),
     )
@@ -141,7 +143,7 @@ def settle_terminal_run(service: Any, run: dict[str, Any]) -> dict[str, Any] | N
     try:
         cost = calculate_cost(
             usage=usage,
-            openai_rate=GPT_5_6_LUNA_V1,
+            openai_rate=OPENAI_RATES_BY_VERSION.get(str(operation.get("rate_card_version") or GPT_5_6_LUNA_V1.version)),
             azure_page_rate_usd=(Decimal(azure_rate_raw) if azure_rate_raw else None),
             platform_cost_usd=configured_platform_floors(os.environ).get(
                 str(operation.get("operation_type") or ""), Decimal("0")

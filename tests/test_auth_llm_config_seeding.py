@@ -99,7 +99,7 @@ def test_get_active_llm_model_config_resolves_env_reference(
 @pytest.mark.asyncio
 async def test_legacy_auth_callback_is_not_mounted() -> None:
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers={"x-stockpile-service-key": "test-key", "x-shop-domain": "seed-shop.myshopify.com"}) as client:
         response = await client.get("/shopify/auth/callback")
     assert response.status_code == 404
 
@@ -107,7 +107,7 @@ async def test_legacy_auth_callback_is_not_mounted() -> None:
 @pytest.mark.asyncio
 async def test_legacy_auth_install_is_not_mounted() -> None:
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers={"x-stockpile-service-key": "test-key", "x-shop-domain": "seed-shop.myshopify.com"}) as client:
         response = await client.get("/shopify/auth/install")
     assert response.status_code == 404
 
@@ -172,8 +172,9 @@ async def test_llm_seed_endpoint_calls_backend_seed_logic(
 
     monkeypatch.setattr(auth, "_seed_default_llm_configs_on_install", fake_seed)
 
+    monkeypatch.setenv("INTERNAL_SERVICE_KEY", "test-key")
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers={"x-stockpile-service-key": "test-key", "x-shop-domain": "seed-shop.myshopify.com"}) as client:
         response = await client.post(
             "/agents/llm-configs/seed",
             json={
@@ -220,8 +221,9 @@ async def test_llm_seed_endpoint_uses_global_vault_fallback_and_is_idempotent(
         lambda name: "sk-global-vault" if name == "openai_api_key" else None,
     )
 
+    monkeypatch.setenv("INTERNAL_SERVICE_KEY", "test-key")
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with AsyncClient(transport=transport, base_url="http://testserver", headers={"x-stockpile-service-key": "test-key", "x-shop-domain": "seed-shop.myshopify.com"}) as client:
         first = await client.post(
             "/agents/llm-configs/seed",
             json={"shop_domain": "seed-shop.myshopify.com"},

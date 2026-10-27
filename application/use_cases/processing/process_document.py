@@ -136,7 +136,7 @@ async def execute(
         model_config = ModelConfiguration(
             provider="openai",
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model_id=os.getenv("OPENAI_MODEL", "gpt-5.6-luna"),
+            model_id=os.getenv("OPENAI_MODEL", "gpt-6-luna"),
             api_key=os.getenv("OPENAI_API_KEY", ""),
         )
         if shop_domain:

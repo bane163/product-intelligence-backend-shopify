@@ -19,7 +19,7 @@ _SUPABASE_CLIENT: Optional["Client"] = None
 def get_supabase() -> "Client":
     """Return a cached Supabase client initialized from env vars.
 
-    Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).
+    Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.
     Logs initialization attempts and failures for debugging.
     """
     global _SUPABASE_CLIENT
@@ -27,15 +27,13 @@ def get_supabase() -> "Client":
         return _SUPABASE_CLIENT
 
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get(
-        "SUPABASE_ANON_KEY"
-    )
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
         LOG.error(
             "Missing SUPABASE_URL or SUPABASE keys; url=%s, has_key=%s", url, bool(key)
         )
         raise RuntimeError(
-            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY) must be set"
+            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set"
         )
 
     if create_client is None:

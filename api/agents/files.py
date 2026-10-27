@@ -1235,7 +1235,7 @@ async def process_excel(
     active_model = ctx.supabase.llm_configs.get_active_llm_model_config(tenant)
     model_id = str(
         (active_model or {}).get("model_id")
-        or os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
+        or os.getenv("OPENAI_MODEL", "gpt-6-luna")
     )
     try:
         quote, quote_metadata = quote_document_import(

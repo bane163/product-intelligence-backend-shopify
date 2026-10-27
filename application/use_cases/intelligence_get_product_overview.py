@@ -42,27 +42,12 @@ def execute(
         shop_domain=shop_domain,
     )
     result_by_product = {str(row.get("product_id")): row for row in results}
-    audits = supabase.intelligence.list_product_intelligence_audits(
+    audits = [] if view == "review" else supabase.intelligence.list_product_intelligence_audits(
         shop_domain=shop_domain,
         limit=max(50, len(product_ids) * 3),
         offset=0,
     )
     audit_by_id = {str(row.get("audit_id") or ""): row for row in audits}
-    review_suggestions_by_product: dict[str, list[dict[str, Any]]] = {}
-    if view == "review":
-        artifacts = supabase.intelligence.list_product_intelligence_audit_artifacts(
-            audit_ids=[str(row.get("audit_id") or "") for row in audits],
-            shop_domain=shop_domain,
-        )
-        for artifact in artifacts:
-            for suggestion in artifact.get("suggestions", []):
-                if not isinstance(suggestion, dict):
-                    continue
-                product_id = str(suggestion.get("product_id") or "")
-                if product_id in product_ids:
-                    review_suggestions_by_product.setdefault(product_id, []).append(
-                        suggestion
-                    )
     output: list[dict[str, Any]] = []
     for product_id in product_ids:
         result = result_by_product.get(product_id)
@@ -81,7 +66,9 @@ def execute(
             if str(row.get("product_id") or "") == product_id
         ]
         suggestions = (
-            review_suggestions_by_product.get(product_id, latest_suggestions)
+            supabase.intelligence.list_product_intelligence_product_suggestions(
+                product_id=product_id, shop_domain=shop_domain,
+            )
             if view == "review"
             else latest_suggestions
         )
@@ -94,7 +81,7 @@ def execute(
             if isinstance(row.get("patch_payload"), dict)
         )
         health = _health(result)
-        health["requires_reaudit"] = bool(applied or reverted) if result else True
+        health["requires_reaudit"] = any(row.get("status") in {"applied", "reverted"} for row in latest_suggestions) if result else True
         audit = audit_by_id.get(audit_id)
         if view == "review" and audit_id:
             audit = supabase.intelligence.get_product_intelligence_audit(

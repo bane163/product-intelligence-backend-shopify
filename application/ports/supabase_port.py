@@ -284,6 +284,10 @@ class SupabasePort(Protocol):
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def list_product_intelligence_product_suggestions(
+        self, *, product_id: str, shop_domain: str,
+    ) -> list[dict[str, Any]]: ...
+
     def get_product_intelligence_suggestion(
         self,
         suggestion_id: str,
@@ -383,6 +387,7 @@ class SupabasePort(Protocol):
         self,
         config_id: str,
         *,
+        shop_domain: str,
         name: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,
@@ -692,6 +697,10 @@ class SupabaseIntelligenceNamespacePort(Protocol):
         shop_domain: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def list_product_intelligence_product_suggestions(
+        self, *, product_id: str, shop_domain: str,
+    ) -> list[dict[str, Any]]: ...
+
     def get_product_intelligence_suggestion(
         self,
         suggestion_id: str,
@@ -793,6 +802,7 @@ class SupabaseLlmConfigsNamespacePort(Protocol):
         self,
         config_id: str,
         *,
+        shop_domain: str,
         name: str | None = None,
         provider: str | None = None,
         base_url: str | None = None,

@@ -667,6 +667,30 @@ class SupabaseIntelligenceMixin:
             and str(item.get("shop_domain") or "").strip().lower() == tenant
         ]
 
+    def list_product_intelligence_product_suggestions(
+        self, *, product_id: str, shop_domain: str,
+    ) -> list[dict[str, Any]]:
+        """Read the complete product trail; PostgREST caps each response page."""
+        tenant = str(shop_domain or "").strip().lower()
+        if not tenant:
+            return []
+        client = self._get_supabase_client()
+        if client:
+            rows: list[dict[str, Any]] = []
+            offset = 0
+            while True:
+                page = (client.table("product_intelligence_suggestions").select("*")
+                        .eq("shop_domain", tenant).eq("product_id", product_id)
+                        .order("created_at").order("suggestion_id")
+                        .range(offset, offset + 499).execute().data or [])
+                rows.extend(page)
+                if not page:
+                    return rows
+                offset += len(page)
+        return [dict(row) for row in self.product_intelligence_suggestions.values()
+                if row.get("product_id") == product_id
+                and str(row.get("shop_domain") or "").strip().lower() == tenant]
+
     def get_product_intelligence_suggestion(
         self,
         suggestion_id: str,

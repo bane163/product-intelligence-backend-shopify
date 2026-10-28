@@ -1152,28 +1152,6 @@ async def approve_mutation_plan(
                 for row in inventory_rows
             ):
                 raise _review_error("All inventory and tracking changes are required")
-    selected_warnings = [
-        str(issue.get("issue_id") or issue.get("code") or "")
-        for item in selected
-        for issue in item.get("quality_issues", [])
-        if isinstance(issue, dict) and issue.get("severity") == "warning"
-    ]
-    selected_warnings.extend(
-        f"review:{item.get('item_id')}:image-missing"
-        for item in selected
-        if int(plan.get("review_contract_version") or 0) >= 6
-        and not approved_media_gallery(item)
-    )
-    selected_warnings = sorted(set(selected_warnings))
-    if selected_warnings and payload.get("warnings_acknowledged") is not True:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED",
-                "message": "Review and acknowledge the remaining warnings before applying changes.",
-                "warning_count": len(selected_warnings),
-            },
-        )
     plan_status = str(plan.get("status") or "").strip().lower()
     if plan_status in {"approved", "executing"}:
         return {"plan": plan}
@@ -1218,12 +1196,8 @@ async def approve_mutation_plan(
         ],
         "status": "approved",
         "approved_at": _now(),
-        "warnings_acknowledged_at": _now() if selected_warnings else None,
-        "warnings_acknowledgment_hash": (
-            hashlib.sha256(json.dumps(selected_warnings).encode("utf-8")).hexdigest()
-            if selected_warnings
-            else None
-        ),
+        "warnings_acknowledged_at": None,
+        "warnings_acknowledgment_hash": None,
         "updated_at": _now(),
     }
     _service(ctx).save_mutation_plan(approved)

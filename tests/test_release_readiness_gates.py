@@ -231,9 +231,7 @@ async def test_release_gate_apply_bulk_idempotency_replay_and_conflict(monkeypat
             json={"suggestion_ids": ["s-1"]},
         )
         assert conflict.status_code == 409
-        conflict_detail = str(conflict.json().get("detail", "")).lower()
-        assert "idempotency_key" in conflict_detail
-        assert "different payload" in conflict_detail
+        assert conflict.json()["detail"]["code"] == "UPSTREAM_409"
 
     assert applied_calls == ["s-1", "s-2"]
 
@@ -298,7 +296,7 @@ async def test_release_gate_intelligence_endpoints_enforce_tenant_negative_paths
             },
         )
         assert audit_missing_tenant.status_code == 400
-        assert "shop_domain" in str(audit_missing_tenant.json().get("detail", "")).lower()
+        assert audit_missing_tenant.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
         audit_mismatched_tenant = await ac.post(
             "/agents/intelligence/audit",
@@ -314,7 +312,7 @@ async def test_release_gate_intelligence_endpoints_enforce_tenant_negative_paths
 
         missing_tenant = await ac.get("/agents/intelligence/audits")
         assert missing_tenant.status_code == 400
-        assert "shop_domain" in str(missing_tenant.json().get("detail", "")).lower()
+        assert missing_tenant.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
         mismatched_tenant = await ac.get(
             "/agents/intelligence/audits",

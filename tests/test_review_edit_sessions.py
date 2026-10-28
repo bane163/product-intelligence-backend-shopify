@@ -858,7 +858,7 @@ async def test_missing_required_sku_and_price_can_be_edited_and_applied(monkeypa
         "cell_id": "",
         "value_path": required_rows["price"]["value_path"],
         "code": "INVALID_REVIEW_VALUE",
-        "message": "This field is required.",
+        "message": "Enter a valid price using numbers and a decimal point.",
         "remedy": "edit",
     }
     assert edited.status_code == 200, edited.text
@@ -1169,7 +1169,7 @@ async def test_grid_apply_keeps_unrelated_stale_draft_conflict():
     assert applied.status_code == 409
     assert applied.json()["detail"] == {
         "code": "REVIEW_REQUIRED",
-        "message": "Draft revision is stale",
+        "message": "Shopify data has changed. Refresh the review before applying these changes.",
     }
 
 
@@ -1288,7 +1288,7 @@ async def test_invalid_value_operations_return_atomic_structured_422():
         "cell_id": "",
         "value_path": "title",
         "code": "INVALID_REVIEW_VALUE",
-        "message": "This field is required.",
+        "message": "Enter a product title.",
         "remedy": "edit",
     }]
     active = resumed.json()["session"]

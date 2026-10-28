@@ -105,4 +105,4 @@ async def test_review_endpoint_does_not_fall_back_to_another_shops_client(monkey
     async with AsyncClient(transport=ASGITransport(app=app), base_url='http://testserver') as client:
         response = await client.post('/agents/intelligence/products/overview', headers={'x-shop-domain': 'no-token.myshopify.com'}, json={'view': 'review', 'product_ids': ['gid://shopify/Product/123456789']})
     assert response.status_code == 401
-    assert 'Reopen the app' in response.json()['detail']
+    assert 'Reopen the app' in response.json()['detail']['message']

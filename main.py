@@ -1,11 +1,14 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import logging
+import json
 import os
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from shared.public_errors import safe_detail, sanitize_payload
 from shared.observability import (
     bind_observability_context,
     resolve_request_and_correlation_ids,
@@ -163,7 +166,50 @@ async def attach_observability_context(request: Request, call_next):
     with bind_observability_context(
         request_id=request_id, correlation_id=correlation_id
     ):
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception(
+                "request_failed request_id=%s correlation_id=%s",
+                request_id,
+                correlation_id,
+            )
+            response = JSONResponse({"detail": safe_detail({}, 500)}, status_code=500)
+        if "application/json" in response.headers.get("content-type", ""):
+            if hasattr(response, "body_iterator"):
+                body = b"".join(
+                    [
+                        chunk if isinstance(chunk, bytes) else chunk.encode()
+                        async for chunk in response.body_iterator
+                    ]
+                )
+            else:
+                body = response.body
+            try:
+                payload = json.loads(body)
+                if response.status_code >= 400:
+                    logger.warning(
+                        "public_request_failure request_id=%s correlation_id=%s status=%s detail=%r",
+                        request_id,
+                        correlation_id,
+                        response.status_code,
+                        payload,
+                    )
+                    payload = {"detail": safe_detail(payload, response.status_code)}
+                else:
+                    payload = sanitize_payload(payload)
+                headers = dict(response.headers)
+                headers.pop("content-length", None)
+                response = JSONResponse(
+                    payload,
+                    status_code=response.status_code,
+                    headers=headers,
+                    background=response.background,
+                )
+            except (ValueError, TypeError):
+                response = JSONResponse(
+                    {"detail": safe_detail({}, 502)}, status_code=502
+                )
     response.headers["x-request-id"] = request_id
     response.headers["x-correlation-id"] = correlation_id
     return response

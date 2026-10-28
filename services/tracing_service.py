@@ -1,3 +1,4 @@
+from shared.public_errors import sanitize_payload
 import asyncio
 import json
 from collections import defaultdict, deque
@@ -65,14 +66,14 @@ class TracingService(TracingServiceInterface):
         try:
             yield "retry: 1000\n\n"
             for event in self.run_history.get(run_id, []):
-                yield f"data: {json.dumps(event)}\n\n"
+                yield f"data: {json.dumps(sanitize_payload(event))}\n\n"
 
             while True:
                 if run_id in self.run_done and queue.empty():
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=10)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield f"data: {json.dumps(sanitize_payload(event))}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
         finally:

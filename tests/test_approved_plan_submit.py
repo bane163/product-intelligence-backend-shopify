@@ -399,8 +399,10 @@ async def test_bulk_result_layers_preserve_shopify_errors_and_report_malformed_r
     assert response.status_code == 200
     result = response.json()["results"][0]
     assert result["status"] == "failed"
-    assert expected in result["errors"][0]["message"]
-    assert expected in response.json()["error"]
+    assert expected not in result["errors"][0]["message"]
+    assert result["errors"][0]["message"] == "Check this value and enter a valid value before saving."
+    assert expected not in response.json()["error"]
+    assert response.json()["error"] == "Something went wrong. Please try again."
 
 
 @pytest.mark.asyncio

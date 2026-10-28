@@ -11,7 +11,7 @@ async def test_list_runs_requires_shop_domain_header():
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         response = await ac.get("/agents/runs")
     assert response.status_code == 400
-    assert "shop_domain" in response.text
+    assert response.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -215,7 +215,7 @@ async def test_delete_run_rejects_active_runs(monkeypatch):
         )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Run cannot be deleted from status 'running'"
+    assert response.json()["detail"]["code"] == "UPSTREAM_409"
     assert delete_called["value"] is False
 
 
@@ -273,7 +273,7 @@ async def test_run_diagnostics_requires_shop_domain_header():
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         response = await ac.get("/agents/runs/run-diag/diagnostics")
     assert response.status_code == 400
-    assert "shop_domain" in response.text
+    assert response.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -348,7 +348,7 @@ async def test_run_diagnostics_includes_offload_and_retry_metadata(monkeypatch):
         "run_attempt": 3,
         "run_status": "failed",
         "failure_code": "import_failed",
-        "failure_message": "Worker failed",
+        "failure_message": "Something went wrong. Please try again.",
         "last_completed_step": "extract_products",
         "resume_token_present": True,
         "retryable_offload_jobs": 1,

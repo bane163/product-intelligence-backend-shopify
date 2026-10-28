@@ -415,7 +415,7 @@ async def test_upload_rejects_unsupported_file_type():
         }
         response = await ac.post("/agents/upload", files=files)
         assert response.status_code == 415
-        assert "Unsupported file type" in response.json()["detail"]
+        assert response.json()["detail"]["code"] == "UPSTREAM_415"
 
 
 @pytest.mark.asyncio
@@ -443,7 +443,7 @@ async def test_upload_csv_conversion_failure_returns_500_and_skips_save(monkeypa
         files = {"file": ("products.csv", io.BytesIO(b"a,b\n1,2\n"), "text/csv")}
         r = await ac.post("/agents/upload", files=files)
         assert r.status_code == 500
-        assert "CSV conversion failed" in r.json()["detail"]
+        assert "CSV conversion failed" not in str(r.json()["detail"])
         assert save_called["value"] is False
 
 
@@ -498,7 +498,7 @@ async def test_bulk_upload_returns_per_file_results_with_partial_failure():
         assert len(payload["errors"]) == 1
         assert payload["uploaded"][0]["filename"] == "good.xlsx"
         assert payload["errors"][0]["filename"] == "bad.zip"
-        assert "Unsupported file type" in payload["errors"][0]["error"]
+        assert payload["errors"][0]["error"] == "Something went wrong. Please try again."
 
 
 @pytest.mark.asyncio
@@ -907,7 +907,7 @@ async def test_source_highlight_rejects_invalid_source_refs_json():
             data={"source_refs_json": "{bad json"},
         )
         assert highlighted.status_code == 422
-        assert "source_refs_json" in highlighted.json()["detail"]
+        assert highlighted.json()["detail"]["code"] == "UPSTREAM_422"
 
 
 def test_select_highlight_page_candidate_prefers_text_over_image():
@@ -984,7 +984,7 @@ async def test_source_highlight_rejects_pdf_source_refs(monkeypatch):
             },
         )
         assert highlighted.status_code == 422
-        assert "only for spreadsheet" in highlighted.json()["detail"]
+        assert highlighted.json()["detail"]["code"] == "UPSTREAM_422"
 
 
 @pytest.mark.asyncio
@@ -1030,7 +1030,7 @@ async def test_source_highlight_rejects_non_spreadsheet_refs_without_page(monkey
             },
         )
         assert highlighted.status_code == 422
-        assert "only for spreadsheet" in highlighted.json()["detail"]
+        assert highlighted.json()["detail"]["code"] == "UPSTREAM_422"
         assert "targets" not in captured
 
 
@@ -1083,7 +1083,7 @@ async def test_source_highlight_rejects_non_spreadsheet_document(monkeypatch):
             data={"source_refs_json": json.dumps([{"page": 1, "value": "Materials"}])},
         )
         assert highlighted.status_code == 422
-        assert "only for spreadsheet" in highlighted.json()["detail"]
+        assert highlighted.json()["detail"]["code"] == "UPSTREAM_422"
         assert conversion_called["value"] is False
 
 
@@ -1991,7 +1991,7 @@ async def test_batch_extract_submit_contract_returns_expected_shape_with_partial
         assert error["index"] == 1
         assert error["file_id"] == "missing-file-id"
         assert error["code"] == "file_not_found"
-        assert "File not found" in error["error"]
+        assert error["error"] == "Something went wrong. Please try again."
 
 
 @pytest.mark.asyncio
@@ -2036,7 +2036,7 @@ async def test_batch_extract_submit_requires_shop_domain(monkeypatch):
             },
         )
         assert response.status_code == 400
-        assert "shop_domain" in response.text
+        assert response.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -2361,7 +2361,7 @@ async def test_batch_extract_submit_reports_per_file_queue_failure(monkeypatch):
         assert body["accepted"][0]["file_id"] == first_file_id
         assert body["errors"][0]["file_id"] == failing_file_id["value"]
         assert body["errors"][0]["code"] == "queue_failed"
-        assert "offload_jobs table missing" in body["errors"][0]["error"]
+        assert "offload_jobs table missing" not in body["errors"][0]["error"]
         assert len(queued_jobs) == 1
         assert queued_jobs[0]["file_id"] == first_file_id
 
@@ -2926,7 +2926,7 @@ async def test_import_offload_returns_explicit_error_when_queue_persistence_fail
             data={"file_id": file_id, "run_id": "run-import-failfast", "offload": "true"},
         )
         assert response.status_code == 500
-        assert "offload_jobs table missing" in response.json()["detail"]
+        assert "offload_jobs table missing" not in str(response.json()["detail"])
 
 
 @pytest.mark.asyncio
@@ -2969,7 +2969,7 @@ async def test_import_offload_returns_explicit_error_when_lifecycle_persistence_
             data={"file_id": file_id, "run_id": "run-import-lifecycle-failfast", "offload": "true"},
         )
         assert response.status_code == 500
-        assert "lifecycle columns missing" in response.json()["detail"]
+        assert "lifecycle columns missing" not in str(response.json()["detail"])
 
 
 @pytest.mark.asyncio
@@ -3018,7 +3018,7 @@ async def test_submit_offload_returns_explicit_error_when_lifecycle_persistence_
             },
         )
         assert response.status_code == 500
-        assert "lifecycle columns missing" in response.json()["detail"]
+        assert "lifecycle columns missing" not in str(response.json()["detail"])
 
 
 @pytest.mark.asyncio
@@ -3064,7 +3064,7 @@ async def test_product_drafts_list_requires_shop_domain_header():
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.get("/agents/product-drafts", headers={"x-shop-domain": ""})
     assert response.status_code == 400
-    assert "shop_domain" in response.text
+    assert response.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -3099,7 +3099,7 @@ async def test_submitted_documents_list_requires_shop_domain_header():
     async with AsyncClient(transport=transport, base_url="http://testserver", headers=TEST_SHOP_HEADERS) as ac:
         response = await ac.get("/agents/submitted-documents", headers={"x-shop-domain": ""})
     assert response.status_code == 400
-    assert "shop_domain" in response.text
+    assert response.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -3367,7 +3367,7 @@ async def test_submitted_document_detail_includes_failed_submit_context():
     assert response.status_code == 200
     document = response.json()["submitted_document"]
     assert document["submit_status"] == "failed"
-    assert document["submit_error"] == "Shopify bulk mutation failed"
+    assert document["submit_error"] == "Something went wrong. Please try again."
     assert document["processing_message"] == "Bulk mutation returned user errors"
 
 
@@ -3570,7 +3570,7 @@ async def test_run_and_get_product_intelligence_audit(monkeypatch):
             f"/agents/intelligence/suggestions/{suggestion_id}/revert"
         )
         assert revert_single.status_code == 409
-        assert "Revert conflict" in str(revert_single.json()["detail"])
+        assert revert_single.json()["detail"]["code"] == "UPSTREAM_409"
 
         remaining_ids = [
             row["suggestion_id"]
@@ -3684,7 +3684,7 @@ async def test_catalog_health_search_returns_recoverable_error_without_shop_sess
         )
 
     assert response.status_code == 503
-    assert "Reopen Stockpile from Shopify Admin" in response.json()["detail"]
+    assert response.json()["detail"]["code"] == "SHOPIFY_REAUTH_REQUIRED"
 
 
 @pytest.mark.asyncio
@@ -4288,7 +4288,7 @@ async def test_apply_bulk_idempotency_key_conflict_on_payload_mismatch(monkeypat
             json={"suggestion_ids": ["s-1", "s-2"]},
         )
         assert second.status_code == 409
-        assert "idempotency_key" in str(second.json().get("detail", "")).lower()
+        assert second.json()["detail"]["code"] == "UPSTREAM_409"
 
     assert applied_calls == ["s-1"]
 
@@ -4508,4 +4508,4 @@ async def test_revert_blocked_for_non_reversible_missing_original_field(monkeypa
             f"/agents/intelligence/suggestions/{suggestion_id}/revert"
         )
         assert revert_single.status_code == 400
-        assert "Auto-revert is unavailable" in revert_single.json()["detail"]
+        assert revert_single.json()["detail"]["code"] == "UPSTREAM_400"

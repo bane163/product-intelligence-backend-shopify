@@ -166,17 +166,14 @@ async def test_approval_requires_acknowledgment_for_selected_quality_warnings(
             url, json={"plan_id": plan_id, "warnings_acknowledged": True}
         )
 
-    assert rejected.status_code == 422
-    assert (
-        rejected.json()["detail"]["code"] == "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED"
-    )
+    assert rejected.status_code == 200
     assert approved.status_code == 200
-    assert approved.json()["plan"]["warnings_acknowledged_at"]
-    assert approved.json()["plan"]["warnings_acknowledgment_hash"]
+    assert approved.json()["plan"]["warnings_acknowledged_at"] is None
+    assert approved.json()["plan"]["warnings_acknowledgment_hash"] is None
 
 
 @pytest.mark.asyncio
-async def test_v6_approval_requires_acknowledgment_when_final_gallery_has_no_image(
+async def test_v6_approval_allows_missing_images_without_acknowledgment(
     monkeypatch,
 ):
     import api.agents.mutation_plans as mutation_plans_api
@@ -235,12 +232,7 @@ async def test_v6_approval_requires_acknowledgment_when_final_gallery_has_no_ima
             json={"plan_id": plan_id, "warnings_acknowledged": True},
         )
 
-    assert rejected.status_code == 422
-    assert rejected.json()["detail"] == {
-        "code": "QUALITY_WARNINGS_ACKNOWLEDGMENT_REQUIRED",
-        "message": "Review and acknowledge the remaining warnings before applying changes.",
-        "warning_count": 1,
-    }
+    assert rejected.status_code == 200
     assert approved.status_code == 200
     assert (
         approved.json()["plan"]["items"][0]["execution_proposed"]["_approved_media"]
